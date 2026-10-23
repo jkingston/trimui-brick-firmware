@@ -65,6 +65,8 @@ $bb tar -xzf /tmp/{token}.tar.gz -C "$work/payload"
 $bb mount /dev/mmcblk0p1 "$mountpoint"
 mounted=1
 [ -f "$current/Image" ] && [ -f "$current/brick-usb.dtb" ] && [ -f "$current/initramfs.cpio.gz" ]
+[ -f "$current/manifest.json" ] && [ -f "$current/SHA256SUMS" ]
+(cd "$current" && $bb sha256sum -c SHA256SUMS)
 [ ! -e "$stage" ]
 # Retire only a prior deployment's verified rollback directory.
 if [ -d "$previous" ]; then
@@ -79,7 +81,11 @@ $bb cp "$work/payload/"* "$stage/"
 $bb sync
 $bb mv "$current" "$previous"
 if ! $bb mv "$stage" "$current"; then
- $bb mv "$previous" "$current"
+ if ! $bb mv "$previous" "$current"; then
+  # Preserve both complete copies if restoring the directory also fails.
+  staged=0
+  echo "Restore failed; retained brick-previous and brick-next" >&2
+ fi
  exit 1
 fi
 staged=0
@@ -94,6 +100,15 @@ echo UPDATE_VERIFIED
 '''
 
 
+def verify_boot_manifest(actual, expected):
+    for field in ('firmware', 'kernel', 'config_sha256'):
+        if actual[field] != expected[field]:
+            raise ProtocolError(f'Running rootfs has different {field} metadata')
+    for name in ('Image', 'sun50i-a133-trimui-brick.dtb'):
+        if actual['files'][name]['sha256'] != expected['files'][name]['sha256']:
+            raise ProtocolError(f'Running rootfs describes a different {name}')
+
+
 def wait_for_boot(port, expected, timeout):
     deadline = time.monotonic() + timeout
     last = None
@@ -101,12 +116,11 @@ def wait_for_boot(port, expected, timeout):
         try:
             with Console(port, timeout=5) as console:
                 result = json.loads(console.checked('/bin/busybox cat /etc/brick-build.json'))
-                if result['files']['Image']['sha256'] != expected['files']['Image']['sha256']:
-                    raise ProtocolError('Running rootfs describes a different kernel image')
+                verify_boot_manifest(result, expected)
                 release = console.checked('/bin/busybox uname -r').decode().strip()
                 if release != result['kernel']['release']:
                     raise ProtocolError('Running kernel release does not match the rootfs')
-                print(console.checked('uname -r; cat /sys/kernel/debug/pvr/status 2>/dev/null || true').decode(), end='')
+                print(console.checked('/bin/busybox uname -r; /bin/busybox cat /sys/kernel/debug/pvr/status 2>/dev/null || true').decode(), end='')
                 return
         except (OSError, TimeoutError, ProtocolError, ValueError, KeyError) as error:
             last = error

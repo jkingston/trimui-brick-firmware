@@ -51,3 +51,140 @@ class PackageTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             deploy.package(self.images, self.stage)
         self.assertFalse((self.stage / 'update.tar.gz').exists())
+
+
+class InstallTests(unittest.TestCase):
+    """Run the generated installer against real files, with simulated mounts."""
+    def setUp(self):
+        import os
+        import shutil
+        self.env = os.environ.copy()
+        self.busybox = shutil.which('busybox')
+        if not self.busybox:
+            self.skipTest('busybox is required for installer integration tests')
+        self.directory = tempfile.TemporaryDirectory(prefix='brick-installer-')
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.sd = self.root / 'card'
+        self.sd.mkdir()
+        self.tmp = self.root / 'tmp'
+        self.tmp.mkdir()
+        (self.root / 'type').write_text('SD\n')
+        (self.root / 'compatible').write_bytes(b'trimui,brick\0allwinner,sun50i-a133\0')
+        (self.root / 'mounts').write_text('')
+        self.current = self.sd / 'brick-diag'
+        self.previous = self.sd / 'brick-previous'
+        self.write_payload(self.current, b'current')
+        self.write_payload(self.previous, b'previous')
+        payload = self.root / 'payload'
+        self.write_payload(payload, b'new')
+        with tarfile.open(self.tmp / 'test.tar.gz', 'w:gz') as archive:
+            for file in payload.iterdir():
+                archive.add(file, arcname=file.name)
+        self.env.update(TEST_SD=str(self.sd), REAL_BB=self.busybox)
+        shim = self.root / 'busybox'
+        shim.write_text('''#!/bin/sh
+command=$1
+shift
+case "$command" in
+ mount) rmdir "$2" && ln -s "$TEST_SD" "$2"; exit $? ;;
+ umount) rm "$1" && mkdir "$1"; exit $? ;;
+ cp) if [ "${FAIL_ACTION:-}" = copy ]; then echo INJECTED-copy >&2; exit 1; fi ;;
+ mv)
+  case "$1:${FAIL_ACTION:-}" in
+   */brick-next:publish|*/brick-next:publish-and-restore|*/brick-previous:publish-and-restore) echo INJECTED-rename >&2; exit 1 ;;
+  esac ;;
+esac
+exec "$REAL_BB" "$command" "$@"
+''')
+        shim.chmod(0o755)
+        script = deploy.install_script('test')
+        replacements = {'/tmp/': str(self.tmp) + '/', '/bin/busybox': str(shim),
+                        '/sys/class/block/mmcblk0/device/type': str(self.root / 'type'),
+                        '/sys/firmware/devicetree/base/compatible': str(self.root / 'compatible'),
+                        '/proc/mounts': str(self.root / 'mounts')}
+        for old, new in replacements.items():
+            script = script.replace(old, new)
+        self.script = self.root / 'install.sh'
+        self.script.write_text(script)
+
+    def write_payload(self, directory, content):
+        directory.mkdir()
+        lines = []
+        for name in deploy.PAYLOAD.values():
+            (directory / name).write_bytes(content)
+            lines.append(f'{hashlib.sha256(content).hexdigest()}  {name}\n')
+        (directory / 'SHA256SUMS').write_text(''.join(lines))
+        (directory / 'manifest.json').write_text('{}\n')
+
+    def run_installer(self, failure=''):
+        import subprocess
+        self.env['FAIL_ACTION'] = failure
+        return subprocess.run([self.busybox, 'sh', str(self.script)], env=self.env,
+                              capture_output=True, text=True, timeout=15)
+
+    def assert_clean(self):
+        self.assertFalse((self.tmp / '.brick-update-lock').exists())
+        self.assertFalse((self.sd / 'brick-next').exists())
+
+    def test_success_retains_current_as_previous(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('UPDATE_VERIFIED', result.stdout)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'new')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
+        self.assert_clean()
+
+    def test_corrupt_current_preserves_good_previous(self):
+        (self.current / 'Image').write_bytes(b'corrupt')
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assert_clean()
+
+    def test_copy_failure_preserves_current(self):
+        result = self.run_installer('copy')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('INJECTED-copy', result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assert_clean()
+
+    def test_publish_failure_restores_current(self):
+        result = self.run_installer('publish')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('INJECTED-rename', result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assert_clean()
+
+    def test_restore_failure_keeps_both_complete_payloads(self):
+        result = self.run_installer('publish-and-restore')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Restore failed', result.stderr)
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.sd / 'brick-next' / 'Image').read_bytes(), b'new')
+        self.assertFalse((self.tmp / '.brick-update-lock').exists())
+
+    def test_non_sd_storage_is_refused(self):
+        (self.root / 'type').write_text('MMC\n')
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assert_clean()
+
+
+class BootIdentityTests(unittest.TestCase):
+    def test_changed_dtb_or_rootfs_is_not_accepted_as_same_kernel(self):
+        import copy
+        expected = {'firmware': {'commit': 'firmware-a', 'dirty': False},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a',
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        deploy.verify_boot_manifest(copy.deepcopy(expected), expected)
+        for field in ('firmware', 'kernel', 'config_sha256', 'files'):
+            actual = copy.deepcopy(expected)
+            if field == 'files':
+                actual[field]['sun50i-a133-trimui-brick.dtb']['sha256'] = 'old-dtb'
+            else:
+                actual[field] = 'old-build'
+            with self.subTest(field=field), self.assertRaises(deploy.ProtocolError):
+                deploy.verify_boot_manifest(actual, expected)
