@@ -72,6 +72,7 @@ class InstallTests(unittest.TestCase):
         (self.root / 'type').write_text('SD\n')
         (self.root / 'compatible').write_bytes(b'trimui,brick\0allwinner,sun50i-a133\0')
         (self.root / 'mounts').write_text('')
+        (self.root / 'device').write_text('179:1\n')
         self.current = self.sd / 'brick-diag'
         self.previous = self.sd / 'brick-previous'
         self.write_payload(self.current, b'current')
@@ -102,7 +103,8 @@ exec "$REAL_BB" "$command" "$@"
         replacements = {'/tmp/': str(self.tmp) + '/', '/bin/busybox': str(shim),
                         '/sys/class/block/mmcblk0/device/type': str(self.root / 'type'),
                         '/sys/firmware/devicetree/base/compatible': str(self.root / 'compatible'),
-                        '/proc/mounts': str(self.root / 'mounts')}
+                        '/proc/self/mountinfo': str(self.root / 'mounts'),
+                        '/sys/class/block/mmcblk0p1/dev': str(self.root / 'device')}
         for old, new in replacements.items():
             script = script.replace(old, new)
         self.script = self.root / 'install.sh'
@@ -162,6 +164,20 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assertEqual((self.sd / 'brick-next' / 'Image').read_bytes(), b'new')
         self.assertFalse((self.tmp / '.brick-update-lock').exists())
+
+    def test_already_mounted_card_is_refused(self):
+        (self.root / 'mounts').write_text('36 25 179:1 / /other rw - vfat /dev/disk/by-label/BOOT rw\n')
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assert_clean()
+
+    def test_corrupt_previous_is_not_deleted(self):
+        (self.previous / 'Image').write_bytes(b'corrupt')
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'corrupt')
+        self.assert_clean()
 
     def test_non_sd_storage_is_refused(self):
         (self.root / 'type').write_text('MMC\n')

@@ -60,8 +60,13 @@ trap cleanup EXIT
 $bb mkdir -p "$work/payload" "$mountpoint"
 $bb tar -xzf /tmp/{token}.tar.gz -C "$work/payload"
 (cd "$work/payload" && $bb sha256sum -c SHA256SUMS)
-# Refuse another mount of the same card.
-! $bb grep -q '^/dev/mmcblk0p1 ' /proc/mounts
+# Match the device number so mounts through UUID/label aliases also count.
+device=$($bb cat /sys/class/block/mmcblk0p1/dev)
+mounted_device=$($bb awk -v device="$device" '$3 == device {{ print $3 }}' /proc/self/mountinfo)
+if [ -n "$mounted_device" ]; then
+ echo "SD partition is already mounted" >&2
+ exit 1
+fi
 $bb mount /dev/mmcblk0p1 "$mountpoint"
 mounted=1
 [ -f "$current/Image" ] && [ -f "$current/brick-usb.dtb" ] && [ -f "$current/initramfs.cpio.gz" ]
