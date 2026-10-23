@@ -96,10 +96,10 @@ def wait_for_boot(port, expected, timeout):
     while time.monotonic() < deadline:
         try:
             with Console(port, timeout=5) as console:
-                result = json.loads(console.checked('cat /etc/brick-build.json'))
+                result = json.loads(console.checked('/bin/busybox cat /etc/brick-build.json'))
                 if result['files']['Image']['sha256'] != expected['files']['Image']['sha256']:
                     raise ProtocolError('Running rootfs describes a different kernel image')
-                release = console.checked('uname -r').decode().strip()
+                release = console.checked('/bin/busybox uname -r').decode().strip()
                 if release != result['kernel']['release']:
                     raise ProtocolError('Running kernel release does not match the rootfs')
                 print(console.checked('uname -r; cat /sys/kernel/debug/pvr/status 2>/dev/null || true').decode(), end='')
@@ -127,10 +127,10 @@ def main():
             console.upload(archive, '/tmp/' + token + '.tar.gz', raw=True, timeout=args.timeout)
             console.upload(script, '/tmp/' + token + '.sh')
             print(console.checked('/bin/sh ' + shlex.quote('/tmp/' + token + '.sh'), timeout=args.timeout).decode(), end='')
-            console.checked('rm ' + shlex.quote('/tmp/' + token + '.sh'))
+            console.checked('/bin/busybox rm ' + shlex.quote('/tmp/' + token + '.sh'))
             if args.no_reboot:
                 return
-            console.checked('(sleep 2; reboot -f) >/dev/null 2>&1 &')
+            console.checked('(/bin/busybox sleep 2; /bin/busybox reboot -f) >/dev/null 2>&1 &')
         time.sleep(3)
         wait_for_boot(args.port, manifest, args.timeout)
 
