@@ -325,7 +325,7 @@ def main(argv=None):
     upload = sub.add_parser('upload')
     upload.add_argument('local', type=Path)
     upload.add_argument('destination')
-    upload.add_argument('--raw', action='store_true', help='Use bounded binary transfer (requires target stty)')
+    upload.add_argument('--raw', action='store_true', help='Use bounded binary transfer (requires brick-receive)')
     upload.add_argument('--mode', default='0600')
     upload.add_argument('--transfer-timeout', type=float, default=180)
     args = parser.parse_args(argv)

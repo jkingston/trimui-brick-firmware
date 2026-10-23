@@ -50,7 +50,9 @@ current=$mountpoint/brick-diag
 $bb grep -q 'trimui,brick' /sys/firmware/devicetree/base/compatible
 $bb mkdir /tmp/.brick-update-lock
 mounted=0
+staged=0
 cleanup() {{
+ if [ "$staged" = 1 ]; then $bb rm -r "$stage"; fi
  if [ "$mounted" = 1 ]; then $bb umount "$mountpoint"; fi
  $bb rmdir /tmp/.brick-update-lock
 }}
@@ -71,6 +73,7 @@ if [ -d "$previous" ]; then
  $bb rm -r "$previous"
 fi
 $bb mkdir "$stage"
+staged=1
 $bb cp "$work/payload/"* "$stage/"
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
 $bb sync
@@ -79,6 +82,7 @@ if ! $bb mv "$stage" "$current"; then
  $bb mv "$previous" "$current"
  exit 1
 fi
+staged=0
 $bb sync
 $bb umount "$mountpoint"
 mounted=0
