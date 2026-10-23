@@ -25,6 +25,8 @@ for name, value in {'ENV_IS_NOWHERE': 'y', 'MMC_SUNXI_SLOT_EXTRA': '-1',
                     'TRIMUI_BRICK_SD_DIAGNOSTIC': 'y', 'SUPPORT_RAW_INITRD': 'y',
                     'DRAM_SUNXI_TPR11': '0x1b191012', 'DRAM_SUNXI_TPR12': '0x0e111010'}.items():
     require(config.get('CONFIG_' + name) == value, f'Unexpected {name}')
+require('for brick_bootdir in brick-diag brick-previous brick-baseline;' in
+        config.get('CONFIG_BOOTCOMMAND', ''), 'Missing SD payload fallback')
 image = (a.uboot / 'u-boot-sunxi-with-spl.bin').read_bytes()
 require(image[4:12] == b'eGON.BT0', 'Invalid SPL magic')
 checksum, size = struct.unpack_from('<II', image, 12)
