@@ -40,7 +40,8 @@ This fallback handles missing payloads, not a kernel hang.
 `make dev` enables Buildroot's local source override; use `KERNEL_DIR=/path/to/linux`
 for another checkout. Remove
 `output/build/local.mk` and use a fresh output directory to verify pinned
-release builds. No changes need to be copied between repositories.
+release builds. No changes need to be copied between repositories. Use `make kernel-reconfigure`
+after changing the kernel defconfig.
 
 The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. GPU suspend, power-off and DVFS are unsupported.

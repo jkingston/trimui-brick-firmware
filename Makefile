@@ -7,7 +7,7 @@ override O := $(abspath $(O))
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
-.PHONY: all configure dev kernel-rebuild check clean
+.PHONY: all configure dev kernel-rebuild kernel-reconfigure check clean
 all: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads
 
@@ -34,6 +34,9 @@ dev: $(O)/.config
 
 kernel-rebuild: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads linux-rebuild all
+
+kernel-reconfigure: $(O)/.config
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads linux-reconfigure all
 
 check:
 	python3 -m unittest discover -s $(ROOT)/tests
