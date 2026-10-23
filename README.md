@@ -34,6 +34,8 @@ python3 tools/deploy.py output/build/images
 
 The updater verifies payload hashes and retains the previous boot payloads.
 It updates kernel, device tree and initramfs; it does not replace the bootloader.
+The image bootloader tries `brick-previous` if `brick-diag` cannot be loaded.
+This fallback handles missing payloads, not a kernel hang.
 
 `make dev` enables Buildroot's local source override. Remove
 `output/build/local.mk` and use a fresh output directory to verify pinned
