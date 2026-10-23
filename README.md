@@ -37,7 +37,8 @@ It updates kernel, device tree and initramfs; it does not replace the bootloader
 The image bootloader tries `brick-previous` if `brick-diag` cannot be loaded.
 This fallback handles missing payloads, not a kernel hang.
 
-`make dev` enables Buildroot's local source override. Remove
+`make dev` enables Buildroot's local source override; use `KERNEL_DIR=/path/to/linux`
+for another checkout. Remove
 `output/build/local.mk` and use a fresh output directory to verify pinned
 release builds. No changes need to be copied between repositories.
 
@@ -45,7 +46,7 @@ The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. GPU suspend, power-off and DVFS are unsupported.
 
 `Containerfile` supplies the host build dependencies. Host tools use Python's
-standard library; run their tests with `python3 -m unittest discover -s tests`.
+standard library. Run `make check` with a host C compiler and BusyBox installed.
 
 Build scripts and tools are GPL-2.0-only. Third-party components retain their
 own licenses; proprietary GPU binaries are downloaded during the build.

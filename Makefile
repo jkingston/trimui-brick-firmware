@@ -3,9 +3,11 @@ BUILDROOT_SHA256 := 34fb7bea8a213ffde39cc02e61703391560f26e0850f03138c722d0b0988
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BUILDROOT := $(ROOT)/output/buildroot-$(BUILDROOT_VERSION)
 O ?= $(ROOT)/output/build
+override O := $(abspath $(O))
+KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
-.PHONY: all configure dev kernel-rebuild clean
+.PHONY: all configure dev kernel-rebuild check clean
 all: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads
 
@@ -27,10 +29,14 @@ $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure
 
 dev: $(O)/.config
-	printf 'LINUX_OVERRIDE_SRCDIR = $(abspath $(ROOT)/../linux)\n' > $(O)/local.mk
+	test -f "$(KERNEL_DIR)/arch/arm64/configs/trimui_brick_defconfig"
+	printf 'LINUX_OVERRIDE_SRCDIR = %s\n' "$(abspath $(KERNEL_DIR))" > $(O)/local.mk
 
 kernel-rebuild: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads linux-rebuild all
+
+check:
+	python3 -m unittest discover -s $(ROOT)/tests
 
 clean:
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads clean
