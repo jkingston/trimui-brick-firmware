@@ -44,6 +44,7 @@ release builds. No changes need to be copied between repositories.
 
 The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. GPU suspend, power-off and DVFS are unsupported.
+`evtest` is included for inspecting input events when developing button support.
 
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.
