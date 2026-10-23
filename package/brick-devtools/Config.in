@@ -1,0 +1,4 @@
+config BR2_PACKAGE_BRICK_DEVTOOLS
+	bool "Brick development transfer tools"
+	help
+	  Bounded USB serial uploads for firmware development.

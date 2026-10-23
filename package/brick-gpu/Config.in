@@ -1,0 +1,9 @@
+config BR2_PACKAGE_BRICK_GPU
+	bool "Brick GPU firmware and userspace"
+	depends on BR2_aarch64 && BR2_TOOLCHAIN_USES_GLIBC
+	select BR2_PACKAGE_HOST_PYTHON3
+	select BR2_PACKAGE_HOST_PYTHON3_XZ
+	select BR2_INSTALL_LIBSTDCPP
+	help
+	  DDK 1.19@6345021 for GE8300 BVNC 22.102.54.38, extracted
+	  from the official TrimUI Brick 1.1.1 firmware archive.

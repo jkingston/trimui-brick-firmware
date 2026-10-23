@@ -1,0 +1,470 @@
+Subject: [PATCH] sunxi: retain the validated Brick SD boot and PMIC setup
+
+Base: u-boot/u-boot 5e3b01c8466dbe45cd6a06299f8f4c7e8c1c2363
+Initial Brick board/LPDDR3 support: ericreinsmidt/plastron
+414735de1c10c950e99defff0f4acf6567f13375, buildroot/board/brick/u-boot/patches.
+Additional changes preserve captured DRAM timings, mask/readback PMIC rail
+writes, exclude internal MMC and persistent environment writes, and capture
+read-only PMIC state. No power-key timing or CC/charger reconfiguration.
+
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index b0c5d3c..318bbd9 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -1,5 +1,12 @@
+ if ARCH_SUNXI
+ 
++config TRIMUI_BRICK_SD_DIAGNOSTIC
++	bool "TrimUI Brick removable-SD-only diagnostic boot"
++	depends on MACH_SUN50I_A133 && AXP717_POWER
++	help
++	  Restrict the diagnostic SPL to an SD boot source, and enable the
++	  Brick-specific PMIC rail table. This does not change power-key timing.
++
+ config IDENT_STRING
+ 	default " Allwinner Technology"
+ 
+@@ -267,7 +274,7 @@ config SUNXI_RVBAR_ALTERNATIVE
+ config SUNXI_BL31_BASE
+ 	hex
+ 	default 0x00044000 if MACH_SUN50I || MACH_SUN50I_H5
+-	default 0x40000000 if MACH_SUN50I_H616
++	default 0x40000000 if MACH_SUN50I_H616 || MACH_SUN50I_A133
+ 	default 0x00104000 if SUN50I_GEN_H6
+ 	default 0x00054000 if MACH_SUN55I_A523
+ 	default 0x0
+@@ -689,6 +696,14 @@ config SUNXI_DRAM_A133_DDR4
+ 	  This option is the DDR4 timing used by the boot0 on A133 devices
+ 	  which use a DDR4 timing.
+ 
++config SUNXI_DRAM_A133_LPDDR3
++	bool "LPDDR3 boot0 timings on the A133 DRAM controller"
++	select SUNXI_DRAM_LPDDR3
++	depends on DRAM_SUN50I_A133
++	help
++	  This option is the LPDDR3 timing used by the boot0 on the TrimUI
++	  Brick, at 672 MHz.
++
+ config SUNXI_DRAM_A133_LPDDR4
+ 	bool "LPDDR4 boot0 timings on the A133 DRAM controller"
+ 	select SUNXI_DRAM_LPDDR4
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index 432b1c1..b54efea 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -291,6 +291,11 @@ uint32_t sunxi_get_boot_device(void)
+ {
+ 	int boot_source = sunxi_get_boot_source();
+ 
++	if (IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC) &&
++	    boot_source != SUNXI_BOOTED_FROM_MMC0 &&
++	    boot_source != SUNXI_BOOTED_FROM_MMC0_HIGH)
++		panic("Brick diagnostic requires removable SD boot\n");
++
+ 	/*
+ 	 * When booting from the SD card or NAND memory, the "eGON.BT0"
+ 	 * signature is expected to be found in memory at the address 0x0004
+diff --git a/arch/arm/mach-sunxi/clock_sun50i_h6.c b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+index 80004f1..741f865 100644
+--- a/arch/arm/mach-sunxi/clock_sun50i_h6.c
++++ b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+@@ -42,6 +42,16 @@ void clock_init_safe(void)
+ 		setbits_le32(prcm + CCU_PRCM_PLL_LDO_CFG, 0x60000);
+ 	}
+ 
++	if (IS_ENABLED(CONFIG_MACH_SUN50I_A133)) {
++		/*
++		 * Both PLL LDOs on, at the output boot0 sets (TrimUI Brick:
++		 * 0x00040005). Without the second one the PLLs nothing enables
++		 * before Linux (video, audio, GPU, ...) never lock.
++		 */
++		clrsetbits_le32(prcm + CCU_PRCM_PLL_LDO_CFG, 0x70000,
++				0xA7000000 | 0x40005);
++	}
++
+ 	clock_set_pll1(408000000);
+ 
+ 	writel(CCM_PLL6_DEFAULT, ccm + CCU_H6_PLL6_CFG);
+diff --git a/arch/arm/mach-sunxi/dram_sun50i_a133.c b/arch/arm/mach-sunxi/dram_sun50i_a133.c
+index ca3e251..261a342 100644
+--- a/arch/arm/mach-sunxi/dram_sun50i_a133.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_a133.c
+@@ -766,8 +766,9 @@ static void mctl_dfi_init(const struct dram_para *para)
+ 		mctl_mr_write(MRCTRL0_MR_ADDR(6), 0x862 & (~BIT(7)));
+ 		break;
+ 	case SUNXI_DRAM_TYPE_LPDDR3:
+-		mctl_mr_write_lpddr3(1, 0xc3);	/* MR1: nWR=8, BL8 */
+-		mctl_mr_write_lpddr3(2, 0xa);	/* MR2: RL=12, WL=6 */
++		/* As the TrimUI Brick's boot0: RL 14 / WL 8, as the PHY is set */
++		mctl_mr_write_lpddr3(1, 0x83);	/* MR1: BL8 */
++		mctl_mr_write_lpddr3(2, 0x1c);	/* MR2: RL=14, WL=8 */
+ 		mctl_mr_write_lpddr3(3, 0x2);	/* MR3: 40 0hms PD/PU */
+ 		mctl_mr_write_lpddr3(11, para->mr11);
+ 		break;
+diff --git a/arch/arm/mach-sunxi/dram_timings/Makefile b/arch/arm/mach-sunxi/dram_timings/Makefile
+index 5de9fd5..c4a3ea0 100644
+--- a/arch/arm/mach-sunxi/dram_timings/Makefile
++++ b/arch/arm/mach-sunxi/dram_timings/Makefile
+@@ -8,5 +8,6 @@ obj-$(CONFIG_SUNXI_DRAM_H616_LPDDR3)	+= h616_lpddr3.o
+ obj-$(CONFIG_SUNXI_DRAM_H616_LPDDR4)	+= h616_lpddr4_2133.o
+ obj-$(CONFIG_SUNXI_DRAM_A133_DDR4)	+= a133_ddr4.o
+ obj-$(CONFIG_SUNXI_DRAM_A133_LPDDR4)	+= a133_lpddr4.o
++obj-$(CONFIG_SUNXI_DRAM_A133_LPDDR3)	+= a133_lpddr3.o
+ obj-$(CONFIG_SUNXI_DRAM_A523_DDR3)	+= a523_ddr3.o
+ obj-$(CONFIG_SUNXI_DRAM_A523_LPDDR4)	+= a523_lpddr4.o
+diff --git a/arch/arm/mach-sunxi/dram_timings/a133_lpddr3.c b/arch/arm/mach-sunxi/dram_timings/a133_lpddr3.c
+new file mode 100644
+index 0000000..31d3521
+--- /dev/null
++++ b/arch/arm/mach-sunxi/dram_timings/a133_lpddr3.c
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * A133 LPDDR3 timings, as the TrimUI Brick's boot0 leaves the controller at
++ * 672 MHz: read from the running controller, not computed, so valid at that
++ * clock only.
++ */
++#include <asm/io.h>
++#include <asm/arch/cpu.h>
++#include <asm/arch/dram.h>
++
++void mctl_set_timing_params(const struct dram_para *para)
++{
++	struct sunxi_mctl_ctl_reg *const mctl_ctl =
++		(struct sunxi_mctl_ctl_reg *)SUNXI_DRAM_CTL0_BASE;
++
++	writel(0x1011180f, &mctl_ctl->dramtmg[0]);
++	writel(0x00030318, &mctl_ctl->dramtmg[1]);
++	writel(0x04070d0c, &mctl_ctl->dramtmg[2]);
++	writel(0x0050500c, &mctl_ctl->dramtmg[3]);
++	writel(0x0902040a, &mctl_ctl->dramtmg[4]);
++	writel(0x05050503, &mctl_ctl->dramtmg[5]);
++	writel(0x02020005, &mctl_ctl->dramtmg[6]);
++	writel(0x00000202, &mctl_ctl->dramtmg[7]);
++	writel(0x04041004, &mctl_ctl->dramtmg[8]);
++	writel(0x00020208, &mctl_ctl->dramtmg[9]);
++	writel(0x000e0c05, &mctl_ctl->dramtmg[10]);
++	writel(0x440c021c, &mctl_ctl->dramtmg[11]);
++	writel(0x00000008, &mctl_ctl->dramtmg[12]);
++	writel(0x0a100002, &mctl_ctl->dramtmg[13]);
++	writel(0x0000004a, &mctl_ctl->dramtmg[14]);
++
++	writel(0x004f0112, &mctl_ctl->init[0]);
++	writel(0x01f20000, &mctl_ctl->init[1]);
++	writel(0x00000d05, &mctl_ctl->init[2]);
++	writel(0x0083001c, &mctl_ctl->init[3]);		/* MR1/MR2 */
++	writel(0x00020000, &mctl_ctl->init[4]);		/* MR3 */
++	writel(0x00100004, &mctl_ctl->init[5]);
++	writel(0, &mctl_ctl->init[6]);
++	writel(0, &mctl_ctl->init[7]);
++	writel(0, &mctl_ctl->dfimisc);
++
++	writel(0x0000066f, &mctl_ctl->rankctl);
++	writel(0x028c8006, &mctl_ctl->dfitmg0);
++	writel(0x00100202, &mctl_ctl->dfitmg1);
++	writel(0x00280047, &mctl_ctl->rfshtmg);
++}
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index 3d1afec..73a4ee4 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -12,6 +12,7 @@
+ 
+ #include <clock_legacy.h>
+ #include <dm.h>
++#include <dm/ofnode.h>
+ #include <env.h>
+ #include <hang.h>
+ #include <i2c.h>
+@@ -575,6 +576,7 @@ void sunxi_board_init(void)
+ {
+ 	int power_failed = 0;
+ 
++
+ 	if (CONFIG_IS_ENABLED(SUNXI_LED_STATUS))
+ 		status_led_init();
+ 
+@@ -589,6 +591,36 @@ void sunxi_board_init(void)
+ 	defined CONFIG_AXP803_POWER
+ 	power_failed = axp_init();
+ 
++#if defined(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC)
++	/*
++	 * The TrimUI Brick's LDOs as TrimUI's system has them (voltages
++	 * 0x93-0x9f, then enables 0x90 and 0x91), read from the PMIC there;
++	 * ALDO2 at 3.3 V, as in TrimUI's boot-time table. TrimUI's boot0 turns
++	 * these on before the kernel; the kernel expects them on.
++	 */
++	if (!power_failed) {
++		static const u8 brick_ldo[][2] = {
++			{ 0x93, 0x0d }, { 0x94, 0x1c }, { 0x95, 0x1c }, { 0x96, 0x0d },
++			{ 0x97, 0x1c }, { 0x98, 0x0d }, { 0x99, 0x1c }, { 0x9a, 0x0d },
++			{ 0x9b, 0x0d }, { 0x9c, 0x1c }, { 0x9d, 0x1c }, { 0x9e, 0x1c },
++			{ 0x9f, 0x08 }, { 0x90, 0x7e }, { 0x91, 0xdd },
++		};
++		for (int i = 0; i < ARRAY_SIZE(brick_ldo); i++) {
++			u8 reg = brick_ldo[i][0];
++			u8 mask = reg == 0x90 ? 0xff : 0x1f;
++			u8 old, value, check;
++
++			/* Preserve bits outside the documented voltage/enable fields. */
++			if (pmic_bus_read(reg, &old))
++				panic("Brick PMIC rail read failed\n");
++			value = (old & ~mask) | (brick_ldo[i][1] & mask);
++			if (pmic_bus_write(reg, value) ||
++			    pmic_bus_read(reg, &check) || (check & mask) != (value & mask))
++				panic("Brick PMIC rail setup failed\n");
++		}
++	}
++#endif
++
+ 	if (IS_ENABLED(CONFIG_AXP_DISABLE_BOOT_ON_POWERON) && !power_failed) {
+ 		u8 boot_reason;
+ 
+@@ -652,12 +684,15 @@ void sunxi_board_init(void)
+ 	power_failed |= axp_set_sw(IS_ENABLED(CONFIG_AXP_SW_ON));
+ #endif
+ #endif	/* CONFIG_AXPxxx_POWER */
++	if (IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC) && power_failed)
++		panic("Brick PMIC initialization failed\n");
+ 	printf("DRAM:");
+ 	gd->ram_size = sunxi_dram_init();
+ 	printf(" %d MiB\n", (int)(gd->ram_size >> 20));
+ 	if (!gd->ram_size)
+ 		hang();
+ 
++
+ 	sunxi_spl_store_dram_size(gd->ram_size);
+ 
+ 	/*
+@@ -928,6 +963,74 @@ static void board_dt_fixup(void *blob)
+ 	}
+ }
+ 
++/* Read-only PMIC evidence after SPL, before Linux. Never configure charging. */
++static void brick_pmic_snapshot(void *blob)
++{
++	static const u8 registers[] = { 0x0b, 0x17, 0xe1, 0xe3, 0x00, 0xe7 };
++	struct udevice *bus, *chip;
++	char snapshot[192];
++	const char *phase = "bus-node";
++	ofnode node;
++	size_t used;
++	u8 value;
++	int ret, chosen;
++	unsigned int i;
++
++	if (!IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC) ||
++	    !IS_ENABLED(CONFIG_DM_I2C) ||
++	    fdt_node_check_compatible(gd->fdt_blob, 0, "trimui,brick") ||
++	    fdt_node_check_compatible(blob, 0, "trimui,brick"))
++		return;
++
++	used = snprintf(snapshot, sizeof(snapshot), "stage=post-spl-pre-linux ");
++	/* Resolve the enabled bus in U-Boot's control DT, not Linux's DT. */
++	node = ofnode_path("/soc/i2c@7081400");
++	ret = -ENODEV;
++	if (!ofnode_valid(node))
++		goto record;
++	phase = "bus";
++	ret = uclass_get_device_by_ofnode(UCLASS_I2C, node, &bus);
++	if (ret)
++		goto record;
++	phase = "chip";
++	/* No bus scan or address probe; this obtains the fixed chip only. */
++	ret = i2c_get_chip(bus, 0x34, 1, &chip);
++	if (ret)
++		goto record;
++	phase = "offset-length";
++	ret = i2c_set_chip_offset_len(chip, 1);
++	if (ret)
++		goto record;
++	phase = "read";
++	for (i = 0; i < ARRAY_SIZE(registers); i++) {
++		/* Register-select byte plus read, never a PMIC data write.
++		 * MVTWSI has finite per-phase timeouts. Stop at first error,
++		 * including its positive encoded errors; never retry here.
++		 */
++		ret = dm_i2c_read(chip, registers[i], &value, 1);
++		if (ret) {
++			used += snprintf(snapshot + used, sizeof(snapshot) - used,
++					 "failed-reg=%02x ", registers[i]);
++			break;
++		}
++		used += snprintf(snapshot + used, sizeof(snapshot) - used,
++				 "%02x=%02x ", registers[i], value);
++	}
++record:
++	snprintf(snapshot + used, sizeof(snapshot) - used,
++		 "phase=%s rc=%d\n", phase, ret);
++	chosen = fdt_path_offset(blob, "/chosen");
++	if (chosen < 0)
++		chosen = fdt_add_subnode(blob, 0, "chosen");
++	if (chosen >= 0) {
++		ret = fdt_setprop_string(blob, chosen, "brick,pmic-snapshot", snapshot);
++		if (ret)
++			printf("Brick PMIC snapshot property failed: %d\n", ret);
++	} else {
++		printf("Brick PMIC snapshot chosen node failed: %d\n", chosen);
++	}
++}
++
+ int ft_board_setup(void *blob, struct bd_info *bd)
+ {
+ 	int __maybe_unused r;
+@@ -942,6 +1045,7 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+ 
+ 	bluetooth_dt_fixup(blob);
+ 	board_dt_fixup(blob);
++	brick_pmic_snapshot(blob);
+ 
+ #ifdef CONFIG_VIDEO_DT_SIMPLEFB
+ 	r = sunxi_simplefb_setup(blob);
+diff --git a/configs/trimui-brick_defconfig b/configs/trimui-brick_defconfig
+new file mode 100644
+index 0000000..f30c1ce
+--- /dev/null
++++ b/configs/trimui-brick_defconfig
+@@ -0,0 +1,59 @@
++CONFIG_ARM=y
++CONFIG_ARCH_SUNXI=y
++CONFIG_DEFAULT_DEVICE_TREE="allwinner/sun50i-a133-trimui-brick"
++CONFIG_DRAM_CLK=672
++CONFIG_SPL=y
++CONFIG_DRAM_SUNXI_DX_ODT=0x06060606
++CONFIG_DRAM_SUNXI_DX_DRI=0x0c0c0c0c
++CONFIG_DRAM_SUNXI_CA_DRI=0x1919
++CONFIG_DRAM_SUNXI_PARA0=0x1b181215
++CONFIG_DRAM_SUNXI_TPR0=0x16161a1e
++CONFIG_DRAM_SUNXI_TPR1=0x80000000
++CONFIG_DRAM_SUNXI_TPR6=0xb20000
++CONFIG_DRAM_SUNXI_TPR10=0x2fbbdf
++CONFIG_DRAM_SUNXI_TPR11=0x1b191012
++CONFIG_DRAM_SUNXI_TPR12=0x0e111010
++CONFIG_DRAM_SUNXI_TPR13=0x01007521
++CONFIG_DRAM_SUNXI_TPR14=0x1e1e2020
++CONFIG_MACH_SUN50I_A133=y
++CONFIG_SUNXI_DRAM_A133_LPDDR3=y
++CONFIG_R_I2C_ENABLE=y
++# CONFIG_SYS_MALLOC_CLEAR_ON_INIT is not set
++CONFIG_SPL_I2C=y
++CONFIG_SPL_SYS_I2C_LEGACY=y
++CONFIG_SYS_I2C_MVTWSI=y
++CONFIG_SYS_I2C_SLAVE=0x7f
++CONFIG_SYS_I2C_SPEED=400000
++CONFIG_AXP717_POWER=y
++CONFIG_AXP_I2C_ADDRESS=0x34
++CONFIG_AXP_DCDC2_VOLT=900
++CONFIG_AXP_DCDC3_VOLT=1200
++CONFIG_BOOTDELAY=0
++CONFIG_ENV_IS_NOWHERE=y
++CONFIG_USE_BOOTCOMMAND=y
++CONFIG_HUSH_PARSER=y
++CONFIG_SUPPORT_RAW_INITRD=y
++CONFIG_BOOTCOMMAND="setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x45000000; if load mmc 0:1 ${kernel_addr_r} brick-diag/Image && load mmc 0:1 ${ramdisk_addr_r} brick-diag/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} brick-diag/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x40000000 0x40000; then setenv bootargs console=ttyS0,115200 loglevel=8 rdinit=/init; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; echo Diagnostic boot failed; while true; do sleep 1; done"
++CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC=y
++CONFIG_MMC_SUNXI_SLOT_EXTRA=-1
++# CONFIG_MMC_WRITE is not set
++# CONFIG_CMD_SAVEENV is not set
++# CONFIG_BOOTSTD is not set
++# CONFIG_DISTRO_DEFAULTS is not set
++# CONFIG_CMD_USB is not set
++# CONFIG_USB_EHCI_HCD is not set
++# CONFIG_USB_OHCI_HCD is not set
++# CONFIG_NET is not set
++# CONFIG_CMD_NET is not set
++# CONFIG_AXP_DISABLE_BOOT_ON_POWERON is not set
++# CONFIG_ENV_IS_IN_FAT is not set
++# CONFIG_FAT_WRITE is not set
++CONFIG_FS_FAT=y
++CONFIG_DOS_PARTITION=y
++CONFIG_CMD_FS_GENERIC=y
++# CONFIG_TOOLS_LIBCRYPTO is not set
++# CONFIG_TOOLS_KWBIMAGE is not set
++# CONFIG_TOOLS_MKEFICAPSULE is not set
++
++CONFIG_CMD_GPIO=y
++CONFIG_CMD_SLEEP=y
+diff --git a/drivers/power/axp_spl.c b/drivers/power/axp_spl.c
+index 0162ef5..8e71dfc 100644
+--- a/drivers/power/axp_spl.c
++++ b/drivers/power/axp_spl.c
+@@ -140,7 +140,25 @@ static int axp_set_dcdc(int dcdc_num, unsigned int mvolt)
+ 	if (mvolt == 0)
+ 		return pmic_bus_clrbits(reg->enable_reg, reg->enable_mask);
+ 
+-	ret = pmic_bus_write(reg->volt_reg, axp_mvolt_to_cfg(mvolt, reg));
++	if (IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC)) {
++		u8 old, value, check;
++
++		ret = pmic_bus_read(reg->volt_reg, &old);
++		if (ret)
++			return ret;
++		value = (old & ~reg->volt_mask) |
++			(axp_mvolt_to_cfg(mvolt, reg) & reg->volt_mask);
++		ret = pmic_bus_write(reg->volt_reg, value);
++		if (ret)
++			return ret;
++		ret = pmic_bus_read(reg->volt_reg, &check);
++		if (ret)
++			return ret;
++		if ((check & reg->volt_mask) != (value & reg->volt_mask))
++			return -EIO;
++	} else {
++		ret = pmic_bus_write(reg->volt_reg, axp_mvolt_to_cfg(mvolt, reg));
++	}
+ 	if (ret)
+ 		return ret;
+ 
+diff --git a/dts/upstream/src/arm64/allwinner/sun50i-a133-trimui-brick.dts b/dts/upstream/src/arm64/allwinner/sun50i-a133-trimui-brick.dts
+new file mode 100644
+index 0000000..c5fa16c
+--- /dev/null
++++ b/dts/upstream/src/arm64/allwinner/sun50i-a133-trimui-brick.dts
+@@ -0,0 +1,46 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * TrimUI Brick (A133P): what U-Boot needs to reach the kernel, the SD card
++ * and the PMIC. No regulator constraints here: SPL sets DCDC2 and DCDC3 to
++ * what TrimUI's boot0 leaves them at, and the LDOs as TrimUI's system has
++ * them (board/sunxi/board.c). The internal eMMC is left out on purpose.
++ */
++
++/dts-v1/;
++
++#include "sun50i-a100.dtsi"
++
++/ {
++	model = "TrimUI Brick";
++	compatible = "trimui,brick", "allwinner,sun50i-a100";
++
++	aliases {
++		serial0 = &uart0;
++		mmc0 = &mmc0;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++};
++
++&mmc0 {
++	bus-width = <4>;
++	broken-cd;
++	status = "okay";
++};
++
++&r_i2c0 {
++	status = "okay";
++
++	axp717: pmic@34 {
++		compatible = "x-powers,axp717";
++		reg = <0x34>;
++	};
++};
++
++&uart0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart0_pb_pins>;
++	status = "okay";
++};

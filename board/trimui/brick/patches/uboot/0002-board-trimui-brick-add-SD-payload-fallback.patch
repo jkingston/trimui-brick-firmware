@@ -1,0 +1,19 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] board: trimui-brick: fall back to retained SD payloads
+
+Try the previous and baseline payloads if the current directory cannot load.
+This permits recovery after an interrupted payload-directory switch.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+
+--- a/configs/trimui-brick_defconfig
++++ b/configs/trimui-brick_defconfig
+@@ -33,7 +33,7 @@
+ CONFIG_USE_BOOTCOMMAND=y
+ CONFIG_HUSH_PARSER=y
+ CONFIG_SUPPORT_RAW_INITRD=y
+-CONFIG_BOOTCOMMAND="setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x45000000; if load mmc 0:1 ${kernel_addr_r} brick-diag/Image && load mmc 0:1 ${ramdisk_addr_r} brick-diag/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} brick-diag/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x40000000 0x40000; then setenv bootargs console=ttyS0,115200 loglevel=8 rdinit=/init; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; echo Diagnostic boot failed; while true; do sleep 1; done"
++CONFIG_BOOTCOMMAND="setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x45000000; for brick_bootdir in brick-diag brick-previous brick-baseline; do if load mmc 0:1 ${kernel_addr_r} ${brick_bootdir}/Image && load mmc 0:1 ${ramdisk_addr_r} ${brick_bootdir}/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} ${brick_bootdir}/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x40000000 0x40000; then setenv bootargs console=ttyS0,115200 loglevel=8 rdinit=/init; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; done; echo SD boot failed; while true; do sleep 1; done"
+ CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC=y
+ CONFIG_MMC_SUNXI_SLOT_EXTRA=-1
+ # CONFIG_MMC_WRITE is not set

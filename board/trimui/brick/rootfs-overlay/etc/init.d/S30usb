@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+start)
+	mountpoint -q /sys/kernel/config || mount -t configfs configfs /sys/kernel/config
+	g=/sys/kernel/config/usb_gadget/brick
+	[ ! -d "$g" ] || exit 0
+	mkdir "$g"
+	echo 0x1d6b > "$g/idVendor"
+	echo 0x0104 > "$g/idProduct"
+	echo 0x0200 > "$g/bcdUSB"
+	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409" "$g/functions/acm.usb0"
+	echo brick-dev > "$g/strings/0x409/serialnumber"
+	echo 'Brick development' > "$g/strings/0x409/manufacturer"
+	echo 'TrimUI Brick Linux console' > "$g/strings/0x409/product"
+	echo 'Serial console' > "$g/configs/c.1/strings/0x409/configuration"
+	echo 100 > "$g/configs/c.1/MaxPower"
+	ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
+	set -- /sys/class/udc/*
+	[ "$#" -eq 1 ] && [ -e "$1" ]
+	echo "${1##*/}" > "$g/UDC"
+	;;
+esac

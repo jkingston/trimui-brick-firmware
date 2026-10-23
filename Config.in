@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_BRICK_PATH/package/brick-gpu/Config.in"
+source "$BR2_EXTERNAL_BRICK_PATH/package/brick-devtools/Config.in"

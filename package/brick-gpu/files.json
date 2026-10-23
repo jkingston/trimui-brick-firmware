@@ -1,0 +1,42 @@
+{
+  "usr/lib/libEGL.so.1": {
+    "source": "/usr/lib/libEGL.so",
+    "sha256": "cd2a2ce9b2593eb956b974ab90558d0c873de7cf1131f58f6cea7b4fda13b3a1"
+  },
+  "usr/lib/libGLES_CM.so": {
+    "source": "/usr/lib/libGLES_CM.so",
+    "sha256": "e53d41dfdc8f9cf9527f5d9d940a01b11923ac0a391f6d598a7babd35b6e67c3"
+  },
+  "usr/lib/libGLESv2.so": {
+    "source": "/usr/lib/libGLESv2.so",
+    "sha256": "95dd6845c2884c74463a84d11aadcff5f390024807da774dc3de0d1deb35d889"
+  },
+  "usr/lib/libIMGegl.so": {
+    "source": "/usr/lib/libIMGegl.so",
+    "sha256": "fa299ae40cb8e9c52ada73330b1648de9a34c2d83fc38f43f5cf936af720d403"
+  },
+  "usr/lib/libglslcompiler.so": {
+    "source": "/usr/lib/libglslcompiler.so",
+    "sha256": "d11b684dd70d0839f78dae8afb3cadf57e86c54aea689eff320407990fe77acd"
+  },
+  "usr/lib/libpvrNULL_WSEGL.so": {
+    "source": "/usr/lib/libpvrNULL_WSEGL.so",
+    "sha256": "6313de319dac321e7b7e272525e3cbbb0330ac2ebf1d59c467d5aa97b156c833"
+  },
+  "usr/lib/libsrv_um.so": {
+    "source": "/usr/lib/libsrv_um.so",
+    "sha256": "6d7991b79dd10fe3fcda561dd886ef66c698fe59ee62d6668191f1f020e7c621"
+  },
+  "usr/lib/libusc.so": {
+    "source": "/usr/lib/libusc.so",
+    "sha256": "524bfb2ef820f846872a0d0d907c2aaba48151f5f264c786a5c6f53879fb8d22"
+  },
+  "lib/firmware/rgx.fw.22.102.54.38": {
+    "source": "/lib/firmware/rgx.fw.22.102.54.38",
+    "sha256": "262026355671bc0f2005bd6cf7fa02d4bfa5fe0d3100f185357081cd07fab91c"
+  },
+  "lib/firmware/rgx.sh.22.102.54.38": {
+    "source": "/lib/firmware/rgx.sh.22.102.54.38",
+    "sha256": "d1604a4a462ec21ac96cfc7849f98c211db7c95146fdf0cfc26579b519398680"
+  }
+}
