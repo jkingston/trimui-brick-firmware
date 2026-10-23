@@ -4,6 +4,10 @@ Minimal SD-boot Linux system built with Buildroot. The kernel lives in a
 separate Linux fork; this repository owns bootloader patches, GPU userspace,
 rootfs configuration and image assembly.
 
+Development baseline: SD boot, display/backlight, GPU rendering, temperature
+sensors and USB serial. Controls, audio, battery management and wireless
+connectivity are not integrated yet.
+
 Place the kernel checkout at `../linux`, then:
 
 ```sh
@@ -40,3 +44,6 @@ is disabled. GPU suspend, power-off and DVFS are unsupported.
 
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library; run their tests with `python3 -m unittest discover -s tests`.
+
+Build scripts and tools are GPL-2.0-only. Third-party components retain their
+own licenses; proprietary GPU binaries are downloaded during the build.

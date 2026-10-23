@@ -15,14 +15,15 @@ $(ARCHIVE):
 	echo "$(BUILDROOT_SHA256)  $@.tmp" | sha256sum -c -
 	mv $@.tmp $@
 
-$(BUILDROOT)/Makefile: $(ARCHIVE)
+$(BUILDROOT)/.brick-extracted: $(ARCHIVE)
 	echo "$(BUILDROOT_SHA256)  $(ARCHIVE)" | sha256sum -c -
 	tar -xJf $(ARCHIVE) -C $(ROOT)/output
+	touch $@
 
-configure: $(BUILDROOT)/Makefile
+configure: $(BUILDROOT)/.brick-extracted
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 
-$(O)/.config: $(BUILDROOT)/Makefile
+$(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure
 
 dev: $(O)/.config
