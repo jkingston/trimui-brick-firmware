@@ -5,9 +5,10 @@ separate Linux fork; this repository owns bootloader patches, GPU userspace,
 radio firmware, rootfs configuration and image assembly.
 
 Development baseline: SD boot, display/backlight, GPU rendering, GPIO controls,
-battery telemetry, temperature sensors and USB serial/Ethernet. Audio playback
+battery telemetry, temperature sensors, CPU frequency scaling and USB
+serial/Ethernet. Audio playback
 and speaker control are integrated; audible output remains unverified. Wireless
-networking, charging control, suspend and CPU/GPU DVFS remain incomplete.
+networking, charging control, suspend and GPU power management remain incomplete.
 
 Place the kernel checkout at `../linux`, then:
 
