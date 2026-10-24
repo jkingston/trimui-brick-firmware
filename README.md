@@ -1,7 +1,7 @@
 # TrimUI Brick firmware
 
 Minimal SD-boot Linux system built with Buildroot. The kernel lives in a
-separate Linux fork; this repository owns bootloader patches, GPU userspace,
+[separate Linux fork](https://github.com/jkingston/trimui-brick-kernel); this repository owns bootloader patches, GPU userspace,
 radio firmware, rootfs configuration and image assembly.
 
 Development baseline: SD boot, display/backlight, GPU rendering, GPIO controls,
@@ -10,7 +10,7 @@ serial/Ethernet. Audio playback
 and speaker control are integrated; audible output remains unverified. Wireless
 networking, charging control, suspend and GPU power management remain incomplete.
 
-Place the kernel checkout at `../linux`, then:
+Build the pinned kernel and firmware:
 
 ```sh
 make configure
@@ -21,7 +21,7 @@ The image and checksums are in `output/build/images/`. Source revisions are
 pinned in `configs/brick_defconfig`. GPU and radio binaries are extracted from the
 checksum-verified stock archive and are not stored in Git.
 
-For local kernel changes:
+For local kernel changes, place its checkout at `../linux`, then:
 
 ```sh
 make dev
