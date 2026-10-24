@@ -47,6 +47,12 @@ The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. GPU suspend, power-off and DVFS are unsupported.
 `evtest` is included for inspecting input events when developing button support.
 
+The hardware development kernel also enables USB Ethernet at `192.168.7.2/24`.
+Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
+install a key in `/root/.ssh/authorized_keys` through the serial console.
+The initramfs does not persist keys across boots. Use `scp -O` for transfers.
+The pinned baseline kernel does not yet include the Ethernet gadget function.
+
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.
 

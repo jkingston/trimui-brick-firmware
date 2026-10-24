@@ -13,11 +13,19 @@ start)
 	echo brick-dev > "$g/strings/0x409/serialnumber"
 	echo 'Brick development' > "$g/strings/0x409/manufacturer"
 	echo 'TrimUI Brick Linux console' > "$g/strings/0x409/product"
-	echo 'Serial console' > "$g/configs/c.1/strings/0x409/configuration"
+	echo 'Serial console and Ethernet' > "$g/configs/c.1/strings/0x409/configuration"
 	echo 100 > "$g/configs/c.1/MaxPower"
 	ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
+	ethernet=0
+	if mkdir "$g/functions/ecm.usb0" 2>/dev/null; then
+		ln -s "$g/functions/ecm.usb0" "$g/configs/c.1/ecm.usb0"
+		ethernet=1
+	fi
 	set -- /sys/class/udc/*
 	[ "$#" -eq 1 ] && [ -e "$1" ]
 	echo "${1##*/}" > "$g/UDC"
+	if [ "$ethernet" -eq 1 ]; then
+		ifconfig usb0 192.168.7.2 netmask 255.255.255.0 up
+	fi
 	;;
 esac
