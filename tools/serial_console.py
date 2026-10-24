@@ -2,6 +2,7 @@
 """Run commands or upload a file to the Brick's RAM over its USB console."""
 import argparse
 import base64
+import errno
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -147,7 +148,13 @@ class Console:
     def __exit__(self, *_):
         try:
             if self.original is not None:
-                termios.tcsetattr(self.fd, termios.TCSANOW, self.original)
+                try:
+                    termios.tcsetattr(self.fd, termios.TCSANOW, self.original)
+                except termios.error as error:
+                    # USB may disappear during a reboot; preserve the command
+                    # error so the caller can reconnect after enumeration.
+                    if error.args[0] not in (errno.EIO, errno.ENODEV):
+                        raise
         finally:
             os.close(self.fd)
 

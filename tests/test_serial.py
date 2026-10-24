@@ -21,6 +21,23 @@ SPEC.loader.exec_module(serial)
 
 
 class SerialTests(unittest.TestCase):
+    def test_disconnect_during_cleanup_preserves_command_error(self):
+        master, slave = pty.openpty()
+        console = serial.Console(os.ttyname(slave))
+        try:
+            with self.assertRaisesRegex(serial.ProtocolError, 'reboot'):
+                with console:
+                    os.close(master)
+                    master = None
+                    raise serial.ProtocolError('reboot disconnected USB')
+            with self.assertRaises(OSError):
+                os.fstat(console.fd)
+        finally:
+            if master is not None:
+                os.close(master)
+            os.close(slave)
+
+
     def test_fragmented_markers_and_partial_writes(self):
         left, right = socket.socketpair()
         left.setblocking(False)
