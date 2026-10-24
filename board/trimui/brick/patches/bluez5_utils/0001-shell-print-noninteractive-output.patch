@@ -1,0 +1,34 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] shared/shell: print output in non-interactive mode
+
+Non-interactive bt_shell_attach executes the command without adding an input
+to the queue. Check the mode before rejecting an empty input queue so commands
+such as bluetoothctl show can print their results.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ src/shared/shell.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+--- a/src/shared/shell.c
++++ b/src/shared/shell.c
+@@ -711,9 +711,6 @@ void bt_shell_printf(const char *fmt, ...)
+ 	char *saved_line;
+ 	int saved_point;
+ 
+-	if (queue_isempty(data.inputs))
+-		return;
+-
+ 	if (data.mode == MODE_NON_INTERACTIVE) {
+ 		va_start(args, fmt);
+ 		vprintf(fmt, args);
+@@ -722,6 +719,9 @@ void bt_shell_printf(const char *fmt, ...)
+ 		return;
+ 	}
+ 
++	if (queue_isempty(data.inputs))
++		return;
++
+ 	save_input = !RL_ISSTATE(RL_STATE_DONE);
+ 
+ 	if (save_input) {
