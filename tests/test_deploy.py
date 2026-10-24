@@ -137,6 +137,14 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assert_clean()
 
+    def test_truncated_archive_preserves_both_existing_payloads(self):
+        archive = self.tmp / 'test.tar.gz'
+        archive.write_bytes(archive.read_bytes()[:-12])
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assert_clean()
+
     def test_corrupt_current_preserves_good_previous(self):
         (self.current / 'Image').write_bytes(b'corrupt')
         self.assertNotEqual(self.run_installer().returncode, 0)

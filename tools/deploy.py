@@ -58,7 +58,9 @@ cleanup() {{
 }}
 trap cleanup EXIT
 $bb mkdir -p "$work/payload" "$mountpoint"
-$bb tar -xzf /tmp/{token}.tar.gz -C "$work/payload"
+$bb gzip -dc /tmp/{token}.tar.gz > "$work/payload.tar"
+$bb tar -xf "$work/payload.tar" -C "$work/payload"
+$bb rm "$work/payload.tar"
 (cd "$work/payload" && $bb sha256sum -c SHA256SUMS)
 # Match the device number so mounts through UUID/label aliases also count.
 device=$($bb cat /sys/class/block/mmcblk0p1/dev)
