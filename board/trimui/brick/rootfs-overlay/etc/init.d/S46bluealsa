@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+pidfile=/run/bluealsa.pid
+daemon=/usr/bin/bluealsa
+
+start() {
+	start-stop-daemon -S -q -o -b -m -p "$pidfile" -x "$daemon" -- \
+		-p a2dp-source -c SBC -c aptX -c aptX-HD
+}
+
+stop() {
+	start-stop-daemon -K -q -o -p "$pidfile" -x "$daemon"
+	for attempt in 1 2 3 4 5; do
+		if ! start-stop-daemon -K -t -q -p "$pidfile" -x "$daemon"; then
+			rm -f "$pidfile"
+			return 0
+		fi
+		sleep 1
+	done
+	start-stop-daemon -K -q -o -s KILL -p "$pidfile" -x "$daemon"
+	rm -f "$pidfile"
+}
+
+case "${1:-}" in
+start|stop) "$1" ;;
+restart) stop; start ;;
+*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

@@ -60,6 +60,10 @@ Wi-Fi starts with no saved networks. Configure `/etc/wpa_supplicant.conf` and ru
 `WIFI_CONFIG` and `WIFI_CTRL_DIR` override the profile and socket directory when
 starting the service. Profiles and changes are lost on reboot in this initramfs.
 
+Bluetooth starts powered off. Use `bluetoothctl` to power on and pair devices.
+BlueALSA provides SBC, aptX and aptX HD output. Pairing state in
+`/var/lib/bluetooth` is lost on reboot in this initramfs.
+
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.
 
