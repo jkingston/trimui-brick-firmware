@@ -10,7 +10,7 @@ BRICK_GPU_DEPENDENCIES = host-python3 host-e2fsprogs
 BRICK_GPU_INSTALL_STAGING = YES
 
 define BRICK_GPU_EXTRACT_CMDS
-	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/package/brick-gpu/extract.py \
+	PYTHONPATH=$(BR2_EXTERNAL_BRICK_PATH)/support/stock $(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/package/brick-gpu/extract.py \
 		$(BRICK_GPU_DL_DIR)/$(BRICK_GPU_SOURCE) $(@D) $(HOST_DIR)/sbin/debugfs
 endef
 

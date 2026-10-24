@@ -1,0 +1,6 @@
+config BR2_PACKAGE_BRICK_RADIO
+	bool "Brick XR829 radio firmware"
+	select BR2_PACKAGE_HOST_PYTHON3
+	help
+	  XR829 bootloader, Wi-Fi calibration/firmware and Bluetooth
+	  firmware extracted from the official TrimUI Brick 1.1.1 archive.

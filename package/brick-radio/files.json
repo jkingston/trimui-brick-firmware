@@ -1,0 +1,18 @@
+{
+  "lib/firmware/boot_xr829.bin": {
+    "source": "/lib/firmware/boot_xr829.bin",
+    "sha256": "4912ad59f8fcdadba8c10f2ace82f5dce3a4ac37d5e03e5cb814656ce53efff5"
+  },
+  "lib/firmware/fw_xr829.bin": {
+    "source": "/lib/firmware/fw_xr829.bin",
+    "sha256": "f702cd028538830b8c197c90efd76f6de278a04caec8d626d6625d32ab0669e4"
+  },
+  "lib/firmware/sdd_xr829.bin": {
+    "source": "/lib/firmware/sdd_xr829.bin",
+    "sha256": "a504e3517d45b70404495c6a810fd04231a5d70143d9efac9ffd3de4caf14cdd"
+  },
+  "lib/firmware/fw_xr829_bt.bin": {
+    "source": "/lib/firmware/fw_xr829_bt.bin",
+    "sha256": "88d689db801445300a0c3435e07b113824e5f6d6ad9ec75e16e546cff450a7f6"
+  }
+}
