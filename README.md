@@ -54,6 +54,12 @@ Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
 install a key in `/root/.ssh/authorized_keys` through the serial console.
 The initramfs does not persist keys across boots. Use `scp -O` for transfers.
 
+Wi-Fi starts with no saved networks. Configure `/etc/wpa_supplicant.conf` and run
+`/etc/init.d/S45wifi restart`, or configure the running supplicant with
+`wpa_cli -p /run/wpa_supplicant -i wlan0`. DHCP follows connection events.
+`WIFI_CONFIG` and `WIFI_CTRL_DIR` override the profile and socket directory when
+starting the service. Profiles and changes are lost on reboot in this initramfs.
+
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.
 

@@ -1,0 +1,89 @@
+#!/bin/sh
+# WPA events and init actions share a lock so stop cannot race DHCP startup.
+set -eu
+umask 077
+state=/run/brick-wifi
+config=${WIFI_CONFIG:-/etc/wpa_supplicant.conf}
+ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
+export WIFI_CONFIG="$config" WIFI_CTRL_DIR="$ctrl"
+mkdir -p "$state"
+exec 9>"$state/lock"
+flock -x 9
+
+stop_process() {
+	pidfile=$1
+	program=$2
+	start-stop-daemon -K -q -o -p "$pidfile" -x "$program"
+	for attempt in 1 2 3 4 5; do
+		start-stop-daemon -K -t -q -p "$pidfile" -x "$program" || break
+		sleep 1
+	done
+	start-stop-daemon -K -q -o -s KILL -p "$pidfile" -x "$program"
+	rm -f "$pidfile"
+}
+
+stop_dhcp() {
+	stop_process "$state/udhcpc.pid" /sbin/udhcpc
+	# Also remove address and DNS after termination without a DHCP lease.
+	if [ -e /sys/class/net/wlan0 ]; then
+		interface=wlan0 /usr/share/udhcpc/default.script deconfig
+	fi
+}
+
+case "${1:-}" in
+start)
+	[ -e /sys/class/net/wlan0 ] || exit 0
+	if start-stop-daemon -K -t -q -p "$state/supplicant.pid" -x /usr/sbin/wpa_supplicant &&
+	   start-stop-daemon -K -t -q -p "$state/events.pid" -x /usr/sbin/wpa_cli; then
+		exit 0
+	fi
+	# Recover a partial start before launching a fresh event monitor.
+	rm -f "$state/enabled"
+	stop_process "$state/events.pid" /usr/sbin/wpa_cli
+	stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
+	stop_dhcp
+	mkdir -p "$ctrl"
+	# Wait for the monitor to attach so the first CONNECTED event is not lost.
+	wpa_supplicant -B -W -D nl80211 -i wlan0 -c "$config" -C "$ctrl" \
+		-P "$state/supplicant.pid" 9>&-
+	# A queued action may outlive its monitor across a service restart.
+	WIFI_GENERATION=$(cat /proc/sys/kernel/random/uuid)
+	export WIFI_GENERATION
+	printf '%s\n' "$WIFI_GENERATION" > "$state/enabled"
+	if ! wpa_cli -B -i wlan0 -p "$ctrl" -a /etc/init.d/S45wifi \
+		-P "$state/events.pid" 9>&-; then
+		rm -f "$state/enabled"
+		stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
+		exit 1
+	fi
+	;;
+stop)
+	rm -f "$state/enabled"
+	stop_process "$state/events.pid" /usr/sbin/wpa_cli
+	stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
+	stop_dhcp
+	;;
+restart)
+	flock -u 9
+	"$0" stop
+	exec "$0" start
+	;;
+wlan0)
+	[ -f "$state/enabled" ] || exit 0
+	[ "${WIFI_GENERATION:-}" = "$(cat "$state/enabled")" ] || exit 0
+	case "${2:-}" in
+	CONNECTED)
+		# Keep DHCP alive for renewal; retry in the background when no server answers.
+		start-stop-daemon -S -q -o -p "$state/udhcpc.pid" -x /sbin/udhcpc -- \
+			-i wlan0 -b -R -t 1 -T 1 -p "$state/udhcpc.pid" 9>&-
+		;;
+	DISCONNECTED)
+		stop_dhcp
+		;;
+	esac
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}" >&2
+	exit 1
+	;;
+esac
