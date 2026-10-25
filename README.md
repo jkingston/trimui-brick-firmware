@@ -46,7 +46,8 @@ release builds. No changes need to be copied between repositories. Use `make ker
 after changing the kernel defconfig.
 
 The development image exposes a root shell over USB serial. Internal eMMC
-is disabled. GPU suspend, power-off and DVFS are unsupported.
+is disabled. The GPU powers down internally between workloads; external
+clocks and rails stay enabled. GPU suspend and DVFS are unsupported.
 `evtest` and ALSA utilities are included for hardware validation.
 
 USB Ethernet uses `192.168.7.2/24`.
