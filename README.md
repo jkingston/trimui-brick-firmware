@@ -47,7 +47,8 @@ after changing the kernel defconfig.
 
 The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. The GPU powers down internally between workloads; external
-clocks and rails stay enabled. GPU suspend and DVFS are unsupported.
+clocks and rails stay enabled. GPU s2idle handling awaits device validation;
+whole-system sleep and GPU DVFS remain incomplete.
 `evtest` and ALSA utilities are included for hardware validation.
 
 Volume keys control the internal codec with a persistent 20-step setting.
