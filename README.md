@@ -63,6 +63,10 @@ battery telemetry confirms USB is offline and charging is inactive. Invalid or
 missing telemetry inhibits this action. Short presses have no action; automatic
 idle sleep remains unfinished.
 
+Charger defaults match stock's encoded limits: 960 mA awake and 1920 mA during
+suspend/shutdown. An explicit `constant_charge_current` setting, including zero,
+overrides these defaults until driver reload or reboot. Device validation is pending.
+
 Volume keys control the internal codec with a persistent 20-step setting.
 Set `FN_MUTE=1` in `/etc/default/brick-controls` to mute while Fn is active,
 then restart `/etc/init.d/S47controls`. This does not select an audio route
