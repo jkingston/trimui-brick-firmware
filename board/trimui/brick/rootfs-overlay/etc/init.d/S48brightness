@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+mkdir -p /run/brick-brightness
+exec 9>/run/brick-brightness/service.lock
+flock -x 9
+daemon=/usr/sbin/brick-brightness
+pidfile=/run/brick-brightness/pid
+
+case "${1:-}" in
+start)
+	case "$(cat /run/brick-data/state 2>/dev/null || true)" in
+	persistent) settings=/data/settings/brightness ;;
+	volatile) settings=/run/brick-brightness/settings ;;
+	*) echo 'brightness: persistent state unavailable' >&2; exit 1 ;;
+	esac
+	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
+		--pidfile "$pidfile" --exec "$daemon" -- "$settings" 9>&-
+	;;
+stop)
+	/usr/libexec/brick-stop-daemon brightness "$pidfile" "$daemon"
+	;;
+restart)
+	/usr/libexec/brick-stop-daemon brightness "$pidfile" "$daemon"
+	exec 9>&-
+	exec "$0" start
+	;;
+*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

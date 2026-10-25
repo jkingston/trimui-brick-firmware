@@ -51,9 +51,10 @@ clocks and rails stay enabled. GPU s2idle handling awaits device validation;
 whole-system sleep remains incomplete. GPU devfreq exposes four fixed-rail rates,
 defaulting to 702 MHz; frequency changes await device validation.
 ADC capture support is present, but microphone routing awaits hardware verification.
-The video decoder, G2D rotation/scaling/color conversion and IOMMU remain disabled
-pending qualification. Multi-input blending, color key and raster operations
-remain unfinished.
+The video decoder, G2D rotation/scaling/color conversion/compositing and IOMMU
+remain disabled pending qualification. The compositor supports two RGB inputs
+with source-over blending through MMAP buffers; DMA-BUF sharing, color key and
+general raster operations remain unfinished.
 `evtest` and ALSA utilities are included for hardware validation.
 
 Volume keys control the internal codec with a persistent 20-step setting.
@@ -61,6 +62,11 @@ Set `FN_MUTE=1` in `/etc/default/brick-controls` to mute while Fn is active,
 then restart `/etc/init.d/S47controls`. This does not select an audio route
 or control Bluetooth/USB audio volume. These controls require the matching
 development kernel's digital-gain controls; device validation is pending.
+
+Start + L/R adjusts brightness through stock's eleven levels and saves the
+setting. Select suppresses this shortcut; games still receive the buttons.
+The separate brightness service requires the matching 0–255 backlight driver.
+Shortcut and brightness restoration await device validation.
 
 The top USB port has independent host support; device validation is pending.
 An explicit fixed-host build for the bottom port uses `make O=output/host USB_ROLE=host configure`,

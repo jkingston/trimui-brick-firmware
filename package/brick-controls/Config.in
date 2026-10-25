@@ -2,4 +2,5 @@ config BR2_PACKAGE_BRICK_CONTROLS
 	bool "Brick hardware controls"
 	select BR2_PACKAGE_ALSA_LIB
 	help
-	  Volume keys and optional Fn mute with persistent volume settings.
+	  Volume keys, optional Fn mute and Start+L/R brightness shortcuts
+	  with persistent settings.
