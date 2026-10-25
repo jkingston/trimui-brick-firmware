@@ -163,7 +163,8 @@ int main(int argc, char **argv)
 {
 	struct key_state key = { 0 };
 	struct sigaction action = { .sa_handler = stop };
-	int fd = -1, gamepad = -1, lock, result = 0;
+	int fd = -1, inputs[3] = { -1, -1, -1 }, lock, result = 0;
+	struct idle_policy extra[2] = { 0 };
 	int dim_seconds = 300;
 	uint32_t previous_generation = UINT32_MAX;
 	bool resume_resync = false;
@@ -220,14 +221,19 @@ int main(int argc, char **argv)
 			}
 		}
 		if (idle_enabled) {
-			if (gamepad < 0 && now >= gamepad_scan) {
-				gamepad = idle_gamepad_open();
-				now = monotonic_ms();
-				if (now < 0) { result = 1; break; }
-				gamepad_scan = now + 1000;
-				if (gamepad >= 0 && idle_gamepad_sync(gamepad, &idle, now)) {
-					close(gamepad); gamepad = -1;
+			if (now >= gamepad_scan) {
+				for (unsigned i = 0; i < 3; i++) {
+					if (inputs[i] >= 0) continue;
+					struct idle_policy *state = i ? &extra[i - 1] : &idle;
+					inputs[i] = idle_gamepad_open(i);
+					now = monotonic_ms();
+					if (now < 0) { result = 1; stopped = 1; break; }
+					if (inputs[i] >= 0 && idle_gamepad_sync(inputs[i], state, now)) {
+						close(inputs[i]); inputs[i] = -1;
+					}
+					idle_activity(&idle, now);
 				}
+				gamepad_scan = now + 1000;
 			}
 		}
 		int timeout = 250;
@@ -235,9 +241,10 @@ int main(int argc, char **argv)
 			int64_t remaining = key.deadline - now;
 			if (remaining < timeout) timeout = remaining > 0 ? remaining : 0;
 		}
-		struct pollfd polls[2] = { { .fd = fd, .events = POLLIN },
-			{ .fd = gamepad, .events = POLLIN } };
-		int ready = poll(polls, 2, timeout);
+		struct pollfd polls[4] = { { .fd = fd, .events = POLLIN } };
+		for (unsigned i = 0; i < 3; i++)
+			polls[i + 1] = (struct pollfd){ .fd = inputs[i], .events = POLLIN };
+		int ready = poll(polls, 4, timeout);
 		if (ready < 0) {
 			if (errno == EINTR) continue;
 			perror("brick-power-key: poll"); result = 1; break;
@@ -255,18 +262,26 @@ int main(int argc, char **argv)
 			}
 			previous_boot = boot; previous_mono = now;
 		}
-		bool gamepad_drained = false;
-		if (gamepad >= 0) {
-			bool bad = polls[1].revents & (POLLHUP | POLLERR | POLLNVAL);
+		bool gamepad_drained = true;
+		for (unsigned i = 0; i < 3; i++) {
+			struct idle_policy *state = i ? &extra[i - 1] : &idle;
+			if (inputs[i] < 0) { gamepad_drained = false; continue; }
+			bool bad = polls[i + 1].revents & (POLLHUP | POLLERR | POLLNVAL);
+			bool complete = false;
 			for (unsigned n = 0; !bad && n < 256; n++) {
 				struct input_event e;
-				ssize_t size = read(gamepad, &e, sizeof(e));
-				if (size < 0 && errno == EAGAIN) { gamepad_drained = true; break; }
+				ssize_t size = read(inputs[i], &e, sizeof(e));
+				if (size < 0 && errno == EAGAIN) { complete = true; break; }
 				if (size < 0 && errno == EINTR) break;
-				if (size != sizeof(e) || idle_gamepad_event(gamepad, &idle, &e, now)) bad = true;
+				if (size != sizeof(e) || idle_gamepad_event(inputs[i], state, &e, now)) bad = true;
+				else if (i && (e.type == EV_KEY || (e.type == EV_SYN && e.code == SYN_DROPPED)))
+					idle_activity(&idle, now);
 			}
-			if (bad) { close(gamepad); gamepad = -1; idle.gamepad_ready = false; idle_activity(&idle, now); }
+			gamepad_drained &= complete && state->gamepad_ready && !state->gamepad_dropped;
+			if (bad) { close(inputs[i]); inputs[i] = -1; state->gamepad_ready = false; idle_activity(&idle, now); }
 		}
+		/* Fn is a latched switch: changes are activity, its on-state is not a hold. */
+		gamepad_drained &= !idle_has_keys(&extra[0]);
 		int drained = fd < 0 ? 0 : polls[0].revents & (POLLHUP | POLLERR | POLLNVAL) ? -1 :
 			drain_events(fd, &key, now);
 		if (drained < 0) {
@@ -313,7 +328,7 @@ int main(int argc, char **argv)
 		break;
 	}
 	if (idle_enabled) (void)display_change(DISPLAY_AWAKE, 0, NULL);
-	if (gamepad >= 0) close(gamepad);
+	for (unsigned i = 0; i < 3; i++) if (inputs[i] >= 0) close(inputs[i]);
 	if (fd >= 0) close(fd);
 	close(lock);
 	return result;

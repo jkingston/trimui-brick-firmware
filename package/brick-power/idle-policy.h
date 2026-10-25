@@ -82,8 +82,9 @@ static void idle_applied(struct idle_policy *p, int mode, int64_t now)
 	p->mode = mode;
 	p->pending = DISPLAY_QUERY;
 }
-static int idle_gamepad_open(void)
+static int idle_gamepad_open(unsigned slot)
 {
+	static const char * const names[] = { "TrimUI Brick Gamepad", "TrimUI Brick Volume", "TrimUI Brick Fn" };
 	glob_t paths = { 0 };
 	int found = -1;
 	if (glob("/dev/input/event*", 0, NULL, &paths)) goto out;
@@ -94,7 +95,7 @@ static int idle_gamepad_open(void)
 		if (fd < 0) continue;
 		if (!fstat(fd, &st) && S_ISCHR(st.st_mode) &&
 		    ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0 &&
-		    !strcmp(name, "TrimUI Brick Gamepad")) { found = fd; break; }
+		    slot < 3 && !strcmp(name, names[slot])) { found = fd; break; }
 		close(fd);
 	}
 out:

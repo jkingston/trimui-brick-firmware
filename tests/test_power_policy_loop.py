@@ -30,7 +30,7 @@ static int fake_sync(int fd, struct key_state *key, int64_t now)
 }
 static int fake_poll(struct pollfd *p, nfds_t n, int timeout)
 {
-    (void)p; assert(n == 2); assert(timeout > 0);
+    (void)p; assert(n == 4); assert(timeout > 0);
     assert(fake_now >= armed && fake_now < armed + HOLD_MS);
     turns++; stopped = 1; return 0;
 }

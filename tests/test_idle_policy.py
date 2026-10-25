@@ -113,6 +113,17 @@ int main(int argc, char **argv)
     assert(idle_timeout(&p, 999999, 300, false) == DISPLAY_QUERY);
     p.keys[BTN_A/8] = 0; p.gamepad_ready = false;
     assert(idle_timeout(&p, 999999, 300, false) == DISPLAY_QUERY);
+    struct idle_policy volume = { .gamepad_ready = true }, fn = { .gamepad_ready = true };
+    struct input_event e = { .type = EV_KEY, .code = KEY_VOLUMEUP, .value = 1 };
+    assert(!idle_gamepad_event(-1, &volume, &e, 400000) && idle_has_keys(&volume));
+    e.value = 0; assert(!idle_gamepad_event(-1, &volume, &e, 400100) && !idle_has_keys(&volume));
+    e.code = KEY_FN; e.value = 1;
+    assert(!idle_gamepad_event(-1, &fn, &e, 400200) && fn.last == 400200);
+    assert(!idle_has_keys(&volume)); /* latched Fn is distinct from momentary volume holds */
+    e.type = EV_SYN; e.code = SYN_DROPPED;
+    assert(!idle_gamepad_event(-1, &volume, &e, 400300) && !volume.gamepad_ready);
+    e.code = SYN_REPORT;
+    assert(idle_gamepad_event(-1, &volume, &e, 400400) < 0 && !volume.gamepad_ready);
     puts("PASS actual idle deadlines, inhibitors, held/reconnect/wake guards and shared desired brightness");
 }
 '''.replace('"SOURCE"', '"' + str(source) + '"')
