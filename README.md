@@ -89,10 +89,11 @@ starting the service. Use `wpa_cli save_config` to save a running configuration 
 Bluetooth starts powered off. Use `bluetoothctl` to power on and pair devices.
 BlueALSA provides SBC, aptX and aptX HD output. Pairing state is stored in `/var/lib/bluetooth`.
 
-`brick-suspend --disconnect-bluetooth` explicitly enters s2idle, disconnecting
+`brick-suspend --disconnect-bluetooth` requests s2idle, disconnecting
 Bluetooth and restoring its prior powered state on return. Connections are not
 guaranteed to reconnect. Keep Bluetooth power settings unchanged while it runs.
-Hardware wake/suspend qualification remains incomplete.
+The bound XR829 Wi-Fi driver currently rejects suspend; normal images cannot
+complete this request. Whole-system suspend and stock deep sleep remain unfinished.
 
 Fresh images include a separate ext4 data partition for Wi-Fi profiles, Bluetooth
 bonds, SSH keys and system identity. Existing single-partition cards use temporary
