@@ -71,13 +71,17 @@ if [ -n "$mounted_device" ]; then
 fi
 $bb mount /dev/mmcblk0p1 "$mountpoint"
 mounted=1
-[ -f "$current/Image" ] && [ -f "$current/brick-usb.dtb" ] && [ -f "$current/initramfs.cpio.gz" ]
-[ -f "$current/manifest.json" ] && [ -f "$current/SHA256SUMS" ]
+[ -f "$current/Image" ]
+[ -f "$current/brick-usb.dtb" ]
+[ -f "$current/initramfs.cpio.gz" ]
+[ -f "$current/manifest.json" ]
+[ -f "$current/SHA256SUMS" ]
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
 [ ! -e "$stage" ]
 # Retire only a prior deployment's verified rollback directory.
 if [ -d "$previous" ]; then
- [ -f "$previous/manifest.json" ] && [ -f "$previous/SHA256SUMS" ]
+ [ -f "$previous/manifest.json" ]
+ [ -f "$previous/SHA256SUMS" ]
  (cd "$previous" && $bb sha256sum -c SHA256SUMS)
  $bb rm -r "$previous"
 fi

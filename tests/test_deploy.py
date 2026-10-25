@@ -137,6 +137,26 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assert_clean()
 
+    def test_missing_current_manifest_preserves_existing_payloads(self):
+        (self.current / 'manifest.json').unlink()
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('UPDATE_VERIFIED', result.stdout)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertTrue((self.previous / 'manifest.json').exists())
+        self.assert_clean()
+
+    def test_missing_previous_manifest_does_not_delete_rollback(self):
+        (self.previous / 'manifest.json').unlink()
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('UPDATE_VERIFIED', result.stdout)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertTrue((self.current / 'manifest.json').exists())
+        self.assert_clean()
+
     def test_truncated_archive_preserves_both_existing_payloads(self):
         archive = self.tmp / 'test.tar.gz'
         archive.write_bytes(archive.read_bytes()[:-12])
