@@ -57,6 +57,10 @@ with source-over blending through MMAP buffers; DMA-BUF sharing, color key and
 general raster operations remain unfinished.
 `evtest` and ALSA utilities are included for hardware validation.
 
+The power-key daemon requests orderly shutdown after a six-second hold; device
+validation is pending. Short presses have no action. Automatic idle sleep and
+low-battery shutdown remain unfinished.
+
 Volume keys control the internal codec with a persistent 20-step setting.
 Set `FN_MUTE=1` in `/etc/default/brick-controls` to mute while Fn is active,
 then restart `/etc/init.d/S47controls`. This does not select an audio route

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+mkdir -p /run/brick-power-key
+exec 9>/run/brick-power-key/service.lock
+flock -x 9
+daemon=/usr/sbin/brick-power-key
+pidfile=/run/brick-power-key/pid
+case "${1:-}" in
+start)
+	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
+		--pidfile "$pidfile" --exec "$daemon" 9>&-
+	;;
+stop)
+	/usr/libexec/brick-stop-daemon powerkey "$pidfile" "$daemon"
+	;;
+restart)
+	/usr/libexec/brick-stop-daemon powerkey "$pidfile" "$daemon"
+	exec 9>&-
+	exec "$0" start
+	;;
+*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

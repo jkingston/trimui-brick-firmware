@@ -1,5 +1,6 @@
 config BR2_PACKAGE_BRICK_POWER
-	bool "Brick suspend command"
+	bool "Brick power controls"
 	select BR2_PACKAGE_DBUS
 	help
+	  Six-second power-key hold requests orderly shutdown.
 	  Explicit s2idle entry with Bluetooth disconnect and power restoration.
