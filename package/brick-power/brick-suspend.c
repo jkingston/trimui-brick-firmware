@@ -265,6 +265,7 @@ int main(int argc, char **argv)
 	if (argc != 2 || strcmp(argv[1], "--disconnect-bluetooth")) {
 		fprintf(stderr, "Usage: brick-suspend --disconnect-bluetooth\n"
 			"Disconnects Bluetooth for s2idle; restores adapter power, not connections.\n"
+			"Wi-Fi disconnects and reloads on resume.\n"
 			"Do not change Bluetooth power concurrently.\n");
 		return EXIT_FAILURE;
 	}
@@ -303,7 +304,7 @@ int main(int argc, char **argv)
 	dbus_connection_set_exit_on_disconnect(bus, false);
 	owner = bluez_owner();
 	if (owner) {
-		fprintf(stderr, "Suspending with Bluetooth disconnected.\n");
+		fprintf(stderr, "Requesting s2idle; Bluetooth and Wi-Fi will disconnect.\n");
 		if (!transaction())
 			result = EXIT_SUCCESS;
 		free(owner);

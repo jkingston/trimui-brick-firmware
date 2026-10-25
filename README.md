@@ -98,8 +98,9 @@ BlueALSA provides SBC, aptX and aptX HD output. Pairing state is stored in `/var
 `brick-suspend --disconnect-bluetooth` requests s2idle, disconnecting
 Bluetooth and restoring its prior powered state on return. Connections are not
 guaranteed to reconnect. Keep Bluetooth power settings unchanged while it runs.
-The bound XR829 Wi-Fi driver currently rejects suspend; normal images cannot
-complete this request. Whole-system suspend and stock deep sleep remain unfinished.
+Wi-Fi disconnects and reloads its firmware on resume; association is not retained.
+Whole-system sleep/wake and reconnection await device qualification. Stock deep
+sleep and wake-on-Wi-Fi remain unfinished.
 
 Fresh images include a separate ext4 data partition for Wi-Fi profiles, Bluetooth
 bonds, SSH keys and system identity. Existing single-partition cards use temporary
