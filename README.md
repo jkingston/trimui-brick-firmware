@@ -51,8 +51,9 @@ clocks and rails stay enabled. GPU s2idle handling awaits device validation;
 whole-system sleep remains incomplete. GPU devfreq exposes four fixed-rail rates,
 defaulting to 702 MHz; frequency changes await device validation.
 ADC capture support is present, but microphone routing awaits hardware verification.
-The video decoder, G2D rotation and IOMMU remain disabled pending qualification.
-G2D scaling and blending are not implemented.
+The video decoder, G2D rotation/scaling/color conversion and IOMMU remain disabled
+pending qualification. Multi-input blending, color key and raster operations
+remain unfinished.
 `evtest` and ALSA utilities are included for hardware validation.
 
 Volume keys control the internal codec with a persistent 20-step setting.
