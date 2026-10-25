@@ -6,7 +6,7 @@ static bool idle_resumed(int64_t before, int64_t boot, int64_t after, int64_t *u
 {
 	if (before < 0 || boot < 0 || after < before) return false;
 	bool resumed = boot - after > *upper + (*upper != INT64_MAX);
-	*upper = boot - before;
+	if (resumed || boot - before < *upper) *upper = boot - before;
 	return resumed;
 }
 /* SPDX-License-Identifier: GPL-2.0-only */

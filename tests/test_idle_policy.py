@@ -173,6 +173,9 @@ int main(int argc, char **argv)
     assert(!idle_resumed(1000, 1000, 1000, &upper));
     assert(idle_resumed(1100, 1200, 1100, &upper)); /* 100ms suspend, below old 1s cutoff */
     assert(!idle_resumed(1200, 1301, 1202, &upper)); /* bracketed scheduling jitter */
+    assert(!idle_resumed(1300, 2400, 2300, &upper)); /* wide uncertainty must not weaken prior bound */
+    assert(upper == 100);
+    assert(idle_resumed(2500, 2700, 2500, &upper));
     puts("PASS actual idle deadlines, inhibitors, held/reconnect/wake guards and shared desired brightness");
 }
 '''.replace('"SOURCE"', '"' + str(source) + '"')
