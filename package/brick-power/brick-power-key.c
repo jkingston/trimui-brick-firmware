@@ -187,8 +187,13 @@ int main(int argc, char **argv)
 				break;
 			}
 		}
+		/* Sysfs reads may block; never credit their time to a newly held key. */
+		now = monotonic_ms();
+		if (now < 0) { result = 1; break; }
 		if (fd < 0 && now >= scan) {
 			fd = discover();
+			now = monotonic_ms();
+			if (now < 0) { result = 1; break; }
 			scan = now + 1000;
 			if (fd >= 0 && synchronize(fd, &key, now)) {
 				close(fd); fd = -1;
