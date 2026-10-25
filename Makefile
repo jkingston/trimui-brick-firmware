@@ -5,8 +5,8 @@ BUILDROOT := $(ROOT)/output/buildroot-$(BUILDROOT_VERSION)
 O ?= $(ROOT)/output/build
 override O := $(abspath $(O))
 USB_ROLE ?= peripheral
-ifeq ($(filter $(USB_ROLE),peripheral host),)
-$(error USB_ROLE must be peripheral or host)
+ifeq ($(filter $(USB_ROLE),peripheral host auto),)
+$(error USB_ROLE must be peripheral, host or auto)
 endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz

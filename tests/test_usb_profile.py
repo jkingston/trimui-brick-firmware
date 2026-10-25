@@ -1,7 +1,6 @@
 """Exercise profile selection, actual DT payloads and gadget startup gating."""
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -53,12 +52,17 @@ class ProfileTests(unittest.TestCase):
             self.skipTest('dtc and fdtget are required for real DT payload tests')
         gadget = gadget_status or ('okay' if role == 'peripheral' else 'disabled')
         host = 'okay' if role == 'host' else 'disabled'
+        coordinator = '' if role != 'auto' else '''usb-role-switch {
+ compatible = "trimui,brick-usb-role-switch"; status = "okay";
+ peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
+};'''
         source = f'''/dts-v1/;
 / {{ #address-cells = <1>; #size-cells = <1>;
+ {coordinator}
  soc {{ #address-cells = <1>; #size-cells = <1>; ranges;
- usb@5100000 {{ reg = <0x5100000 0x400>; status = "{gadget}"; dr_mode = "peripheral"; }};
- usb@5101000 {{ reg = <0x5101000 0x100>; status = "{host}"; dr_mode = "host"; }};
- usb@5101400 {{ reg = <0x5101400 0x100>; status = "{host}"; dr_mode = "host"; }};
+ musb: usb@5100000 {{ reg = <0x5100000 0x400>; status = "{gadget}"; dr_mode = "peripheral"; }};
+ ehci: usb@5101000 {{ reg = <0x5101000 0x100>; status = "{host}"; dr_mode = "host"; }};
+ ohci: usb@5101400 {{ reg = <0x5101400 0x100>; status = "{host}"; dr_mode = "host"; }};
  }};
 }};
 '''
@@ -112,21 +116,48 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             usb_profile.install(self.root, self.config, '/not-invoked')
 
-    def test_gadget_service_uses_live_dt_status(self):
-        script = (ROOT / 'board/trimui/brick/rootfs-overlay/etc/init.d/S30usb').read_text()
-        status = self.root / 'status'
-        configfs = self.root / 'configfs'
-        (configfs / 'usb_gadget/brick').mkdir(parents=True)
-        marker = self.root / 'called'
-        command = self.root / 'mountpoint'
-        command.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 0\n')
-        command.chmod(0o755)
-        script = script.replace('/sys/firmware/devicetree/base/soc/usb@5100000/status', str(status))
-        script = script.replace('/sys/kernel/config', str(configfs))
-        env = dict(os.environ, PATH=str(self.root) + ':' + os.environ['PATH'])
-        for value, expected, called in [(b'disabled\0', 0, False), (b'bad\0', 1, False), (b'okay\0', 0, True)]:
-            with self.subTest(status=value):
-                status.write_bytes(value)
-                result = subprocess.run(['sh', '-c', script, 'S30usb', 'start'], env=env)
-                self.assertEqual(result.returncode, expected)
-                self.assertEqual(marker.exists(), called)
+    def test_auto_profile_has_owned_disabled_controllers(self):
+        usb_profile.configure(self.config, 'auto')
+        source, fdtget = self.compile_dtb('auto')
+        data = source.read_bytes()
+        usb_profile.install(self.root, self.config, fdtget)
+        self.assertEqual((self.root / (usb_profile.DTBS['peripheral'] + '.dtb')).read_bytes(), data)
+
+    def test_auto_profile_rejects_enabled_unowned_controller(self):
+        usb_profile.configure(self.config, 'auto')
+        _, fdtget = self.compile_dtb('auto', gadget_status='okay')
+        with self.assertRaises(ValueError):
+            usb_profile.install(self.root, self.config, fdtget)
+
+    def test_auto_profile_rejects_wrong_controller_reference(self):
+        usb_profile.configure(self.config, 'auto')
+        source, fdtget = self.compile_dtb('auto')
+        fdtput = shutil.which('fdtput')
+        if not fdtput:
+            self.skipTest('fdtput required for mutated DT test')
+        ohci = subprocess.check_output([fdtget, '-t', 'x', str(source),
+                                       '/soc/usb@5101400', 'phandle'], text=True).strip()
+        subprocess.run([fdtput, '-t', 'x', str(source), '/usb-role-switch',
+                        'peripheral', ohci], check=True)
+        with self.assertRaisesRegex(ValueError, 'ownership'):
+            usb_profile.install(self.root, self.config, fdtget)
+
+    def test_auto_profile_rejects_missing_owner_or_wrong_mode(self):
+        usb_profile.configure(self.config, 'auto')
+        source, fdtget = self.compile_dtb('auto')
+        fdtput = shutil.which('fdtput')
+        if not fdtput:
+            self.skipTest('fdtput required for mutated DT test')
+        original = source.read_bytes()
+        destination = self.root / (usb_profile.DTBS['peripheral'] + '.dtb')
+        for mutation in [['-r', '/usb-role-switch'],
+                         ['-t', 's', '/soc/usb@5100000', 'dr_mode', 'host']]:
+            with self.subTest(mutation=mutation):
+                source.write_bytes(original)
+                destination.write_bytes(b'previous')
+                subprocess.run([fdtput, *mutation[:1], str(source), *mutation[1:]]
+                               if mutation[0] == '-r' else
+                               [fdtput, '-t', 's', str(source), *mutation[2:]], check=True)
+                with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                    usb_profile.install(self.root, self.config, fdtget)
+                self.assertEqual(destination.read_bytes(), b'previous')

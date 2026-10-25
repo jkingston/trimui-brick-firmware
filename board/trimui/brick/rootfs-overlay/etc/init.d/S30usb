@@ -1,19 +1,31 @@
 #!/bin/sh
 set -eu
-case "${1:-}" in
-start)
-	# Fixed-host images have no gadget controller. Use the live DT as authority.
+state=/run/brick-usb
+g=/sys/kernel/config/usb_gadget/brick
+udc=/sys/class/udc/5100000.usb
+mkdir -p "$state"
+exec 9>"$state/lock"
+flock -x 9
+
+profile() {
+	auto=/sys/firmware/devicetree/base/usb-role-switch
+	if [ -r "$auto/status" ] && [ "$(tr -d '\000' < "$auto/status")" = okay ]; then
+		[ "$(tr -d '\000' < "$auto/compatible")" = trimui,brick-usb-role-switch ] || return 1
+		return 0
+	fi
 	status=/sys/firmware/devicetree/base/soc/usb@5100000/status
-	[ -r "$status" ] || exit 1
+	[ -r "$status" ] || return 1
 	case "$(tr -d '\000' < "$status")" in
-	disabled) exit 0 ;;
-	okay) ;;
-	*) exit 1 ;;
+	okay) return 0 ;;
+	disabled) return 2 ;;
+	*) return 1 ;;
 	esac
+}
+
+configure() {
 	mountpoint -q /sys/kernel/config || mount -t configfs configfs /sys/kernel/config
-	g=/sys/kernel/config/usb_gadget/brick
-	[ ! -d "$g" ] || exit 0
-	mkdir "$g"
+	[ ! -f "$state/configured" ] || return 0
+	mkdir -p "$g"
 	echo 0x1d6b > "$g/idVendor"
 	echo 0x0104 > "$g/idProduct"
 	echo 0x0200 > "$g/bcdUSB"
@@ -23,17 +35,59 @@ start)
 	echo 'TrimUI Brick Linux console' > "$g/strings/0x409/product"
 	echo 'Serial console and Ethernet' > "$g/configs/c.1/strings/0x409/configuration"
 	echo 100 > "$g/configs/c.1/MaxPower"
-	ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
-	ethernet=0
-	if mkdir "$g/functions/ecm.usb0" 2>/dev/null; then
-		ln -s "$g/functions/ecm.usb0" "$g/configs/c.1/ecm.usb0"
-		ethernet=1
+	[ -L "$g/configs/c.1/acm.usb0" ] || ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
+	mkdir -p "$g/functions/ecm.usb0"
+	[ -L "$g/configs/c.1/ecm.usb0" ] || ln -s "$g/functions/ecm.usb0" "$g/configs/c.1/ecm.usb0"
+	touch "$state/configured"
+}
+
+reconcile() {
+	[ -f "$state/enabled" ] || return 0
+	[ -e "$udc" ] || return 0
+	# UDC add precedes gadget registration. Wait only for this add to finish.
+	n=0
+	while [ ! -e "$udc/gadget" ]; do
+		[ -e "$udc" ] || return 0
+		[ "$n" -lt 20 ] || return 1
+		sleep 0.1
+		n=$((n + 1))
+	done
+	configure
+	# The gadget bus retains the registered driver across UDC removal.
+	if [ -z "$(cat "$g/UDC")" ]; then
+		if ! echo "${udc##*/}" > "$g/UDC"; then
+			[ ! -e "$udc" ] && return 0
+			return 1
+		fi
 	fi
-	set -- /sys/class/udc/*
-	[ "$#" -eq 1 ] && [ -e "$1" ]
-	echo "${1##*/}" > "$g/UDC"
-	if [ "$ethernet" -eq 1 ]; then
+	# ECM keeps its netdev across detach/reattach; repeat startup is harmless.
+	if [ -e /sys/class/net/usb0 ]; then
 		ifconfig usb0 192.168.7.2 netmask 255.255.255.0 up
 	fi
+}
+
+case "${1:-}" in
+start)
+	result=0
+	profile || result=$?
+	[ "$result" -ne 2 ] || exit 0
+	[ "$result" -eq 0 ] || exit "$result"
+	touch "$state/enabled"
+	reconcile
 	;;
+stop)
+	rm -f "$state/enabled"
+	if [ -r "$g/UDC" ] && [ -n "$(cat "$g/UDC")" ]; then
+		echo '' > "$g/UDC"
+	fi
+	;;
+hotplug)
+	case "${ACTION:-}" in add|change|bind) reconcile ;; esac
+	;;
+restart)
+	exec 9>&-
+	"$0" stop
+	exec "$0" start
+	;;
+*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
 esac

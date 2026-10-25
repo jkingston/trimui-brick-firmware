@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Select and validate the board's fixed USB role at build time."""
+"""Select and validate the board's USB role profile at build time."""
 import argparse
 from pathlib import Path
 import re
 import subprocess
 
 DTBS = {'peripheral': 'sun50i-a133-trimui-brick',
-        'host': 'sun50i-a133-trimui-brick-host'}
+        'host': 'sun50i-a133-trimui-brick-host',
+        'auto': 'sun50i-a133-trimui-brick-auto-usb'}
 KEY = 'BR2_LINUX_KERNEL_INTREE_DTS_NAME'
 
 
@@ -38,9 +39,10 @@ def install(images, config, fdtget):
     if not source.is_file():
         raise FileNotFoundError(f'Selected kernel does not provide {source.name}')
 
-    def get(node, prop):
-        return subprocess.check_output([str(fdtget), '-t', 's', str(source),
-                                        '/soc/' + node, prop], text=True).strip()
+    def get(node, prop, kind='s'):
+        path = node if node.startswith('/') else '/soc/' + node
+        return subprocess.check_output([str(fdtget), '-t', kind, str(source),
+                                        path, prop], text=True).strip()
 
     for node, enabled in [('usb@5100000', role == 'peripheral'),
                           ('usb@5101000', role == 'host'),
@@ -49,6 +51,17 @@ def install(images, config, fdtget):
             raise ValueError(f'{role} profile has inconsistent {node} status')
         if enabled and get(node, 'dr_mode') != role:
             raise ValueError(f'{role} profile has inconsistent {node} dr_mode')
+    if role == 'auto':
+        owner = '/usb-role-switch'
+        if (get(owner, 'status') != 'okay' or
+                get(owner, 'compatible') != 'trimui,brick-usb-role-switch'):
+            raise ValueError('auto profile lacks its role coordinator')
+        for prop, node, mode in [('peripheral', 'usb@5100000', 'peripheral'),
+                                 ('ehci', 'usb@5101000', 'host'),
+                                 ('ohci', 'usb@5101400', 'host')]:
+            if (get(owner, prop, 'x') != get(node, 'phandle', 'x') or
+                    get(node, 'dr_mode') != mode):
+                raise ValueError('auto profile has inconsistent controller ownership')
     # Keep the bootloader/updater payload ABI independent of the build profile.
     destination = images / (DTBS['peripheral'] + '.dtb')
     if source != destination:

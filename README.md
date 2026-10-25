@@ -68,6 +68,11 @@ USB serial/Ethernet are unavailable. The updater requests reboot but cannot
 confirm host-profile boot over USB. Returning to peripheral mode requires its
 image and a reboot. Host operation still needs device validation.
 
+An experimental automatic bottom-port profile uses `USB_ROLE=auto` with a fresh
+output directory and a kernel providing the role-coordinator DTB. Serial and
+Ethernet return in device mode; host-mode boot cannot provide a USB console.
+Automatic transitions still require device qualification.
+
 USB Ethernet uses `192.168.7.2/24`.
 Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
 install a key in `/root/.ssh/authorized_keys` through the serial console.
