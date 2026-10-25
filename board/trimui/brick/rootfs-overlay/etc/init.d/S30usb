@@ -2,10 +2,19 @@
 set -eu
 state=/run/brick-usb
 g=/sys/kernel/config/usb_gadget/brick
-udc=/sys/class/udc/5100000.usb
 mkdir -p "$state"
 exec 9>"$state/lock"
 flock -x 9
+
+find_udc() {
+	set -- /sys/class/udc/*
+	[ -e "$1" ] || return 1
+	[ "$#" -eq 1 ] || {
+		echo "Expected one USB device controller, found $#" >&2
+		return 1
+	}
+	printf '%s\n' "$1"
+}
 
 profile() {
 	auto=/sys/firmware/devicetree/base/usb-role-switch
@@ -43,7 +52,7 @@ configure() {
 
 reconcile() {
 	[ -f "$state/enabled" ] || return 0
-	[ -e "$udc" ] || return 0
+	udc=$(find_udc) || return 0
 	# UDC add precedes gadget registration. Wait only for this add to finish.
 	n=0
 	while [ ! -e "$udc/gadget" ]; do

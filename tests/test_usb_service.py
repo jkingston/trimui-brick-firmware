@@ -15,7 +15,9 @@ class GadgetServiceTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.state = self.root / 'run/brick-usb'
         self.gadget = self.root / 'sys/kernel/config/usb_gadget/brick'
-        self.udc = self.root / 'sys/class/udc/5100000.usb'
+        # MUSB names the UDC after its dynamically allocated child device,
+        # rather than after the parent controller's DT address.
+        self.udc = self.root / 'sys/class/udc/musb-hdrc.1.auto'
         self.status = self.root / 'sys/firmware/devicetree/base/soc/usb@5100000/status'
         self.status.parent.mkdir(parents=True)
         self.status.write_bytes(b'okay\0')
@@ -57,7 +59,7 @@ class GadgetServiceTests(unittest.TestCase):
         self.assertFalse(self.gadget.exists())
         self.controller()
         self.run_service('hotplug')
-        self.assertEqual((self.gadget / 'UDC').read_text().strip(), '5100000.usb')
+        self.assertEqual((self.gadget / 'UDC').read_text().strip(), 'musb-hdrc.1.auto')
         self.assertTrue((self.gadget / 'configs/c.1/ecm.usb0').is_symlink())
         self.run_service('hotplug', 'change')
         self.run_service('start')
@@ -67,7 +69,7 @@ class GadgetServiceTests(unittest.TestCase):
         self.run_service('hotplug')
         self.assertEqual((self.gadget / 'UDC').read_text().strip(), '')
         self.run_service('start')
-        self.assertEqual((self.gadget / 'UDC').read_text().strip(), '5100000.usb')
+        self.assertEqual((self.gadget / 'UDC').read_text().strip(), 'musb-hdrc.1.auto')
 
     def test_fixed_host_and_invalid_dt_do_not_configure(self):
         for status, success in [(b'disabled\0', True), (b'unknown\0', False)]:
@@ -84,13 +86,28 @@ class GadgetServiceTests(unittest.TestCase):
         self.run_service('hotplug')
         self.assertTrue((self.state / 'configured').exists())
 
+    def test_absent_or_ambiguous_udc_is_not_configured(self):
+        self.run_service('start')
+        self.assertFalse(self.gadget.exists())
+
+        self.udc.mkdir(parents=True)
+        other = self.udc.parent / 'unexpected.0'
+        other.mkdir()
+        self.run_service('hotplug')
+        self.assertFalse(self.gadget.exists())
+
+        other.rmdir()
+        (self.udc / 'gadget').mkdir()
+        self.run_service('hotplug')
+        self.assertTrue((self.state / 'configured').exists())
+
     def test_remove_event_and_events_before_start_are_ignored(self):
         self.controller()
         self.run_service('hotplug')
         self.assertFalse((self.state / 'configured').exists())
         self.run_service('start')
         self.run_service('hotplug', 'remove')
-        self.assertEqual((self.gadget / 'UDC').read_text().strip(), '5100000.usb')
+        self.assertEqual((self.gadget / 'UDC').read_text().strip(), 'musb-hdrc.1.auto')
 
     def test_existing_registered_gadget_is_not_rewritten(self):
         self.controller()
