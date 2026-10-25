@@ -2,6 +2,14 @@
 set -eu
 case "${1:-}" in
 start)
+	# Fixed-host images have no gadget controller. Use the live DT as authority.
+	status=/sys/firmware/devicetree/base/soc/usb@5100000/status
+	[ -r "$status" ] || exit 1
+	case "$(tr -d '\000' < "$status")" in
+	disabled) exit 0 ;;
+	okay) ;;
+	*) exit 1 ;;
+	esac
 	mountpoint -q /sys/kernel/config || mount -t configfs configfs /sys/kernel/config
 	g=/sys/kernel/config/usb_gadget/brick
 	[ ! -d "$g" ] || exit 0

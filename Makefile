@@ -4,6 +4,10 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BUILDROOT := $(ROOT)/output/buildroot-$(BUILDROOT_VERSION)
 O ?= $(ROOT)/output/build
 override O := $(abspath $(O))
+USB_ROLE ?= peripheral
+ifeq ($(filter $(USB_ROLE),peripheral host),)
+$(error USB_ROLE must be peripheral or host)
+endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
@@ -23,7 +27,10 @@ $(BUILDROOT)/.brick-extracted: $(ARCHIVE)
 	touch $@
 
 configure: $(BUILDROOT)/.brick-extracted
+	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
+	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE)
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
 
 $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure

@@ -56,6 +56,13 @@ then restart `/etc/init.d/S47controls`. This does not select an audio route
 or control Bluetooth/USB audio volume. These controls require the matching
 development kernel's digital-gain controls; device validation is pending.
 
+An explicit fixed-host build uses `make O=output/host USB_ROLE=host configure`,
+then `make O=output/host`. The default build remains peripheral-only.
+Host images keep the normal boot payload filenames and skip gadget setup;
+USB serial/Ethernet are unavailable. The updater requests reboot but cannot
+confirm host-profile boot over USB. Returning to peripheral mode requires its
+image and a reboot. Host operation still needs device validation.
+
 USB Ethernet uses `192.168.7.2/24`.
 Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
 install a key in `/root/.ssh/authorized_keys` through the serial console.

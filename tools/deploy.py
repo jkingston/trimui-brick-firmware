@@ -112,6 +112,8 @@ echo UPDATE_VERIFIED
 
 
 def verify_boot_manifest(actual, expected):
+    if actual.get('usb_role', 'peripheral') != expected.get('usb_role', 'peripheral'):
+        raise ProtocolError('Boot USB role does not match expected image')
     for field in ('firmware', 'kernel', 'config_sha256'):
         if actual[field] != expected[field]:
             raise ProtocolError(f'Running rootfs has different {field} metadata')
@@ -165,6 +167,9 @@ def main():
             previous_boot = uuid.UUID(console.checked('/bin/busybox cat /proc/sys/kernel/random/boot_id').decode().strip())
             # Let PID 1 stop services and unmount persistent data.
             console.checked('(/bin/busybox sleep 2; /bin/busybox reboot) </dev/null >/dev/null 2>&1 &')
+        if manifest.get('usb_role') == 'host':
+            print('Host-profile reboot requested; boot is not verified because USB serial is disabled.')
+            return
         time.sleep(3)
         wait_for_boot(args.port, manifest, args.timeout, previous_boot)
 

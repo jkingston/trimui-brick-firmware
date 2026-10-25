@@ -236,7 +236,7 @@ class BootIdentityTests(unittest.TestCase):
 
 
 class DeploymentLifecycleTests(unittest.TestCase):
-    def run_deployment(self, no_reboot=False, install_failure=False):
+    def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None):
         console = MagicMock()
         console.__enter__.return_value = console
         console.checked.side_effect = lambda command, **kwargs: (
@@ -247,7 +247,7 @@ class DeploymentLifecycleTests(unittest.TestCase):
         args = ['deploy.py', 'images'] + (['--no-reboot'] if no_reboot else [])
         with patch.object(sys, 'argv', args), \
              patch.object(deploy, 'Console', return_value=console), \
-             patch.object(deploy, 'package', return_value=(Path('archive'), {'build': 'new'})), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), {'build': 'new', 'usb_role': usb_role})), \
              patch.object(deploy, 'wait_for_boot') as wait, \
              patch.object(deploy.time, 'sleep'):
             if install_failure:
@@ -282,6 +282,11 @@ class DeploymentLifecycleTests(unittest.TestCase):
         wait.assert_called_once()
         self.assertLess(commands.index(next(c for c in commands if c.startswith('/bin/sh '))),
                         commands.index(reboot[0]))
+
+    def test_host_reboot_does_not_wait_for_unavailable_usb_serial(self):
+        console, wait = self.run_deployment(usb_role='host')
+        self.assertEqual(sum('reboot' in call.args[0] for call in console.checked.call_args_list), 1)
+        wait.assert_not_called()
 
     def test_no_reboot_leaves_device_running_without_waiting_for_boot(self):
         console, wait = self.run_deployment(no_reboot=True)
