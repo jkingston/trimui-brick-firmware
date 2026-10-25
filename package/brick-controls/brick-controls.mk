@@ -8,6 +8,7 @@ define BRICK_CONTROLS_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
 		$(@D)/brick-controls.c -lasound -o $(@D)/brick-controls
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
+		-I$(BR2_EXTERNAL_BRICK_PATH)/package/brick-power \
 		$(@D)/brick-brightness.c -o $(@D)/brick-brightness
 endef
 

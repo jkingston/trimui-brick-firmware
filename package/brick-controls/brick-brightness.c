@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "settings.h"
+#include "display-state.h"
 
 #define BACKLIGHT "/sys/class/backlight/backlight/"
 static volatile sig_atomic_t stopped;
@@ -48,24 +49,7 @@ static int read_attribute(const char *path)
 
 static int set_level(int level)
 {
-	char data[16];
-	int length = snprintf(data, sizeof(data), "%d\n", raw_level(level));
-	int fd = open(BACKLIGHT "brightness", O_WRONLY | O_CLOEXEC);
-	if (fd < 0) return -errno;
-	int result = write(fd, data, length) == length ? 0 : -EIO;
-	close(fd);
-	return result;
-}
-
-/* Read the current value for every shortcut so frontend changes are respected. */
-static int next_level(int raw, bool up)
-{
-	if (up) {
-		for (int i = 0; i <= 10; i++) if (raw_level(i) > raw) return i;
-	} else {
-		for (int i = 10; i >= 0; i--) if (raw_level(i) < raw) return i;
-	}
-	return -1;
+	return display_change(DISPLAY_SET, raw_level(level), NULL);
 }
 
 struct keys { bool start, select, dropped; };
@@ -129,8 +113,14 @@ int main(int argc, char **argv)
 	int fd = -1, lock, saved, result = 1;
 	double scan = 0, save = 0;
 	bool dirty = false;
+	if (argc == 3 && !strcmp(argv[1], "--set")) {
+		char *end; errno = 0;
+		long level = strtol(argv[2], &end, 10);
+		if (errno || !*argv[2] || *end || level < 0 || level > 10) return 2;
+		return set_level(level) ? 1 : 0;
+	}
 	if (argc != 2) {
-		fprintf(stderr, "Usage: brick-brightness STATEFILE\n");
+		fprintf(stderr, "Usage: brick-brightness STATEFILE | --set LEVEL(0..10)\n");
 		return 2;
 	}
 	lock = open("/run/brick-brightness.lock", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -167,11 +157,10 @@ int main(int argc, char **argv)
 					close(fd); fd = -1; keys = (struct keys){ 0 }; break;
 				}
 				if (!direction) continue;
-				int raw = read_attribute(BACKLIGHT "brightness");
-				if (raw < 0) goto out;
-				int next = next_level(raw, direction > 0);
-				if (next < 0) continue;
-				if (set_level(next)) goto out;
+				struct display_state display;
+				if (display_change(direction > 0 ? DISPLAY_UP : DISPLAY_DOWN, 0, &display)) goto out;
+				int next = 0;
+				while (next < 10 && raw_level(next) < display.desired) next++;
 				saved = next; dirty = true; save = now() + 2;
 			}
 		}

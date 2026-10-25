@@ -3,6 +3,8 @@ set -eu
 mkdir -p /run/brick-power-key
 exec 9>/run/brick-power-key/service.lock
 flock -x 9
+[ ! -f /etc/default/brick-power ] || . /etc/default/brick-power
+export BRICK_DIM_SECONDS=${BRICK_DIM_SECONDS:-300}
 daemon=/usr/sbin/brick-power-key
 pidfile=/run/brick-power-key/pid
 case "${1:-}" in

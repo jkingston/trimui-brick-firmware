@@ -20,6 +20,8 @@
 #define HOLD_MS 6000
 #define BATTERY_POLL_MS 10000
 #include "battery-policy.h"
+#include "display-state.h"
+#include "idle-policy.h"
 struct key_state {
 	bool down, dropped, fired;
 	int64_t deadline;
@@ -61,6 +63,7 @@ static int synchronize(int fd, struct key_state *key, int64_t now)
 	if (down < 0)
 		return -1;
 	key->down = down;
+	if (idle_enabled) idle_power_sync(&idle, down, now);
 	if (down)
 		key->deadline = now + HOLD_MS;
 	return 0;
@@ -72,6 +75,7 @@ static int consume_event(int fd, struct key_state *key,
 	if (event->type == EV_SYN && event->code == SYN_DROPPED) {
 		cancel_hold(key);
 		key->dropped = true;
+		if (idle_enabled) idle_power_sync(&idle, false, now);
 		return 0;
 	}
 	if (key->dropped) {
@@ -81,6 +85,7 @@ static int consume_event(int fd, struct key_state *key,
 	}
 	if (event->type != EV_KEY || event->code != KEY_POWER)
 		return 0;
+	if (idle_enabled) idle_power_event(&idle, event->value, now);
 	if (event->value == 0)
 		cancel_hold(key);
 	else if (event->value == 1 && !key->down) {
@@ -158,7 +163,18 @@ int main(int argc, char **argv)
 {
 	struct key_state key = { 0 };
 	struct sigaction action = { .sa_handler = stop };
-	int fd = -1, lock, result = 0;
+	int fd = -1, gamepad = -1, lock, result = 0;
+	int dim_seconds = 300;
+	uint32_t previous_generation = UINT32_MAX;
+	bool resume_resync = false;
+	int64_t gamepad_scan = 0, display_scan = 0, previous_mono = 0, previous_boot = 0;
+	const char *setting = getenv("BRICK_DIM_SECONDS");
+	if (setting) {
+		char *end; errno = 0;
+		long value = strtol(setting, &end, 10);
+		if (errno || !*setting || *end || value < 0 || value > 86400) return 2;
+		dim_seconds = value;
+	}
 	int64_t scan = 0, battery_scan = monotonic_ms() + 1000;
 	(void)argv;
 	if (argc != 1) {
@@ -177,6 +193,10 @@ int main(int argc, char **argv)
 		close(lock);
 		return 1;
 	}
+	struct display_state display;
+	idle_enabled = !display_change(DISPLAY_AWAKE, 0, &display);
+	idle = (struct idle_policy){ .pending = DISPLAY_QUERY, .last = monotonic_ms(),
+		.last_wake = monotonic_ms() };
 	while (!stopped) {
 		int64_t now = monotonic_ms();
 		if (now < 0) { result = 1; break; }
@@ -199,13 +219,25 @@ int main(int argc, char **argv)
 				close(fd); fd = -1;
 			}
 		}
+		if (idle_enabled) {
+			if (gamepad < 0 && now >= gamepad_scan) {
+				gamepad = idle_gamepad_open();
+				now = monotonic_ms();
+				if (now < 0) { result = 1; break; }
+				gamepad_scan = now + 1000;
+				if (gamepad >= 0 && idle_gamepad_sync(gamepad, &idle, now)) {
+					close(gamepad); gamepad = -1;
+				}
+			}
+		}
 		int timeout = 250;
 		if (key.down && !key.dropped && !key.fired) {
 			int64_t remaining = key.deadline - now;
 			if (remaining < timeout) timeout = remaining > 0 ? remaining : 0;
 		}
-		struct pollfd p = { .fd = fd, .events = POLLIN };
-		int ready = poll(&p, 1, timeout);
+		struct pollfd polls[2] = { { .fd = fd, .events = POLLIN },
+			{ .fd = gamepad, .events = POLLIN } };
+		int ready = poll(polls, 2, timeout);
 		if (ready < 0) {
 			if (errno == EINTR) continue;
 			perror("brick-power-key: poll"); result = 1; break;
@@ -213,14 +245,59 @@ int main(int argc, char **argv)
 		if (stopped) break;
 		now = monotonic_ms();
 		if (now < 0) { result = 1; break; }
-		if (fd < 0) continue;
-		int drained = p.revents & (POLLHUP | POLLERR | POLLNVAL) ? -1 :
+		if (idle_enabled) {
+			int64_t boot = battery_clock_ms();
+			if (previous_boot && boot >= previous_boot &&
+			    boot - previous_boot - (now - previous_mono) > 1000) {
+				resume_resync = true;
+				idle_power_sync(&idle, key.down, now);
+				idle.last_wake = now; idle.pending = DISPLAY_AWAKE;
+			}
+			previous_boot = boot; previous_mono = now;
+		}
+		bool gamepad_drained = false;
+		if (gamepad >= 0) {
+			bool bad = polls[1].revents & (POLLHUP | POLLERR | POLLNVAL);
+			for (unsigned n = 0; !bad && n < 256; n++) {
+				struct input_event e;
+				ssize_t size = read(gamepad, &e, sizeof(e));
+				if (size < 0 && errno == EAGAIN) { gamepad_drained = true; break; }
+				if (size < 0 && errno == EINTR) break;
+				if (size != sizeof(e) || idle_gamepad_event(gamepad, &idle, &e, now)) bad = true;
+			}
+			if (bad) { close(gamepad); gamepad = -1; idle.gamepad_ready = false; idle_activity(&idle, now); }
+		}
+		int drained = fd < 0 ? 0 : polls[0].revents & (POLLHUP | POLLERR | POLLNVAL) ? -1 :
 			drain_events(fd, &key, now);
 		if (drained < 0) {
 			cancel_hold(&key);
 			close(fd); fd = -1;
 			scan = now + 1000;
-			continue;
+			if (idle_enabled) idle_power_sync(&idle, false, now);
+			drained = 0;
+		}
+		/* Discard the wake press/release sequence before arming a new short
+		 * press; a held wake button must not switch the backlight off again.
+		 */
+		if (resume_resync && idle.pending == DISPLAY_OFF) idle.pending = DISPLAY_AWAKE;
+		if (resume_resync && drained == 1) {
+			if (synchronize(fd, &key, now)) { close(fd); fd = -1; drained = 0; }
+			idle.pending = DISPLAY_AWAKE;
+			resume_resync = false;
+		}
+		if (idle_enabled && (now >= display_scan || idle.pending != DISPLAY_QUERY)) {
+			display_scan = now + 1000;
+			if (!display_change(DISPLAY_QUERY, 0, &display)) {
+				if (display.mode != idle.mode) idle_applied(&idle, display.mode, now);
+				if (previous_generation != display.generation && display.mode == DISPLAY_AWAKE)
+					idle_activity(&idle, now);
+				previous_generation = display.generation;
+				int operation = idle.pending;
+				if (operation == DISPLAY_QUERY && !resume_resync && drained == 1 && gamepad_drained && !key.dropped)
+					operation = idle_timeout(&idle, now, dim_seconds, !access("/tmp/stay_awake", F_OK));
+				if (operation != DISPLAY_QUERY && !display_change_if(operation, 0, &display, &display))
+					idle_applied(&idle, display.mode, monotonic_ms());
+			}
 		}
 		if (stopped || !drained || !hold_due(&key, now)) continue;
 		/* A release can arrive after the drain; confirm the current input state. */
@@ -235,6 +312,8 @@ int main(int argc, char **argv)
 		result = request_poweroff("six-second hold");
 		break;
 	}
+	if (idle_enabled) (void)display_change(DISPLAY_AWAKE, 0, NULL);
+	if (gamepad >= 0) close(gamepad);
 	if (fd >= 0) close(fd);
 	close(lock);
 	return result;

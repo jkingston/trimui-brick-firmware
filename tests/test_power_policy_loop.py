@@ -30,7 +30,7 @@ static int fake_sync(int fd, struct key_state *key, int64_t now)
 }
 static int fake_poll(struct pollfd *p, nfds_t n, int timeout)
 {
-    (void)p; assert(n == 1); assert(timeout > 0);
+    (void)p; assert(n == 2); assert(timeout > 0);
     assert(fake_now >= armed && fake_now < armed + HOLD_MS);
     turns++; stopped = 1; return 0;
 }
@@ -40,6 +40,9 @@ static int fake_close(int fd) { assert(fd == 77 || fd == 78); return 0; }
 static int fake_signal(int signum, const struct sigaction *a, struct sigaction *old)
 { (void)signum; (void)a; (void)old; return 0; }
 static int forbidden_poweroff(const char *reason) { (void)reason; abort(); }
+static int fake_display(int op, int value, struct display_state *out)
+{ (void)op; (void)value; (void)out; return -1; }
+#define display_change fake_display
 #define monotonic_ms fake_clock
 #define battery_critical fake_battery
 #define discover fake_discover
