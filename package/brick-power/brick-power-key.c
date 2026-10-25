@@ -168,7 +168,7 @@ int main(int argc, char **argv)
 	int dim_seconds = 300;
 	uint32_t previous_generation = UINT32_MAX;
 	bool resume_resync = false;
-	int64_t gamepad_scan = 0, display_scan = 0, previous_mono = 0, previous_boot = 0;
+	int64_t gamepad_scan = 0, display_scan = 0, resume_upper = INT64_MAX;
 	const char *setting = getenv("BRICK_DIM_SECONDS");
 	if (setting) {
 		char *end; errno = 0;
@@ -253,14 +253,12 @@ int main(int argc, char **argv)
 		now = monotonic_ms();
 		if (now < 0) { result = 1; break; }
 		if (idle_enabled) {
-			int64_t boot = battery_clock_ms();
-			if (previous_boot && boot >= previous_boot &&
-			    boot - previous_boot - (now - previous_mono) > 1000) {
+			int64_t before = monotonic_ms(), boot = battery_clock_ms(), after = monotonic_ms();
+			if (idle_resumed(before, boot, after, &resume_upper)) {
 				resume_resync = true;
 				idle_power_sync(&idle, key.down, now);
 				idle.last_wake = now; idle.pending = DISPLAY_AWAKE;
 			}
-			previous_boot = boot; previous_mono = now;
 		}
 		bool gamepad_drained = true;
 		for (unsigned i = 0; i < 3; i++) {
@@ -294,7 +292,7 @@ int main(int argc, char **argv)
 		/* Discard the wake press/release sequence before arming a new short
 		 * press; a held wake button must not switch the backlight off again.
 		 */
-		if (resume_resync && idle.pending == DISPLAY_OFF) idle.pending = DISPLAY_AWAKE;
+		if (resume_resync && (idle.pending == DISPLAY_OFF || idle.pending == DISPLAY_TOGGLE)) idle.pending = DISPLAY_AWAKE;
 		if (resume_resync && drained == 1) {
 			if (synchronize(fd, &key, now)) { close(fd); fd = -1; drained = 0; }
 			idle.pending = DISPLAY_AWAKE;
@@ -302,12 +300,14 @@ int main(int argc, char **argv)
 		}
 		if (idle_enabled && (now >= display_scan || idle.pending != DISPLAY_QUERY)) {
 			display_scan = now + 1000;
+			int intent = idle.pending;
 			if (!display_change(DISPLAY_QUERY, 0, &display)) {
 				if (display.mode != idle.mode) idle_applied(&idle, display.mode, now);
 				if (previous_generation != display.generation && display.mode == DISPLAY_AWAKE)
 					idle_activity(&idle, now);
 				previous_generation = display.generation;
-				int operation = idle.pending;
+				if (intent == DISPLAY_TOGGLE) idle.pending = intent;
+				int operation = idle_resolve(&idle, now, drained == 1 && !key.dropped && !resume_resync);
 				if (operation == DISPLAY_QUERY && !resume_resync && drained == 1 && gamepad_drained && !key.dropped)
 					operation = idle_timeout(&idle, now, dim_seconds, !access("/tmp/stay_awake", F_OK));
 				if (operation != DISPLAY_QUERY && !display_change_if(operation, 0, &display, &display))

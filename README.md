@@ -60,12 +60,13 @@ general raster operations remain unfinished.
 The power-key daemon requests orderly shutdown after a six-second hold; device
 validation is pending. It also requests shutdown at 1% or below when fresh
 battery telemetry confirms USB is offline and charging is inactive. Invalid or
-missing telemetry inhibits this action. Short power presses toggle the backlight. By default, inactivity dims after
-300 seconds, then turns the backlight off after another 60 seconds. Set
+missing telemetry inhibits this action. Short power presses toggle the backlight.
+Inactivity dims after 300 seconds, then turns the backlight off after another
+60 seconds. Set
 `BRICK_DIM_SECONDS=0` in `/etc/default/brick-power` to disable automatic dim/off.
-`/tmp/stay_awake` inhibits dim/off; automatic system suspend remains disabled,
-so `/tmp/stay_alive` is always honored. These controls do not power down display
-scanout. Device validation remains pending.
+`/tmp/stay_awake` inhibits dim/off. Automatic system suspend remains unfinished
+and disabled. These controls do not power down display scanout; device validation
+is pending.
 
 Frontends can use `brick-brightness --set LEVEL` (0–10) to share desired brightness
 with idle policy; dim/off values are never saved as the user preference. Direct

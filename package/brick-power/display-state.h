@@ -16,9 +16,9 @@
 #define DISPLAY_LOCK "/run/brick-display.lock"
 #endif
 /* The lock inode also contains the desired value, never a dim/off preference. */
-struct display_state { uint32_t magic, generation; int mode, desired, applied; };
+struct display_state { uint32_t magic, generation; int mode, desired, applied, previous, pending; };
 enum { DISPLAY_QUERY = -1, DISPLAY_AWAKE, DISPLAY_DIM, DISPLAY_OFF,
-       DISPLAY_SET, DISPLAY_UP, DISPLAY_DOWN };
+       DISPLAY_SET, DISPLAY_UP, DISPLAY_DOWN, DISPLAY_TOGGLE };
 static inline int display_read(const char *path)
 {
 	char text[32], *end;
@@ -45,8 +45,8 @@ static inline int display_level(int level) { return 4 + 172 * level / 10; }
 /* All cooperating writers use this lock. Direct root sysfs writes are detected
  * best-effort; they cannot participate in this userspace transaction.
  */
-static inline int display_change_if(int operation, int value, struct display_state *out,
-				    const struct display_state *expected)
+static inline int display_transaction(int operation, int value, struct display_state *out,
+				      const struct display_state *expected, bool *changed)
 {
 	struct display_state state, old;
 	int fd = open(DISPLAY_LOCK, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -56,9 +56,23 @@ static inline int display_change_if(int operation, int value, struct display_sta
 	int raw = display_read(DISPLAY_BRIGHTNESS);
 	if (raw < 0) goto done;
 	if (pread(fd, &state, sizeof(state), 0) != sizeof(state) ||
-	    state.magic != 0x42524432 || state.mode < 0 || state.mode > 2 ||
-	    state.desired < 0 || state.desired > 255 || state.applied != raw)
-		state = (struct display_state){ 0x42524432, 0, DISPLAY_AWAKE, raw, raw };
+	    state.magic != 0x42524433 || state.mode < 0 || state.mode > 2 ||
+	    state.desired < 0 || state.desired > 255 || state.applied < 0 || state.applied > 255 ||
+	    state.previous < 0 || state.previous > 255 || state.pending < 0 || state.pending > 1)
+		state = (struct display_state){ .magic = 0x42524433,
+			.mode = DISPLAY_AWAKE, .desired = raw, .applied = raw, .previous = raw };
+	if (state.pending && (raw == state.previous || raw == state.applied)) {
+		/* Complete an interrupted transaction, including death before waking
+		 * a dim/off display. Neither old nor target raw is a new preference.
+		 */
+		if (raw != state.applied && display_write(state.applied)) goto done;
+		raw = state.applied;
+		state.pending = 0; state.previous = state.applied;
+		if (pwrite(fd, &state, sizeof(state), 0) != sizeof(state)) goto done;
+	}
+	if (state.applied != raw || state.pending)
+		state = (struct display_state){ .magic = 0x42524433,
+			.mode = DISPLAY_AWAKE, .desired = raw, .applied = raw, .previous = raw };
 	if (expected && memcmp(expected, &state, sizeof(state))) {
 		if (out) *out = state;
 		result = 1; goto done;
@@ -82,17 +96,29 @@ static inline int display_change_if(int operation, int value, struct display_sta
 	if (operation != DISPLAY_QUERY) state.generation++;
 	state.applied = state.mode == DISPLAY_OFF ? 0 :
 		state.mode == DISPLAY_DIM ? (state.desired ? 1 : 0) : state.desired;
-	/* Publish intent before the hardware write: restart can recover a dim/off
-	 * value without mistaking it for the user's desired brightness.
-	 */
+	/* Journal both sides before touching hardware; clear pending afterwards. */
+	state.previous = raw; state.pending = 1;
 	if (pwrite(fd, &state, sizeof(state), 0) != sizeof(state)) goto done;
-	if (state.applied != raw && display_write(state.applied)) {
-		(void)pwrite(fd, &old, sizeof(old), 0); goto done;
-	}
+	/* A failed driver update may still change the readable brightness.
+	 * Keep the journal: never mistake partial application for a preference.
+	 */
+	if (state.applied != raw && display_write(state.applied)) goto done;
+	state.pending = 0; state.previous = state.applied;
+	if (pwrite(fd, &state, sizeof(state), 0) != sizeof(state)) goto done;
+	if (changed) *changed = state.desired != old.desired;
 	if (out) *out = state;
 	result = 0;
 done:
 	close(fd); return result;
+}
+static inline int display_change_if(int operation, int value, struct display_state *out,
+				    const struct display_state *expected)
+{
+	return display_transaction(operation, value, out, expected, NULL);
+}
+static inline int display_step(bool up, struct display_state *out, bool *changed)
+{
+	return display_transaction(up ? DISPLAY_UP : DISPLAY_DOWN, 0, out, NULL, changed);
 }
 static inline int display_change(int operation, int value, struct display_state *out)
 {

@@ -158,7 +158,9 @@ int main(int argc, char **argv)
 				}
 				if (!direction) continue;
 				struct display_state display;
-				if (display_change(direction > 0 ? DISPLAY_UP : DISPLAY_DOWN, 0, &display)) goto out;
+				bool changed;
+				if (display_step(direction > 0, &display, &changed)) goto out;
+				if (!changed) continue;
 				int next = 0;
 				while (next < 10 && raw_level(next) < display.desired) next++;
 				saved = next; dirty = true; save = now() + 2;

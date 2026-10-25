@@ -1,3 +1,14 @@
+/* BOOTTIME-minus-MONOTONIC increases across suspend. Bracket the BOOTTIME
+ * read so scheduler/I/O delay is measurement uncertainty, not fake sleep.
+ * One millisecond covers integer timestamp quantization.
+ */
+static bool idle_resumed(int64_t before, int64_t boot, int64_t after, int64_t *upper)
+{
+	if (before < 0 || boot < 0 || after < before) return false;
+	bool resumed = boot - after > *upper + (*upper != INT64_MAX);
+	*upper = boot - before;
+	return resumed;
+}
 /* SPDX-License-Identifier: GPL-2.0-only */
 struct idle_policy {
 	int mode, pending;
@@ -15,6 +26,7 @@ static void idle_activity(struct idle_policy *p, int64_t now)
 static void idle_power_sync(struct idle_policy *p, bool held, int64_t now)
 {
 	p->power_held = held; p->power_armed = false;
+	if (p->pending == DISPLAY_TOGGLE) p->pending = DISPLAY_QUERY;
 	idle_activity(p, now);
 }
 static void idle_power_event(struct idle_policy *p, int value, int64_t now)
@@ -22,12 +34,20 @@ static void idle_power_event(struct idle_policy *p, int value, int64_t now)
 	if (value == 1 && !p->power_held) {
 		p->power_held = p->power_armed = true; p->press_at = now;
 	} else if (!value) {
-		if (p->power_armed && now - p->press_at < HOLD_MS &&
-		    (p->mode == DISPLAY_OFF || now - p->last_wake > 50))
-			p->pending = p->mode == DISPLAY_OFF ? DISPLAY_AWAKE : DISPLAY_OFF;
+		if (p->power_armed && now - p->press_at < HOLD_MS)
+			p->pending = DISPLAY_TOGGLE;
 		p->power_held = p->power_armed = false;
 	}
 	p->last = now;
+}
+static int idle_resolve(struct idle_policy *p, int64_t now, bool complete)
+{
+	if (p->pending != DISPLAY_TOGGLE) return p->pending;
+	if (!complete) return DISPLAY_QUERY;
+	if (p->mode == DISPLAY_OFF) return DISPLAY_AWAKE;
+	if (now - p->last_wake > 50) return DISPLAY_OFF;
+	p->pending = DISPLAY_QUERY;
+	return DISPLAY_QUERY;
 }
 static bool idle_has_keys(const struct idle_policy *p)
 {
