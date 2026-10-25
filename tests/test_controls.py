@@ -123,24 +123,24 @@ int main(void)
         }
     }
     const char *path = "state";
-    assert(read_state(path) == -ENOENT);
+    assert(read_state(path, 20) == -ENOENT);
     for (int v = 0; v <= 20; v++) {
         assert(save_state(path, v) == 0);
-        assert(read_state(path) == v);
+        assert(read_state(path, 20) == v);
         struct stat st; assert(!stat(path, &st)); assert((st.st_mode & 0777) == 0600);
     }
     const char *bad[] = {"", "2 4\n", "1 -1\n", "1 21\n", "1 5 junk\n",
         "1 5                              hidden", "1 4294967296\n", "4294967297 20\n"};
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); i++) {
         FILE *f = fopen(path, "w"); assert(f); fputs(bad[i], f); fclose(f);
-        assert(read_state(path) == -EINVAL);
+        assert(read_state(path, 20) == -EINVAL);
     }
     FILE *f = fopen(path, "w"); assert(f);
     const char nul[] = "1 20\0junk";
     assert(fwrite(nul, 1, sizeof(nul) - 1, f) == sizeof(nul) - 1); fclose(f);
-    assert(read_state(path) == -EINVAL);
+    assert(read_state(path, 20) == -EINVAL);
     assert(!symlink(path, "link"));
-    assert(read_state("link") == -ELOOP);
+    assert(read_state("link", 20) == -ELOOP);
     assert(save_state("missing/state", 10) < 0);
     puts("controls policy and persistence checks passed");
     return 0;
@@ -149,6 +149,8 @@ int main(void)
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             (directory / 'test.c').write_text(harness)
+            (directory / 'settings.h').write_bytes(
+                (ROOT / 'package/brick-controls/settings.h').read_bytes())
             subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
                             str(directory / 'test.c'), '-o', str(directory / 'test')], check=True)
             subprocess.run([str(directory / 'test')], cwd=directory, check=True)
