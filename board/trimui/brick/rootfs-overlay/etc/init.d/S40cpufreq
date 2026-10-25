@@ -3,6 +3,8 @@ case "${1:-}" in
 start)
 	for policy in /sys/devices/system/cpu/cpufreq/policy*; do
 		[ -d "$policy" ] || continue
+		# Match stock's minimum frequency; keep lower OPPs for cooling.
+		echo 1200000 > "$policy/scaling_min_freq" || exit 1
 		echo ondemand > "$policy/scaling_governor" || exit 1
 	done
 	;;

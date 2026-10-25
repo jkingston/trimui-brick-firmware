@@ -50,6 +50,12 @@ is disabled. The GPU powers down internally between workloads; external
 clocks and rails stay enabled. GPU suspend and DVFS are unsupported.
 `evtest` and ALSA utilities are included for hardware validation.
 
+Volume keys control the internal codec with a persistent 20-step setting.
+Set `FN_MUTE=1` in `/etc/default/brick-controls` to mute while Fn is active,
+then restart `/etc/init.d/S47controls`. This does not select an audio route
+or control Bluetooth/USB audio volume. These controls require the matching
+development kernel's digital-gain controls; device validation is pending.
+
 USB Ethernet uses `192.168.7.2/24`.
 Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
 install a key in `/root/.ssh/authorized_keys` through the serial console.

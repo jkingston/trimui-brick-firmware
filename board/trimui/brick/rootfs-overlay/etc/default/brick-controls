@@ -1,0 +1,2 @@
+# Set to 1 to mute the internal codec while the Fn switch is active.
+FN_MUTE=0
