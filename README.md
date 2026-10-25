@@ -49,6 +49,8 @@ The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. The GPU powers down internally between workloads; external
 clocks and rails stay enabled. GPU s2idle handling awaits device validation;
 whole-system sleep and GPU DVFS remain incomplete.
+ADC capture support is present, but microphone routing awaits hardware verification.
+The video decoder and IOMMU remain disabled pending qualification.
 `evtest` and ALSA utilities are included for hardware validation.
 
 Volume keys control the internal codec with a persistent 20-step setting.
@@ -57,8 +59,9 @@ then restart `/etc/init.d/S47controls`. This does not select an audio route
 or control Bluetooth/USB audio volume. These controls require the matching
 development kernel's digital-gain controls; device validation is pending.
 
-An explicit fixed-host build uses `make O=output/host USB_ROLE=host configure`,
-then `make O=output/host`. The default build remains peripheral-only.
+The top USB port has independent host support; device validation is pending.
+An explicit fixed-host build for the bottom port uses `make O=output/host USB_ROLE=host configure`,
+then `make O=output/host`. The default keeps the bottom port in peripheral mode.
 Host images keep the normal boot payload filenames and skip gadget setup;
 USB serial/Ethernet are unavailable. The updater requests reboot but cannot
 confirm host-profile boot over USB. Returning to peripheral mode requires its
