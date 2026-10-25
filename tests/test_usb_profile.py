@@ -53,7 +53,7 @@ class ProfileTests(unittest.TestCase):
         gadget = gadget_status or ('okay' if role == 'peripheral' else 'disabled')
         host = 'okay' if role == 'host' else 'disabled'
         coordinator = '' if role != 'auto' else '''usb-role-switch {
- compatible = "trimui,brick-usb-role-switch"; status = "okay";
+ compatible = "trimui,brick-usb-role-switch";
  peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
 };'''
         source = f'''/dts-v1/;

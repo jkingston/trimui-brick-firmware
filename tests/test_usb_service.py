@@ -51,7 +51,7 @@ class GadgetServiceTests(unittest.TestCase):
         self.status.write_bytes(b'disabled\0')
         auto = self.root / 'sys/firmware/devicetree/base/usb-role-switch'
         auto.mkdir()
-        (auto / 'status').write_bytes(b'okay\0')
+        # Missing status is enabled in the real coordinator DTB.
         (auto / 'compatible').write_bytes(b'trimui,brick-usb-role-switch\0')
         self.run_service('start')
         self.assertFalse(self.gadget.exists())

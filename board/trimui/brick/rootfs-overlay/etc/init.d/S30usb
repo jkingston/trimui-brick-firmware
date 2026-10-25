@@ -9,7 +9,7 @@ flock -x 9
 
 profile() {
 	auto=/sys/firmware/devicetree/base/usb-role-switch
-	if [ -r "$auto/status" ] && [ "$(tr -d '\000' < "$auto/status")" = okay ]; then
+	if [ -d "$auto" ] && { [ ! -e "$auto/status" ] || [ "$(tr -d '\000' < "$auto/status")" = okay ]; }; then
 		[ "$(tr -d '\000' < "$auto/compatible")" = trimui,brick-usb-role-switch ] || return 1
 		return 0
 	fi

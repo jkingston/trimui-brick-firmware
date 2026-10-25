@@ -39,10 +39,12 @@ def install(images, config, fdtget):
     if not source.is_file():
         raise FileNotFoundError(f'Selected kernel does not provide {source.name}')
 
-    def get(node, prop, kind='s'):
+    def get(node, prop, kind='s', default=None):
         path = node if node.startswith('/') else '/soc/' + node
-        return subprocess.check_output([str(fdtget), '-t', kind, str(source),
-                                        path, prop], text=True).strip()
+        args = [str(fdtget), '-t', kind]
+        if default is not None:
+            args += ['-d', default]
+        return subprocess.check_output(args + [str(source), path, prop], text=True).strip()
 
     for node, enabled in [('usb@5100000', role == 'peripheral'),
                           ('usb@5101000', role == 'host'),
@@ -53,7 +55,7 @@ def install(images, config, fdtget):
             raise ValueError(f'{role} profile has inconsistent {node} dr_mode')
     if role == 'auto':
         owner = '/usb-role-switch'
-        if (get(owner, 'status') != 'okay' or
+        if (get(owner, 'status', default='okay') != 'okay' or
                 get(owner, 'compatible') != 'trimui,brick-usb-role-switch'):
             raise ValueError('auto profile lacks its role coordinator')
         for prop, node, mode in [('peripheral', 'usb@5100000', 'peripheral'),
