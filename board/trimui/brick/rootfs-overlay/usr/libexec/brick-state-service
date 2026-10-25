@@ -1,0 +1,30 @@
+#!/bin/sh
+# Consumer wrapper: boot must not create replacement identities on data failure.
+set -eu
+service=$1
+shift
+case "${1:-}" in
+stop) ;;
+*)
+	case "$(cat /run/brick-data/state 2>/dev/null || true)" in
+	persistent|volatile) ;;
+	*) echo "$service: persistent state unavailable; service not started" >&2; exit 1 ;;
+	esac
+	;;
+esac
+case "$service" in
+S30dbus-daemon) daemon=/usr/bin/dbus-daemon; pidfile=/var/run/dbus-daemon.pid ;;
+S40bluetoothd) daemon=/usr/libexec/bluetooth/bluetoothd; pidfile=/var/run/bluetoothd.pid ;;
+S46bluealsa) daemon=/usr/bin/bluealsa; pidfile=/run/bluealsa.pid ;;
+*) exec "/usr/libexec/brick-init/$service" "$@" ;;
+esac
+case "${1:-}" in
+stop)
+	exec /usr/libexec/brick-stop-daemon "$service" "$pidfile" "$daemon"
+	;;
+restart)
+	/usr/libexec/brick-stop-daemon "$service" "$pidfile" "$daemon" || exit $?
+	exec "/usr/libexec/brick-init/$service" start
+	;;
+*) exec "/usr/libexec/brick-init/$service" "$@" ;;
+esac

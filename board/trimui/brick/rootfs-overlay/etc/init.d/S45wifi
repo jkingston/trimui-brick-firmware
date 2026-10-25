@@ -13,13 +13,7 @@ flock -x 9
 stop_process() {
 	pidfile=$1
 	program=$2
-	start-stop-daemon -K -q -o -p "$pidfile" -x "$program"
-	for attempt in 1 2 3 4 5; do
-		start-stop-daemon -K -t -q -p "$pidfile" -x "$program" || break
-		sleep 1
-	done
-	start-stop-daemon -K -q -o -s KILL -p "$pidfile" -x "$program"
-	rm -f "$pidfile"
+	/usr/libexec/brick-stop-daemon "${program##*/}" "$pidfile" "$program"
 }
 
 stop_dhcp() {
@@ -43,6 +37,9 @@ start)
 	stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
 	stop_dhcp
 	mkdir -p "$ctrl"
+	# SAVE_CONFIG atomically renames over this path; preserve a profile symlink.
+	config=$(readlink -f "$config")
+	export WIFI_CONFIG="$config"
 	# Wait for the monitor to attach so the first CONNECTED event is not lost.
 	wpa_supplicant -B -W -D nl80211 -i wlan0 -c "$config" -C "$ctrl" \
 		-P "$state/supplicant.pid" 9>&-

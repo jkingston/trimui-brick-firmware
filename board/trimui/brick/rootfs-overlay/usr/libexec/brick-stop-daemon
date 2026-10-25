@@ -1,0 +1,48 @@
+#!/bin/sh
+# Bound orderly shutdown without claiming a live daemon has stopped.
+set -eu
+name=$1
+pidfile=$2
+daemon=$3
+# Daemons may unlink their PID file before cleanup finishes. Keep the original
+# PID for both signalling and exit checks; the executable match excludes zombies.
+snapshot=$(mktemp)
+trap 'rm -f "$snapshot"' EXIT
+trap 'exit 1' HUP INT TERM
+if [ -e "$pidfile" ]; then
+	cp "$pidfile" "$snapshot"
+fi
+printf 'Stopping %s: ' "$name"
+# --oknodo also masks BusyBox signal errors; always verify exit below.
+if start-stop-daemon --stop --oknodo --pidfile "$snapshot" --exec "$daemon"; then
+	:
+else
+	result=$?
+	echo 'FAIL'
+	exit "$result"
+fi
+attempt=0
+while :; do
+	if start-stop-daemon --stop --test --quiet --pidfile "$snapshot" --exec "$daemon"; then
+		[ "$attempt" -lt 50 ] || {
+			echo 'timed out; retaining pid file' >&2
+			exit 1
+		}
+	else
+		result=$?
+		# BusyBox returns 1 when no matching live process remains.
+		[ "$result" -eq 1 ] || exit "$result"
+		# Do not delete a PID file replaced by another service invocation.
+		if [ -e "$pidfile" ]; then
+			cmp -s "$pidfile" "$snapshot" || {
+				echo 'pid file changed during stop' >&2
+				exit 1
+			}
+			rm -f "$pidfile"
+		fi
+		echo 'OK'
+		exit 0
+	fi
+	sleep 0.1
+	attempt=$((attempt + 1))
+done

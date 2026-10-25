@@ -53,17 +53,23 @@ clocks and rails stay enabled. GPU suspend and DVFS are unsupported.
 USB Ethernet uses `192.168.7.2/24`.
 Configure the host end as `192.168.7.1/24`. SSH accepts public keys only;
 install a key in `/root/.ssh/authorized_keys` through the serial console.
-The initramfs does not persist keys across boots. Use `scp -O` for transfers.
+Use `scp -O` for transfers.
 
 Wi-Fi starts with no saved networks. Configure `/etc/wpa_supplicant.conf` and run
 `/etc/init.d/S45wifi restart`, or configure the running supplicant with
 `wpa_cli -p /run/wpa_supplicant -i wlan0`. DHCP follows connection events.
 `WIFI_CONFIG` and `WIFI_CTRL_DIR` override the profile and socket directory when
-starting the service. Profiles and changes are lost on reboot in this initramfs.
+starting the service. Use `wpa_cli save_config` to save a running configuration when persistence is available.
 
 Bluetooth starts powered off. Use `bluetoothctl` to power on and pair devices.
-BlueALSA provides SBC, aptX and aptX HD output. Pairing state in
-`/var/lib/bluetooth` is lost on reboot in this initramfs.
+BlueALSA provides SBC, aptX and aptX HD output. Pairing state is stored in `/var/lib/bluetooth`.
+
+Fresh images include a separate ext4 data partition for Wi-Fi profiles, Bluetooth
+bonds, SSH keys and system identity. Existing single-partition cards use temporary
+state. Payload updates preserve the data partition; flashing a complete image
+erases it. If the data partition exists but cannot be used, dependent services
+stay stopped and USB serial remains available for recovery. On-device persistence
+validation is pending.
 
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.

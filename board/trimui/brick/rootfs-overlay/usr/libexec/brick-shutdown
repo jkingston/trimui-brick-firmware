@@ -1,0 +1,62 @@
+#!/bin/sh
+# Finish process cleanup before the final filesystem teardown.
+set -eu
+session=$(awk '{ sub(/^.*\) /, ""); print $4 }' /proc/$$/stat)
+remaining() {
+	# Read each path independently: an exiting task must not abort later reads.
+	# Any unreadable/malformed entry keeps the scan nonempty until a retry.
+	if ! awk -v session="$session" 'BEGIN {
+		for (i=1; i<ARGC; i++) {
+			result=(getline line < ARGV[i]); close(ARGV[i]);
+			if (result != 1) { print "scan-raced"; continue }
+			split(line, prefix, " "); pid=prefix[1];
+			sub(/^.*\) /, "", line); split(line, fields, " ");
+			if (pid !~ /^[0-9]+$/ || fields[4] !~ /^[0-9]+$/) {
+				print "scan-invalid"; continue
+			}
+			if (pid != 1 && fields[4] != session && fields[4] != 0 &&
+			    fields[1] != "Z" && fields[1] != "X") print pid
+		}
+	}' /proc/[0-9]*/stat 2>/dev/null; then
+		echo scan-error
+	fi
+}
+wait_empty() {
+	# Uptime is monotonic; scan overhead counts against the grace period.
+	deadline=$(($(cut -d . -f 1 /proc/uptime) + 5))
+	while [ -n "$(remaining)" ]; do
+		[ "$(cut -d . -f 1 /proc/uptime)" -lt "$deadline" ] || return 1
+		sleep 0.1
+	done
+}
+
+echo "Finalizing persistent state"
+killall5 -TERM || echo 'Residual TERM reported error; checking process exit' >&2
+if ! wait_empty; then
+	echo "Terminating remaining processes"
+	killall5 -KILL || echo 'Residual KILL reported error; checking process exit' >&2
+fi
+failed=0
+if wait_empty; then
+	echo "Remaining processes stopped"
+else
+	echo "Shutdown incomplete: processes remain" >&2
+	failed=1
+fi
+# PID1 and this shutdown session must have survived killall5.
+kill -0 1
+kill -0 $$
+echo "Shutdown supervisor remains active"
+sync
+if /etc/init.d/S12data stop; then
+	if awk '$5 == "/data" { found=1 } END { exit !found }' /proc/self/mountinfo; then
+		echo "Shutdown incomplete: data is still mounted" >&2
+		failed=1
+	else
+		echo "Persistent data unmounted"
+	fi
+else
+	echo "Shutdown incomplete: data teardown failed" >&2
+	failed=1
+fi
+exit "$failed"

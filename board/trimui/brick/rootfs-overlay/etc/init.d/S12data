@@ -1,0 +1,166 @@
+#!/bin/sh
+# Mount board-owned persistent state before services which consume it.
+set -eu
+umask 077
+device=/dev/mmcblk0p2
+state=/run/brick-data
+mkdir -p "$state"
+exec 9>"$state/lock"
+flock -x 9
+
+status() {
+	printf '%s\n' "$1" > "$state/state.new"
+	mv "$state/state.new" "$state/state"
+}
+fail() {
+	status unavailable
+	echo "Persistent data unavailable: $1" >&2
+	exit 1
+}
+mounted_here() {
+	awk '$5 == "/data" { found=1 } END { exit !found }' /proc/self/mountinfo
+}
+verify_mount() {
+	devnum=$(cat /sys/class/block/mmcblk0p2/dev) || return 1
+	awk -v devnum="$devnum" '
+	$5 == "/data" {
+		if ($3 != devnum || $4 != "/" || $6 !~ /(^|,)rw(,|$)/) exit 1
+		for (i=7; i<=NF; i++) if ($i == "-") {
+			if ($(i+1) == "ext4") good=1
+			break
+		}
+	} END { if (!good) exit 1 }' /proc/self/mountinfo
+}
+link_dir() {
+	target=$1
+	link=$2
+	if [ -L "$link" ]; then
+		[ "$(readlink "$link")" = "$target" ] && return 0
+		case "$link:$(readlink "$link")" in
+		/etc/dropbear:/var/run/dropbear|/var/lib/dbus:/tmp/dbus) ;;
+		*) return 1 ;;
+		esac
+		# A stock temporary link may already contain runtime credentials.
+		if [ -e "$link" ]; then
+			[ -d "$link" ] && [ -z "$(ls -A "$link")" ] || return 1
+		fi
+		rm "$link"
+	elif [ -e "$link" ]; then
+		rmdir "$link" || return 1
+	fi
+	ln -s "$target" "$link"
+}
+private_dir() {
+	[ ! -L "$1" ] || return 1
+	mkdir -p "$1" && chmod 700 "$1"
+}
+
+case "${1:-}" in
+start)
+	# Repeated start must not switch storage underneath running services.
+	if [ -f "$state/state" ]; then
+		case "$(cat "$state/state")" in
+		persistent) verify_mount || fail 'persistent mount changed'; exit 0 ;;
+		volatile) exit 0 ;;
+		unavailable) echo 'Data setup failed earlier; reboot after repair' >&2; exit 1 ;;
+		esac
+	fi
+	status unavailable
+	# sysfs may expose the disk before partition scan and devtmpfs finish.
+	attempt=0
+	while [ ! -b /dev/mmcblk0 ]; do
+		[ "$attempt" -lt 50 ] || fail 'SD device did not appear'
+		sleep 0.1
+		attempt=$((attempt + 1))
+	done
+	[ "$(cat /sys/class/block/mmcblk0/device/type 2>/dev/null)" = SD ] || fail 'SD parent not verified'
+	dd if=/dev/mmcblk0 of="$state/mbr" bs=512 count=1 2>/dev/null || fail 'cannot read partition table'
+	[ "$(wc -c < "$state/mbr")" -eq 512 ] || fail 'short partition table'
+	set -- $(od -An -tu1 -j510 -N2 "$state/mbr")
+	[ "$*" = '85 170' ] || fail 'invalid MBR signature'
+	for offset in 450 466 482 498; do
+		set -- $(od -An -tu1 -j"$offset" -N1 "$state/mbr")
+		[ "$1" -ne 238 ] || fail 'GPT data layout is unsupported'
+	done
+	set -- $(od -An -tu1 -j462 -N16 "$state/mbr")
+	[ "$#" -eq 16 ] || fail 'cannot decode data partition'
+	if [ "$*" = '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0' ]; then
+		[ ! -e /sys/class/block/mmcblk0p2 ] || fail 'partition table changed during discovery'
+		mounted_here && fail 'unexpected mount at /data'
+		status volatile
+		echo 'No data partition; settings are temporary'
+		exit 0
+	fi
+	[ "$5" -eq 131 ] || fail 'unexpected data partition type'
+	start=$((${9} + (${10} << 8) + (${11} << 16) + (${12} << 24)))
+	size=$((${13} + (${14} << 8) + (${15} << 16) + (${16} << 24)))
+	[ "$start" -gt 0 ] && [ "$size" -gt 0 ] || fail 'empty data partition extent'
+	attempt=0
+	while [ ! -b "$device" ] || [ ! -r /sys/class/block/mmcblk0p2/size ]; do
+		[ "$attempt" -lt 50 ] || fail 'data partition did not appear'
+		sleep 0.1
+		attempt=$((attempt + 1))
+	done
+	[ "$(cat /sys/class/block/mmcblk0p2/start)" = "$start" ] &&
+		[ "$(cat /sys/class/block/mmcblk0p2/size)" = "$size" ] || fail 'kernel partition does not match MBR'
+	identity=$(blkid "$device") || fail 'cannot read filesystem identity'
+	printf '%s\n' "$identity" | grep -q ' TYPE="ext4"' || fail 'expected ext4'
+	printf '%s\n' "$identity" | grep -q ' LABEL="brick-data"' || fail 'unexpected volume label'
+	[ ! -L /data ] || fail 'data mountpoint is a symlink'
+	mkdir -p /data
+	if mounted_here; then
+		fail 'data was already mounted outside this service'
+	fi
+	mount -t ext4 -o nodev,nosuid,noexec /dev/mmcblk0p2 /data || fail 'mount failed'
+	: > "$state/mount-owned"
+	verify_mount || fail 'mount is not the expected writable filesystem'
+	[ ! -L /data/schema ] || fail 'schema is a symlink'
+	if [ -e /data/schema ]; then
+		[ "$(cat /data/schema)" = 1 ] || fail 'unsupported data schema'
+	fi
+	for directory in wifi bluetooth bluealsa dropbear ssh dbus seedrng settings; do
+		private_dir "/data/$directory" || fail 'cannot prepare private directory'
+	done
+	# D-Bus clients read the public machine ID after dropping privileges.
+	chmod 755 /data /data/dbus || fail 'cannot expose public machine identity'
+	# Seed from an immutable firmware default, never from live RAM credentials.
+	[ ! -L /data/wifi/wpa_supplicant.conf ] || fail 'profile is a symlink'
+	if [ ! -e /data/wifi/wpa_supplicant.conf ]; then
+		[ ! -L /data/wifi/.profile-new ] || fail 'temporary profile is a symlink'
+		cp /usr/share/brick/wpa_supplicant.conf /data/wifi/.profile-new || fail 'cannot seed Wi-Fi profile'
+		chmod 600 /data/wifi/.profile-new
+		mv /data/wifi/.profile-new /data/wifi/wpa_supplicant.conf
+	fi
+	[ -f /data/wifi/wpa_supplicant.conf ] || fail 'profile is not a regular file'
+	chmod 600 /data/wifi/wpa_supplicant.conf
+	[ ! -L /data/.schema-new ] || fail 'temporary schema is a symlink'
+	printf '1\n' > /data/.schema-new || fail 'data is not writable'
+	mv /data/.schema-new /data/schema
+	mkdir -p /var/lib /root
+	for directory in bluetooth bluealsa dbus seedrng; do
+		link_dir "/data/$directory" "/var/lib/$directory" || fail 'existing runtime state requires explicit migration'
+	done
+	link_dir /data/dropbear /etc/dropbear || fail 'existing SSH host keys require explicit migration'
+	link_dir /data/ssh /root/.ssh || fail 'existing authorized keys require explicit migration'
+	if [ -L /etc/wpa_supplicant.conf ]; then
+		[ "$(readlink /etc/wpa_supplicant.conf)" = /data/wifi/wpa_supplicant.conf ] || fail 'unexpected Wi-Fi profile link'
+	else
+		cmp -s /etc/wpa_supplicant.conf /usr/share/brick/wpa-volatile.conf || fail 'existing Wi-Fi profile requires explicit migration'
+		rm /etc/wpa_supplicant.conf
+		ln -s /data/wifi/wpa_supplicant.conf /etc/wpa_supplicant.conf
+	fi
+	sync
+	status persistent
+	;;
+stop)
+	if mounted_here; then
+		[ -f "$state/mount-owned" ] || fail 'mount belongs to another owner'
+		verify_mount || fail 'refusing to unmount an unexpected filesystem'
+		sync
+		umount /data || fail 'data still busy; mount retained'
+	fi
+	rm -f "$state/mount-owned"
+	status stopped
+	;;
+*) echo "Usage: $0 {start|stop}" >&2; exit 1 ;;
+esac
