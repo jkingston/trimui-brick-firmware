@@ -1,0 +1,5 @@
+config BR2_PACKAGE_BRICK_POWER
+	bool "Brick suspend command"
+	select BR2_PACKAGE_DBUS
+	help
+	  Explicit s2idle entry with Bluetooth disconnect and power restoration.
