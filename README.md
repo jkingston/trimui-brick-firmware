@@ -68,8 +68,8 @@ Fresh images include a separate ext4 data partition for Wi-Fi profiles, Bluetoot
 bonds, SSH keys and system identity. Existing single-partition cards use temporary
 state. Payload updates preserve the data partition; flashing a complete image
 erases it. If the data partition exists but cannot be used, dependent services
-stay stopped and USB serial remains available for recovery. On-device persistence
-validation is pending.
+stay stopped and USB serial remains available for recovery. Wi-Fi profiles, SSH host keys and system identity have survived tested reboots
+and payload updates. Bluetooth bond retention and power-loss recovery remain unverified.
 
 `Containerfile` supplies the host build dependencies. Host tools use Python's
 standard library. Run `make check` with a host C compiler and BusyBox installed.
