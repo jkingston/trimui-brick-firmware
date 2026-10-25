@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <linux/input.h>
@@ -17,6 +18,8 @@
 #include <unistd.h>
 
 #define HOLD_MS 6000
+#define BATTERY_POLL_MS 10000
+#include "battery-policy.h"
 struct key_state {
 	bool down, dropped, fired;
 	int64_t deadline;
@@ -111,6 +114,15 @@ static int drain_events(int fd, struct key_state *key, int64_t now)
 	return 0;
 }
 
+static int request_poweroff(const char *reason)
+{
+	fprintf(stderr, "brick-power-key: %s; requesting orderly poweroff\n", reason);
+	/* No -f: init runs the normal shutdown path. */
+	execl("/sbin/poweroff", "poweroff", (char *)NULL);
+	perror("brick-power-key: poweroff");
+	return 1;
+}
+
 static int discover(void)
 {
 	glob_t paths = { 0 };
@@ -147,7 +159,7 @@ int main(int argc, char **argv)
 	struct key_state key = { 0 };
 	struct sigaction action = { .sa_handler = stop };
 	int fd = -1, lock, result = 0;
-	int64_t scan = 0;
+	int64_t scan = 0, battery_scan = monotonic_ms() + 1000;
 	(void)argv;
 	if (argc != 1) {
 		fprintf(stderr, "Usage: brick-power-key\n");
@@ -168,6 +180,13 @@ int main(int argc, char **argv)
 	while (!stopped) {
 		int64_t now = monotonic_ms();
 		if (now < 0) { result = 1; break; }
+		if (now >= battery_scan) {
+			battery_scan = now + BATTERY_POLL_MS;
+			if (battery_critical("/sys/class/power_supply") && !stopped) {
+				result = request_poweroff("battery at or below one percent, USB offline");
+				break;
+			}
+		}
 		if (fd < 0 && now >= scan) {
 			fd = discover();
 			scan = now + 1000;
@@ -208,10 +227,8 @@ int main(int argc, char **argv)
 		}
 		if (stopped) break;
 		key.fired = true;
-		fprintf(stderr, "brick-power-key: six-second hold; requesting orderly poweroff\n");
-		/* BusyBox poweroff without -f asks init to run the normal shutdown path. */
-		execl("/sbin/poweroff", "poweroff", (char *)NULL);
-		perror("brick-power-key: poweroff"); result = 1; break;
+		result = request_poweroff("six-second hold");
+		break;
 	}
 	if (fd >= 0) close(fd);
 	close(lock);

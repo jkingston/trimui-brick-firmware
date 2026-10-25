@@ -2,5 +2,6 @@ config BR2_PACKAGE_BRICK_POWER
 	bool "Brick power controls"
 	select BR2_PACKAGE_DBUS
 	help
-	  Six-second power-key hold requests orderly shutdown.
+	  Six-second power-key hold and validated critical battery state
+	  request orderly shutdown.
 	  Explicit s2idle entry with Bluetooth disconnect and power restoration.
