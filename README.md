@@ -6,9 +6,9 @@ radio firmware, rootfs configuration and image assembly.
 
 Development baseline: SD boot, display/backlight, GPU rendering, GPIO controls,
 battery telemetry, temperature sensors, CPU frequency scaling and USB
-serial/Ethernet. Audio playback
-and speaker control are integrated; audible output remains unverified. Wireless
-networking, charging control, suspend and GPU power management remain incomplete.
+serial/Ethernet. Stereo headphone playback works at 48 kHz; shutdown can pop.
+Speaker output and jack detection still need validation. Wireless networking,
+charging control, suspend and GPU power management remain incomplete.
 
 Build the pinned kernel and firmware:
 
