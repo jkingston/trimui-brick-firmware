@@ -48,7 +48,8 @@ after changing the kernel defconfig.
 The development image exposes a root shell over USB serial. Internal eMMC
 is disabled. The GPU powers down internally between workloads; external
 clocks and rails stay enabled. GPU s2idle handling awaits device validation;
-whole-system sleep and GPU DVFS remain incomplete.
+whole-system sleep remains incomplete. GPU devfreq exposes four fixed-rail rates,
+defaulting to 702 MHz; frequency changes await device validation.
 ADC capture support is present, but microphone routing awaits hardware verification.
 The video decoder and IOMMU remain disabled pending qualification.
 `evtest` and ALSA utilities are included for hardware validation.
