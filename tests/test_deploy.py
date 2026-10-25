@@ -7,6 +7,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
@@ -232,3 +233,91 @@ class BootIdentityTests(unittest.TestCase):
                 actual[field] = 'old-build'
             with self.subTest(field=field), self.assertRaises(deploy.ProtocolError):
                 deploy.verify_boot_manifest(actual, expected)
+
+
+class DeploymentLifecycleTests(unittest.TestCase):
+    def run_deployment(self, no_reboot=False, install_failure=False):
+        console = MagicMock()
+        console.__enter__.return_value = console
+        console.checked.side_effect = lambda command, **kwargs: (
+            b'00000000-0000-0000-0000-000000000001\n' if 'boot_id' in command
+            else b'UPDATE_VERIFIED\n')
+        if install_failure:
+            console.checked.side_effect = deploy.ProtocolError('installer failed')
+        args = ['deploy.py', 'images'] + (['--no-reboot'] if no_reboot else [])
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'Console', return_value=console), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), {'build': 'new'})), \
+             patch.object(deploy, 'wait_for_boot') as wait, \
+             patch.object(deploy.time, 'sleep'):
+            if install_failure:
+                with self.assertRaises(deploy.ProtocolError):
+                    deploy.main()
+            else:
+                deploy.main()
+        return console, wait
+
+    def test_success_requests_init_managed_reboot(self):
+        import os
+        import subprocess
+        import time
+        console, wait = self.run_deployment()
+        commands = [call.args[0] for call in console.checked.call_args_list]
+        reboot = [command for command in commands if 'reboot' in command]
+        self.assertEqual(len(reboot), 1)
+        # Execute the actual shell command with an inert BusyBox substitute:
+        # record reboot arguments; never reboot the host or open a device.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim = root / 'busybox'
+            record = root / 'reboot-args'
+            shim.write_text('#!/bin/sh\n[ "$1" = sleep ] && exit 0\nprintf "%s\\n" "$@" > "$REBOOT_RECORD.tmp"\nmv "$REBOOT_RECORD.tmp" "$REBOOT_RECORD"\n')
+            shim.chmod(0o755)
+            subprocess.run(['/bin/sh', '-c', reboot[0].replace('/bin/busybox', str(shim))],
+                           env={**os.environ, 'REBOOT_RECORD': str(record)}, check=True)
+            deadline = time.monotonic() + 2
+            while not record.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(record.read_text().splitlines(), ['reboot'])
+        wait.assert_called_once()
+        self.assertLess(commands.index(next(c for c in commands if c.startswith('/bin/sh '))),
+                        commands.index(reboot[0]))
+
+    def test_no_reboot_leaves_device_running_without_waiting_for_boot(self):
+        console, wait = self.run_deployment(no_reboot=True)
+        self.assertFalse(any('reboot' in call.args[0] for call in console.checked.call_args_list))
+        wait.assert_not_called()
+
+    def test_install_failure_does_not_reboot_or_wait_for_boot(self):
+        console, wait = self.run_deployment(install_failure=True)
+        self.assertFalse(any('reboot' in call.args[0] for call in console.checked.call_args_list))
+        wait.assert_not_called()
+
+
+class BootTransitionTests(unittest.TestCase):
+    def test_same_image_on_old_boot_is_not_accepted(self):
+        old = deploy.uuid.UUID('00000000-0000-0000-0000-000000000001')
+        new = deploy.uuid.UUID('00000000-0000-0000-0000-000000000002')
+        expected = {'firmware': {}, 'kernel': {'release': 'test'},
+                    'config_sha256': 'config',
+                    'files': {name: {'sha256': name} for name in
+                              ('Image', 'sun50i-a133-trimui-brick.dtb')}}
+        clients = []
+        for boot in (old, new):
+            console = MagicMock()
+            console.__enter__.return_value = console
+            def checked(command, boot=boot):
+                if 'boot_id' in command:
+                    return str(boot).encode()
+                if 'brick-build.json' in command:
+                    return json.dumps(expected).encode()
+                return b'test\n'
+            console.checked.side_effect = checked
+            clients.append(console)
+        with patch.object(deploy, 'Console', side_effect=clients) as factory, \
+             patch.object(deploy.time, 'sleep'):
+            deploy.wait_for_boot('unused', expected, 5, old)
+        self.assertEqual(factory.call_count, 2)
+        # The first boot is rejected even though its image is identical.
+        self.assertEqual(clients[0].checked.call_count, 1)
+        self.assertGreater(clients[1].checked.call_count, 1)

@@ -120,12 +120,15 @@ def verify_boot_manifest(actual, expected):
             raise ProtocolError(f'Running rootfs describes a different {name}')
 
 
-def wait_for_boot(port, expected, timeout):
+def wait_for_boot(port, expected, timeout, previous_boot):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
         try:
             with Console(port, timeout=5) as console:
+                boot = uuid.UUID(console.checked('/bin/busybox cat /proc/sys/kernel/random/boot_id').decode().strip())
+                if boot == previous_boot:
+                    raise ProtocolError('Device has not rebooted yet')
                 result = json.loads(console.checked('/bin/busybox cat /etc/brick-build.json'))
                 verify_boot_manifest(result, expected)
                 release = console.checked('/bin/busybox uname -r').decode().strip()
@@ -159,9 +162,11 @@ def main():
             console.checked('/bin/busybox rm ' + shlex.quote('/tmp/' + token + '.sh'))
             if args.no_reboot:
                 return
-            console.checked('(/bin/busybox sleep 2; /bin/busybox reboot -f) >/dev/null 2>&1 &')
+            previous_boot = uuid.UUID(console.checked('/bin/busybox cat /proc/sys/kernel/random/boot_id').decode().strip())
+            # Let PID 1 stop services and unmount persistent data.
+            console.checked('(/bin/busybox sleep 2; /bin/busybox reboot) </dev/null >/dev/null 2>&1 &')
         time.sleep(3)
-        wait_for_boot(args.port, manifest, args.timeout)
+        wait_for_boot(args.port, manifest, args.timeout, previous_boot)
 
 
 if __name__ == '__main__':
