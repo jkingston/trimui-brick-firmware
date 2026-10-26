@@ -2,7 +2,8 @@ config BR2_PACKAGE_BRICK_SCP
 	bool "Brick SCP startup profile"
 	select BR2_PACKAGE_HOST_PYTHON3
 	help
-	  Build the opt-in Brick SCP startup profile using the exact SCP and
-	  service device tree extracted from the official firmware archive.
-	  This only performs the bounded startup and mailbox loopback handshake;
-	  it does not expose PSCI system suspend.
+	  Build the opt-in Brick SCP profile using the exact SCP and service
+	  device tree extracted from the official firmware archive. The profile
+	  includes bounded startup, mailbox loopback, the versioned native wake
+	  ABI and its dormant suspend transaction. It does not expose PSCI system
+	  suspend or remove CPU or DRAM power.
