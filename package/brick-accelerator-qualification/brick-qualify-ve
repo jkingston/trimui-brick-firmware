@@ -12,6 +12,69 @@ marker=/sys/firmware/devicetree/base/chosen/trimui,ve-qualification
 mode=$1
 shift
 assets=/usr/share/brick-qualification/ve
+out=
+before_lines=0
+
+capture_diagnostics()
+{
+	[ -n "$out" ] && [ -d "$out" ] || return 0
+	cat /proc/interrupts > "$out/interrupts-after" 2>&1 || true
+	find /sys/kernel/debug/clk -maxdepth 2 -type f \
+		\( -name clk_rate -o -name clk_parent \) -path '*ve*' \
+		-print -exec cat '{}' \; > "$out/clocks-after" 2>&1 || true
+	dmesg > "$out/dmesg-after" 2>&1 || true
+	if [ "$before_lines" -gt 0 ]; then
+		sed -n "$((before_lines + 1)),\$p" "$out/dmesg-after" \
+			> "$out/dmesg-delta" || true
+	fi
+}
+
+finish()
+{
+	status=$?
+	trap - EXIT
+	capture_diagnostics
+	if [ "$status" -ne 0 ] && [ -n "$out" ] && [ -d "$out" ] && [ ! -e "$out/RESULT" ]; then
+		printf 'FAIL status=%s\n' "$status" > "$out/RESULT"
+	fi
+	exit "$status"
+}
+
+runtime_contract()
+{
+	if ! grep -q '[[:space:]]/sys/kernel/debug[[:space:]]debugfs[[:space:]]' /proc/mounts; then
+		mount -t debugfs debugfs /sys/kernel/debug
+	fi
+	[ "$(cat /sys/kernel/debug/clk/ve/clk_rate)" = 432000000 ] || {
+		echo "VE clock is not at stock 432 MHz" >&2
+		exit 2
+	}
+	[ "$(cat /sys/kernel/debug/clk/ve/clk_parent)" = pll-ve ] || {
+		echo "VE clock parent is not stock PLL-VE" >&2
+		exit 2
+	}
+	set -- /sys/bus/platform/devices/*1c0e000.video-codec
+	[ "$#" -eq 1 ] && [ -d "$1" ] && [ -L "$1/iommu_group" ] || {
+		echo "VE is not attached to one IOMMU group" >&2
+		exit 2
+	}
+	readlink -f "$1/iommu_group" > "$out/iommu-group"
+}
+
+check_new_diagnostics()
+{
+	capture_diagnostics
+	if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|cedrus.*(timeout|fault|error|failed))' \
+		"$out/dmesg-delta" > "$out/kernel-errors"; then
+		echo "new kernel fault or Cedrus error during qualification" >&2
+		return 1
+	fi
+}
+
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 find_cedrus()
 {
@@ -30,14 +93,17 @@ if [ "$mode" = probe ] && [ "$#" -eq 1 ]; then
 	[ ! -e "$1" ] || { echo "$1 already exists" >&2; exit 2; }
 	mkdir "$1"
 	out=$(cd "$1" && pwd)
+	dmesg > "$out/dmesg-before"
+	before_lines=$(wc -l < "$out/dmesg-before")
+	runtime_contract
 	device=$(find_cedrus)
-	cat /proc/interrupts > "$out/interrupts"
-	dmesg > "$out/dmesg"
+	cat /proc/interrupts > "$out/interrupts-before"
 	v4l2-ctl -d "$device" --all > "$out/v4l2-ctl.log" 2>&1
-	v4l2-compliance -d "$device" > "$out/v4l2-compliance.log" 2>&1
+	timeout 120 v4l2-compliance -d "$device" > "$out/v4l2-compliance.log" 2>&1
 	for decoder in v4l2slmpeg2dec v4l2slh264dec v4l2slh265dec; do
-		gst-inspect-1.0 "$decoder" > "$out/$decoder.log" 2>&1
+		timeout 15 gst-inspect-1.0 "$decoder" > "$out/$decoder.log" 2>&1
 	done
+	check_new_diagnostics
 	printf 'PASS ve probe qualification\n' | tee "$out/RESULT"
 	exit 0
 fi
@@ -64,11 +130,18 @@ mkdir "$out"
 out=$(cd "$out" && pwd)
 find_cedrus > "$out/device"
 dmesg > "$out/dmesg-before"
-gst-inspect-1.0 "$decoder" > "$out/decoder.log" 2>&1
+before_lines=$(wc -l < "$out/dmesg-before")
+runtime_contract
+cat /proc/interrupts > "$out/interrupts-before"
+timeout 15 gst-inspect-1.0 "$decoder" > "$out/decoder.log" 2>&1
 GST_DEBUG='v4l2codecs*:5' timeout 30 gst-launch-1.0 -e -v \
 	filesrc location="$input" ! "$parser" ! "$decoder" ! \
 	videoconvert ! 'video/x-raw,format=I420' ! \
 	filesink location="$out/output.yuv" >> "$out/decoder.log" 2>&1
+[ "$(sha256sum "$input" | awk '{ print $1 }')" = "$expected_input" ] || {
+	echo "fixture changed during decode" >&2
+	exit 1
+}
 expected=$(awk -v name="$case_name.reference.yuv" '$2 == name { print $1 }' "$assets/REFERENCE-SHA256")
 [ -n "$expected" ] || exit 2
 actual=$(sha256sum "$out/output.yuv" | awk '{ print $1 }')
@@ -76,5 +149,5 @@ actual=$(sha256sum "$out/output.yuv" | awk '{ print $1 }')
 	printf 'FAIL expected=%s actual=%s\n' "$expected" "$actual" | tee "$out/RESULT"
 	exit 1
 }
-dmesg > "$out/dmesg-after"
+check_new_diagnostics
 printf 'PASS ve decode case=%s sha256=%s\n' "$case_name" "$actual" | tee "$out/RESULT"

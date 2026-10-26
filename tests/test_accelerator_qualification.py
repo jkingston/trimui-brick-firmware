@@ -50,6 +50,23 @@ class AcceleratorQualificationTests(unittest.TestCase):
         for script in ('brick-qualify-g2d', 'brick-qualify-ve'):
             subprocess.run(['/bin/sh', '-n', PACKAGE / script], check=True)
 
+    def test_target_qualification_is_bounded_and_has_explicit_build_dependency(self):
+        package = (PACKAGE / 'brick-accelerator-qualification.mk').read_text()
+        g2d = (PACKAGE / 'brick-qualify-g2d').read_text()
+        ve = (PACKAGE / 'brick-qualify-ve').read_text()
+        busybox = (ROOT / 'board/trimui/brick/busybox.fragment').read_text()
+        self.assertIn('BRICK_ACCELERATOR_QUALIFICATION_DEPENDENCIES += host-python3',
+                      package)
+        self.assertIn('timeout 120 v4l2-compliance', g2d)
+        self.assertIn('timeout 15 "$tools/brick-g2d-m2m"', g2d)
+        self.assertIn('G2D clock is not at stock 300 MHz', g2d)
+        self.assertIn('timeout 120 v4l2-compliance', ve)
+        self.assertIn('VE clock is not at stock 432 MHz', ve)
+        self.assertIn('fixture changed during decode', ve)
+        self.assertIn('trap finish EXIT', g2d)
+        self.assertIn('trap finish EXIT', ve)
+        self.assertIn('CONFIG_TIMEOUT=y', busybox.splitlines())
+
 
 if __name__ == '__main__':
     unittest.main()

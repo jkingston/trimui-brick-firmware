@@ -15,6 +15,54 @@ mkdir "$1"
 out=$(cd "$1" && pwd)
 assets=/usr/share/brick-qualification/g2d
 tools=/usr/libexec/brick-qualification
+before_lines=0
+
+capture_diagnostics()
+{
+	cat /proc/interrupts > "$out/interrupts-after" 2>&1 || true
+	find /sys/kernel/debug/clk -maxdepth 2 -type f \
+		\( -name clk_rate -o -name clk_parent \) -path '*g2d*' \
+		-print -exec cat '{}' \; > "$out/clocks-after" 2>&1 || true
+	dmesg > "$out/dmesg-after" 2>&1 || true
+	if [ "$before_lines" -gt 0 ]; then
+		sed -n "$((before_lines + 1)),\$p" "$out/dmesg-after" \
+			> "$out/dmesg-delta" || true
+	fi
+}
+
+finish()
+{
+	status=$?
+	trap - EXIT
+	capture_diagnostics
+	if [ "$status" -ne 0 ] && [ ! -e "$out/RESULT" ]; then
+		printf 'FAIL status=%s\n' "$status" > "$out/RESULT"
+	fi
+	exit "$status"
+}
+
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! grep -q '[[:space:]]/sys/kernel/debug[[:space:]]debugfs[[:space:]]' /proc/mounts; then
+	mount -t debugfs debugfs /sys/kernel/debug
+fi
+[ "$(cat /sys/kernel/debug/clk/g2d/clk_rate)" = 300000000 ] || {
+	echo "G2D clock is not at stock 300 MHz" >&2
+	exit 2
+}
+[ "$(cat /sys/kernel/debug/clk/g2d/clk_parent)" = pll-periph0-2x ] || {
+	echo "G2D clock parent is not stock PLL_PERIPH0_2X" >&2
+	exit 2
+}
+set -- /sys/bus/platform/devices/*6480000.g2d
+[ "$#" -eq 1 ] && [ -d "$1" ] && [ -L "$1/iommu_group" ] || {
+	echo "G2D is not attached to one IOMMU group" >&2
+	exit 2
+}
+readlink -f "$1/iommu_group" > "$out/iommu-group"
 
 one_named()
 {
@@ -43,10 +91,11 @@ cat /proc/interrupts > "$out/interrupts-before"
 find /sys/kernel/debug/clk -maxdepth 2 -type f \( -name clk_rate -o -name clk_parent \) \
 	-path '*g2d*' -print -exec cat '{}' \; > "$out/clocks-before" 2>&1 || true
 dmesg > "$out/dmesg-before"
-v4l2-compliance -d "$rotate" > "$out/v4l2-compliance.log" 2>&1
+before_lines=$(wc -l < "$out/dmesg-before")
+timeout 120 v4l2-compliance -d "$rotate" > "$out/v4l2-compliance.log" 2>&1
 
 while IFS="$(printf '\t')" read -r name inf outf iw ih ow oh rotate_angle hflip vflip enc tolerance; do
-	"$tools/brick-g2d-m2m" "$rotate" platform:sun8i-rotate \
+	timeout 15 "$tools/brick-g2d-m2m" "$rotate" platform:sun8i-rotate \
 		"$inf" "$outf" "$iw" "$ih" "$ow" "$oh" "$rotate_angle" \
 		"$hflip" "$vflip" "$enc" "$assets/fixtures/$name.input" \
 		"$out/$name.output" > "$out/$name.log" 2>&1
@@ -57,6 +106,10 @@ done < "$assets/cases.tsv"
 
 timeout 45 "$tools/brick-g2d-compose" "$media" "$background" "$foreground" \
 	"$capture" > "$out/compositor.log" 2>&1
-cat /proc/interrupts > "$out/interrupts-after"
-dmesg > "$out/dmesg-after"
+capture_diagnostics
+if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|sun8i-rotate.*(timeout|fault|error|failed))' \
+	"$out/dmesg-delta" > "$out/kernel-errors"; then
+	echo "new kernel fault or G2D error during qualification" >&2
+	exit 1
+fi
 printf 'PASS g2d qualification\n' | tee "$out/RESULT"
