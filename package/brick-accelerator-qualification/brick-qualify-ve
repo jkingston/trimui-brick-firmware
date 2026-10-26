@@ -100,7 +100,7 @@ if [ "$mode" = probe ] && [ "$#" -eq 1 ]; then
 	cat /proc/interrupts > "$out/interrupts-before"
 	v4l2-ctl -d "$device" --all > "$out/v4l2-ctl.log" 2>&1
 	timeout 120 v4l2-compliance -d "$device" > "$out/v4l2-compliance.log" 2>&1
-	for decoder in v4l2slmpeg2dec v4l2slh264dec v4l2slh265dec; do
+	for decoder in v4l2slmpeg2dec v4l2slh264dec v4l2slh265dec v4l2slvp8dec; do
 		timeout 15 gst-inspect-1.0 "$decoder" > "$out/$decoder.log" 2>&1
 	done
 	check_new_diagnostics
@@ -116,6 +116,7 @@ case "$case_name" in
 	mpeg2-ipb) suffix=mpeg2; parser=mpegvideoparse; decoder=v4l2slmpeg2dec;;
 	h264-ip) suffix=h264; parser=h264parse; decoder=v4l2slh264dec;;
 	hevc-ip|hevc-tiles|hevc-wpp) suffix=hevc; parser=h265parse; decoder=v4l2slh265dec;;
+	vp8-ip) suffix=ivf; parser=ivfparse; decoder=v4l2slvp8dec;;
 	*) echo "unknown case: $case_name" >&2; exit 2;;
 esac
 input=$assets/$case_name.$suffix

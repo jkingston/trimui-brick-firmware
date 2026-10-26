@@ -3,3 +3,4 @@
 232ad2586171b0c963cf26ec25602bc382559df40b096f06bda6e2ab0dfc9c77  hevc-tiles.reference.yuv
 c71d0a573ccdce1d6a1ccc38f44ce48057171b7ba58eda5ec7288675a791b5a9  hevc-wpp.reference.yuv
 4dd61d886442ce096bacfd9bd2f9dfbf6721a015157628208bb20efc2fd12eba  mpeg2-ipb.reference.yuv
+df16db7e0e796eaf72dcc3d6d0cdd621e4f7c07a23d526557f64fe6f7e02205c  vp8-ip.reference.yuv

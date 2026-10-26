@@ -42,26 +42,33 @@ class AcceleratorQualificationTests(unittest.TestCase):
     def test_ve_encoded_fixture_hashes_and_shell_syntax(self):
         fixture_dir = PACKAGE / 'fixtures/ve'
         lines = (fixture_dir / 'FIXTURE-SHA256').read_text().splitlines()
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
         for line in lines:
             digest, name = line.split()
             self.assertEqual(hashlib.sha256((fixture_dir / name).read_bytes()).hexdigest(),
                              digest)
+        self.assertEqual({line.split()[1].split('.', 1)[0] for line in lines},
+                         {line.split()[1].split('.', 1)[0] for line in
+                          (fixture_dir / 'REFERENCE-SHA256').read_text().splitlines()})
         for script in ('brick-qualify-g2d', 'brick-qualify-ve'):
             subprocess.run(['/bin/sh', '-n', PACKAGE / script], check=True)
 
     def test_target_qualification_is_bounded_and_has_explicit_build_dependency(self):
         package = (PACKAGE / 'brick-accelerator-qualification.mk').read_text()
+        config = (PACKAGE / 'Config.in').read_text()
         g2d = (PACKAGE / 'brick-qualify-g2d').read_text()
         ve = (PACKAGE / 'brick-qualify-ve').read_text()
         busybox = (ROOT / 'board/trimui/brick/busybox.fragment').read_text()
         self.assertIn('BRICK_ACCELERATOR_QUALIFICATION_DEPENDENCIES += host-python3',
                       package)
+        self.assertIn('select BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_IVFPARSE', config)
         self.assertIn('timeout 120 v4l2-compliance', g2d)
         self.assertIn('timeout 15 "$tools/brick-g2d-m2m"', g2d)
         self.assertIn('G2D clock is not at stock 300 MHz', g2d)
         self.assertIn('timeout 120 v4l2-compliance', ve)
         self.assertIn('VE clock is not at stock 432 MHz', ve)
+        self.assertIn('v4l2slvp8dec', ve)
+        self.assertIn('vp8-ip) suffix=ivf; parser=ivfparse', ve)
         self.assertIn('fixture changed during decode', ve)
         self.assertIn('trap finish EXIT', g2d)
         self.assertIn('trap finish EXIT', ve)
