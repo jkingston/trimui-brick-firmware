@@ -19,6 +19,29 @@ spec.loader.exec_module(boot)
 CID = "fe3432534400000020000000ef01a779"
 
 
+def fit_blob(total_length):
+    def token(value):
+        return struct.pack(">I", value)
+
+    def begin(name):
+        value = token(1) + name.encode() + b"\0"
+        return value + b"\0" * (-len(value) % 4)
+
+    structure = (begin("") + begin("images") + begin("uboot") + token(2) +
+                 begin("atf") + token(2) + begin("fdt-1") + token(2) + token(2) +
+                 begin("configurations") + begin("conf-1") + token(2) + token(2) +
+                 token(2) + token(9))
+    reserve = b"\0" * 16
+    off_reserve = 40
+    off_struct = off_reserve + len(reserve)
+    off_strings = off_struct + len(structure)
+    if total_length < off_strings:
+        raise ValueError("FIT test image is too short")
+    header = struct.pack(">10I", boot.FDT_MAGIC, total_length, off_struct, off_strings,
+                         off_reserve, 17, 16, 0, 0, len(structure))
+    return header + reserve + structure + b"\0" * (total_length - off_strings)
+
+
 def image(length, fill):
     spl_size = 1024
     data = bytearray([fill] * length)
@@ -28,8 +51,20 @@ def image(length, fill):
     words[3] = boot.SUNXI_CHECKSUM_STAMP
     struct.pack_into("<I", data, 12, sum(words) & 0xFFFFFFFF)
     fit_offset = max(32768, spl_size)
-    struct.pack_into(">II", data, fit_offset, 0xD00DFEED, length - fit_offset)
+    data[fit_offset:] = fit_blob(length - fit_offset)
     return bytes(data)
+
+
+def authorized(candidate):
+    manifest = {
+        "firmware": {"commit": "1" * 40, "dirty": False},
+        "kernel": {"commit": "2" * 40, "dirty": False},
+        "files": {"u-boot-sunxi-with-spl.bin": {
+            "sha256": boot.sha256(candidate), "bytes": len(candidate),
+        }},
+    }
+    raw = json.dumps(manifest, sort_keys=True).encode()
+    return boot.authorize_candidate(candidate, raw, boot.sha256(raw)), raw
 
 
 def mbr(include_data=True):
@@ -86,6 +121,7 @@ class BootloaderLifecycleTests(unittest.TestCase):
             card.write(mbr())
         self.current = image(42001, 0x21)
         self.candidate = image(56003, 0x37)
+        self.candidate_identity, self.candidate_manifest = authorized(self.candidate)
         self.original_region = self.current + bytes(
             [0xA5] * (boot.BOOT_SIZE - len(self.current)))
         with self.card_path.open("r+b") as card:
@@ -109,8 +145,8 @@ class BootloaderLifecycleTests(unittest.TestCase):
 
     def update(self, cls=boot.Card, dry_run=False):
         with self.open(cls, writable=not dry_run) as card:
-            return boot.upgrade(card, self.candidate, [("known.bin", self.current)],
-                                CID, self.backup, dry_run)
+            return boot.upgrade(card, self.candidate, self.candidate_identity,
+                                [("known.bin", self.current)], CID, self.backup, dry_run)
 
     def test_success_writes_only_exact_image_extent_and_preserves_partitions(self):
         metadata = self.update()
@@ -120,6 +156,9 @@ class BootloaderLifecycleTests(unittest.TestCase):
         self.assertEqual(self.raw(128 * 1024 * 1024, 13), b"DATA-SENTINEL")
         self.assertEqual(self.backup.read_bytes(), self.original_backup)
         self.assertEqual(metadata["backup"]["sha256"], hashlib.sha256(self.original_backup).hexdigest())
+        self.assertEqual(metadata["candidate"]["manifest_sha256"],
+                         boot.sha256(self.candidate_manifest))
+        self.assertEqual(metadata["candidate"]["firmware_commit"], "1" * 40)
         self.assertEqual(json.loads(Path(str(self.backup) + ".json").read_text())["card_cid"], CID)
 
     def test_dry_run_authenticates_and_preserves_backup_without_card_write(self):
@@ -129,15 +168,16 @@ class BootloaderLifecycleTests(unittest.TestCase):
 
     def test_wrong_cid_refuses_before_backup_or_write(self):
         with self.open() as card, self.assertRaisesRegex(boot.UpgradeError, "CID"):
-            boot.upgrade(card, self.candidate, [("known.bin", self.current)],
-                         "00" * 16, self.backup)
+            boot.upgrade(card, self.candidate, self.candidate_identity,
+                         [("known.bin", self.current)], "00" * 16, self.backup)
         self.assertFalse(self.backup.exists())
         self.assertEqual(self.raw(boot.BOOT_START, boot.BOOT_SIZE), self.original_region)
 
     def test_unknown_current_bootloader_refuses_before_backup_or_write(self):
         other = image(43001, 0x43)
         with self.open() as card, self.assertRaisesRegex(boot.UpgradeError, "allowlist"):
-            boot.upgrade(card, self.candidate, [("other.bin", other)], CID, self.backup)
+            boot.upgrade(card, self.candidate, self.candidate_identity,
+                         [("other.bin", other)], CID, self.backup)
         self.assertFalse(self.backup.exists())
         self.assertEqual(self.raw(boot.BOOT_START, boot.BOOT_SIZE), self.original_region)
 
@@ -181,7 +221,8 @@ class BootloaderLifecycleTests(unittest.TestCase):
     def test_existing_backup_is_never_overwritten(self):
         self.backup.write_bytes(b"keep")
         with self.open() as card, self.assertRaises(FileExistsError):
-            boot.upgrade(card, self.candidate, [("known.bin", self.current)], CID, self.backup)
+            boot.upgrade(card, self.candidate, self.candidate_identity,
+                         [("known.bin", self.current)], CID, self.backup)
         self.assertEqual(self.backup.read_bytes(), b"keep")
         self.assertEqual(self.raw(boot.BOOT_START, boot.BOOT_SIZE), self.original_region)
 
@@ -190,7 +231,8 @@ class BootloaderLifecycleTests(unittest.TestCase):
             card.seek(446 + 8)
             card.write(struct.pack("<I", 4096))
         with self.open() as card, self.assertRaisesRegex(boot.UpgradeError, "genimage"):
-            boot.upgrade(card, self.candidate, [("known.bin", self.current)], CID, self.backup)
+            boot.upgrade(card, self.candidate, self.candidate_identity,
+                         [("known.bin", self.current)], CID, self.backup)
         self.assertFalse(self.backup.exists())
 
     def test_deployed_boot_only_partition_generation_is_accepted(self):
@@ -234,68 +276,214 @@ class ImageValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(boot.UpgradeError, "FIT extent"):
             boot.validate_bootloader(candidate)
 
+    def test_trivial_fit_header_is_rejected(self):
+        candidate = bytearray(image(40001, 0x10))
+        fit_offset = 32768
+        candidate[fit_offset:] = b"\0" * (len(candidate) - fit_offset)
+        struct.pack_into(">II", candidate, fit_offset, boot.FDT_MAGIC,
+                         len(candidate) - fit_offset)
+        with self.assertRaisesRegex(boot.UpgradeError, "FIT"):
+            boot.validate_bootloader(candidate)
+
+    def test_malformed_fit_structure_is_rejected(self):
+        candidate = bytearray(image(40001, 0x10))
+        off_struct = struct.unpack_from(">I", candidate, 32768 + 8)[0]
+        struct.pack_into(">I", candidate, 32768 + off_struct, 0x12345678)
+        with self.assertRaisesRegex(boot.UpgradeError, "token"):
+            boot.validate_bootloader(candidate)
+
+    def test_candidate_requires_exact_clean_reviewed_manifest(self):
+        candidate = image(40001, 0x10)
+        identity, manifest = authorized(candidate)
+        self.assertEqual(identity.sha256, boot.sha256(candidate))
+        self.assertEqual(identity.manifest_sha256, boot.sha256(manifest))
+        with self.assertRaisesRegex(boot.UpgradeError, "reviewed manifest"):
+            boot.authorize_candidate(candidate, manifest, "0" * 64)
+        dirty_object = json.loads(manifest)
+        dirty_object["firmware"]["dirty"] = True
+        dirty_manifest = json.dumps(dirty_object, sort_keys=True).encode()
+        with self.assertRaisesRegex(boot.UpgradeError, "clean firmware"):
+            boot.authorize_candidate(candidate, dirty_manifest, boot.sha256(dirty_manifest))
+        changed = bytearray(candidate)
+        changed[-1] ^= 1
+        with self.assertRaisesRegex(boot.UpgradeError, "reviewed manifest"):
+            boot.authorize_candidate(bytes(changed), manifest, boot.sha256(manifest))
+
+
+class StrictMbrTests(unittest.TestCase):
+    def test_partition_entries_must_use_exact_genimage_slots(self):
+        shifted_boot = mbr()
+        shifted_boot[478:494] = shifted_boot[446:462]
+        shifted_boot[446:462] = b"\0" * 16
+        with self.assertRaises(boot.UpgradeError):
+            boot.parse_genimage_mbr(shifted_boot)
+
+        shifted_data = mbr()
+        shifted_data[494:510] = shifted_data[462:478]
+        shifted_data[462:478] = b"\0" * 16
+        with self.assertRaisesRegex(boot.UpgradeError, "unexpected partition"):
+            boot.parse_genimage_mbr(shifted_data)
+
+    def test_unused_entry_must_be_fully_zero(self):
+        sector = mbr(include_data=False)
+        sector[462 + 1] = 1
+        with self.assertRaises(boot.UpgradeError):
+            boot.parse_genimage_mbr(sector)
+
+
+class FakeAdb:
+    def __init__(self, disk):
+        self.disk = disk
+        self.remote = {}
+        self.calls = []
+        self.destructive_calls = 0
+        self.fail_write = None
+        self.corrupt_first_write = False
+
+    @staticmethod
+    def completed(argv, stdout=b"", returncode=0, stderr=b""):
+        return boot.subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        action = next(name for name in ("shell", "exec-out", "push") if name in argv)
+        index = argv.index(action)
+        if action == "push":
+            self.remote[argv[index + 2]] = Path(argv[index + 1]).read_bytes()
+            return self.completed(argv)
+        if action == "exec-out":
+            arguments = argv[index + 1:]
+            values = {item.split("=", 1)[0]: int(item.split("=", 1)[1])
+                      for item in arguments if item.startswith(("bs=", "skip=", "count="))}
+            start = values["bs"] * values["skip"]
+            end = start + values["bs"] * values["count"]
+            return self.completed(argv, bytes(self.disk[start:end]))
+        command = argv[index + 1]
+        if command == "id -u":
+            return self.completed(argv, b"0\n")
+        if "device/type" in command:
+            return self.completed(argv, f"SD\n{CID}\n512\n".encode())
+        if command == "cat /sys/block/mmcblk1/size":
+            return self.completed(argv, b"524288\n")
+        if "dd if=/tmp/.brick-bootloader-" in command:
+            import re
+            match = re.search(r"dd if=(/tmp/[^ ]+) of=/dev/mmcblk1 bs=4096 seek=([0-9]+)",
+                              command)
+            if match:
+                payload = self.remote[match.group(1)]
+                start = int(match.group(2)) * 4096
+                self.destructive_calls += 1
+                if self.fail_write and self.destructive_calls == 1:
+                    self.disk[start:start + 137] = payload[:137]
+                    if self.fail_write == "timeout":
+                        raise boot.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                    return self.completed(argv, returncode=1, stderr=b"injected dd failure")
+                self.disk[start:start + len(payload)] = payload
+                if self.corrupt_first_write and self.destructive_calls == 1:
+                    self.disk[start + len(payload) - 1] ^= 1
+        return self.completed(argv)
+
 
 class AdbBackendTests(unittest.TestCase):
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="brick-adb-bootloader-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        current = image(42001, 0x21)
+        candidate = image(56003, 0x37)
+        identity, _manifest = authorized(candidate)
+        original = current + bytes([0xA5] * (boot.BOOT_SIZE - len(current)))
+        disk = bytearray(boot.BOOT_END)
+        disk[:512] = mbr()
+        disk[boot.BOOT_START:boot.BOOT_END] = original
+        return root, current, candidate, identity, original, disk, FakeAdb(disk)
+
     def test_stock_adb_upgrade_uses_host_backup_and_bounded_raw_write(self):
-        with tempfile.TemporaryDirectory(prefix="brick-adb-bootloader-") as directory:
-            root = Path(directory)
-            backup = root / "backup.bin"
-            current = image(42001, 0x21)
-            candidate = image(56003, 0x37)
-            original = current + bytes([0xA5] * (boot.BOOT_SIZE - len(current)))
-            disk = bytearray(boot.BOOT_END)
-            disk[:512] = mbr()
-            disk[boot.BOOT_START:boot.BOOT_END] = original
-            remote = {}
-            calls = []
+        root, current, candidate, identity, original, disk, fake = self.fixture()
+        backup = root / "backup.bin"
+        initial_prefix = bytes(disk[:boot.BOOT_START])
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True,
+                              adb="mock-adb", serial="brick") as card:
+                boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                             CID, backup)
 
-            def completed(argv, stdout=b"", returncode=0, stderr=b""):
-                return boot.subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+        self.assertEqual(backup.read_bytes(), initial_prefix + original)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END],
+                         candidate + original[len(candidate):])
+        writes = [" ".join(argv) for argv, _kwargs in fake.calls
+                  if "shell" in argv and " of=/dev/mmcblk1 " in argv[-1]]
+        self.assertEqual(len(writes), 1)
+        self.assertIn("bs=4096 seek=32 conv=notrunc", writes[0])
+        self.assertTrue(all("of=/dev/mmcblk1" not in " ".join(argv)
+                            for argv, _kwargs in fake.calls if "exec-out" in argv))
 
-            def run(argv, **_kwargs):
-                calls.append(argv)
-                action = next(name for name in ("shell", "exec-out", "push") if name in argv)
-                index = argv.index(action)
-                if action == "push":
-                    remote[argv[index + 2]] = Path(argv[index + 1]).read_bytes()
-                    return completed(argv)
-                if action == "exec-out":
-                    arguments = argv[index + 1:]
-                    values = {item.split("=", 1)[0]: int(item.split("=", 1)[1])
-                              for item in arguments if item.startswith(("bs=", "skip=", "count="))}
-                    start = values["bs"] * values["skip"]
-                    end = start + values["bs"] * values["count"]
-                    return completed(argv, bytes(disk[start:end]))
-                command = argv[index + 1]
-                if command == "id -u":
-                    return completed(argv, b"0\n")
-                if "device/type" in command:
-                    return completed(argv, f"SD\n{CID}\n512\n".encode())
-                if command == "cat /sys/block/mmcblk1/size":
-                    return completed(argv, b"524288\n")
-                if "dd if=/tmp/.brick-bootloader-" in command:
-                    import re
-                    match = re.search(r"dd if=(/tmp/[^ ]+) of=/dev/mmcblk1 bs=4096 seek=([0-9]+)", command)
-                    self.assertIsNotNone(match)
-                    payload = remote[match.group(1)]
-                    start = int(match.group(2)) * 4096
-                    disk[start:start + len(payload)] = payload
-                return completed(argv)
+    def test_adb_dry_run_never_pushes_or_writes(self):
+        root, current, candidate, identity, original, disk, fake = self.fixture()
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=False, adb="mock-adb") as card:
+                boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                             CID, backup, dry_run=True)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END], original)
+        self.assertFalse(any("push" in argv for argv, _kwargs in fake.calls))
+        self.assertEqual(fake.destructive_calls, 0)
 
-            with patch.object(boot.subprocess, "run", side_effect=run):
-                with boot.AdbCard("/dev/mmcblk1", writable=True,
-                                  adb="mock-adb", serial="brick") as card:
-                    boot.upgrade(card, candidate, [("known.bin", current)], CID, backup)
+    def test_corrupt_adb_readback_is_automatically_restored(self):
+        root, current, candidate, identity, original, disk, fake = self.fixture()
+        fake.corrupt_first_write = True
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                with self.assertRaisesRegex(boot.UpgradeError, "original boot region restored"):
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, backup)
+        self.assertEqual(fake.destructive_calls, 2)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END], original)
 
-            self.assertEqual(backup.read_bytes(), bytes(disk[:boot.BOOT_START]) + original)
-            self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END],
-                             candidate + original[len(candidate):])
-            writes = [" ".join(call) for call in calls
-                      if "shell" in call and " of=/dev/mmcblk1 " in call[-1]]
-            self.assertEqual(len(writes), 1)
-            self.assertIn("bs=4096 seek=32 conv=notrunc", writes[0])
-            self.assertTrue(all("of=/dev/mmcblk1" not in " ".join(call)
-                                for call in calls if "exec-out" in call))
+    def test_failed_adb_dd_does_not_overlap_restore_and_explicit_restore_works(self):
+        root, current, candidate, identity, original, disk, fake = self.fixture()
+        fake.fail_write = "error"
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                with self.assertRaisesRegex(boot.RestoreError, "no automatic restore"):
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, backup)
+            self.assertEqual(fake.destructive_calls, 1)
+            fake.fail_write = None
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                boot.restore(card, backup, CID)
+        self.assertEqual(fake.destructive_calls, 2)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END], original)
+
+    def test_timed_out_adb_dd_is_bounded_and_never_auto_restored(self):
+        root, current, candidate, identity, _original, _disk, fake = self.fixture()
+        fake.fail_write = "timeout"
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                with self.assertRaisesRegex(boot.RestoreError, "no automatic restore"):
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, backup)
+        self.assertEqual(fake.destructive_calls, 1)
+        destructive = [(argv, kwargs) for argv, kwargs in fake.calls
+                       if "shell" in argv and " of=/dev/mmcblk1 " in argv[-1]]
+        self.assertEqual(len(destructive), 1)
+        self.assertEqual(destructive[0][1]["timeout"], boot.ADB_TRANSFER_TIMEOUT)
+
+    def test_adb_temporary_payload_and_lock_are_cleaned_up(self):
+        root, current, candidate, identity, _original, _disk, fake = self.fixture()
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                             CID, backup)
+        commands = [argv[-1] for argv, _kwargs in fake.calls if "shell" in argv]
+        self.assertTrue(any(command.startswith("rm -f /tmp/.brick-bootloader-")
+                            for command in commands))
+        self.assertIn("rmdir /tmp/.brick-bootloader-update-lock", commands)
+        self.assertTrue(all("timeout" in kwargs for _argv, kwargs in fake.calls))
 
 
 if __name__ == "__main__":

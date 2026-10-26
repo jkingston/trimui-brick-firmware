@@ -27,6 +27,9 @@ DATA_PARTITION_START = 128 * 1024 * 1024 // 512
 DATA_PARTITION_SECTORS = 64 * 1024 * 1024 // 512
 SUNXI_CHECKSUM_STAMP = 0x5F0A6C39
 BLKGETSIZE64 = 0x80081272
+FDT_MAGIC = 0xD00DFEED
+ADB_COMMAND_TIMEOUT = 30
+ADB_TRANSFER_TIMEOUT = 120
 
 
 class UpgradeError(RuntimeError):
@@ -37,8 +40,111 @@ class RestoreError(UpgradeError):
     pass
 
 
+class WriteUncertainError(UpgradeError):
+    """A raw ADB write may still be active; another write must not be started."""
+
+
+@dataclass(frozen=True)
+class CandidateIdentity:
+    sha256: str
+    bytes: int
+    manifest_sha256: str
+    firmware_commit: str
+    kernel_commit: str
+
+
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def normalized_sha256(value, name="SHA-256"):
+    if (not isinstance(value, str) or len(value) != 64 or
+            any(character not in "0123456789abcdef" for character in value.lower())):
+        raise UpgradeError(f"{name} must be exactly 64 hexadecimal digits")
+    return value.lower()
+
+
+def validate_fit(fit, name):
+    if len(fit) < 40:
+        raise UpgradeError(f"{name} has a truncated FIT header")
+    (magic, total, off_struct, off_strings, off_reserve, version,
+     last_compatible, _boot_cpu, strings_size, struct_size) = struct.unpack_from(
+         ">10I", fit)
+    if magic != FDT_MAGIC or total != len(fit):
+        raise UpgradeError(f"{name} has an invalid FIT extent")
+    if version < 17 or last_compatible > version:
+        raise UpgradeError(f"{name} has an unsupported FIT version")
+    if off_reserve < 40 or off_reserve % 8:
+        raise UpgradeError(f"{name} has an invalid FIT reserve map")
+    struct_end = off_struct + struct_size
+    strings_end = off_strings + strings_size
+    if (off_struct % 4 or off_struct < 40 or struct_end > total or
+            off_strings < 40 or strings_end > total):
+        raise UpgradeError(f"{name} has invalid FIT block bounds")
+    intervals = sorted(((off_struct, struct_end, "structure"),
+                        (off_strings, strings_end, "strings")))
+    if intervals[0][1] > intervals[1][0]:
+        raise UpgradeError(f"{name} has overlapping FIT blocks")
+
+    reserve = off_reserve
+    while True:
+        if reserve + 16 > total or reserve + 16 > min(off_struct, off_strings):
+            raise UpgradeError(f"{name} has an unterminated FIT reserve map")
+        address, size = struct.unpack_from(">QQ", fit, reserve)
+        reserve += 16
+        if address == 0 and size == 0:
+            break
+
+    strings = fit[off_strings:strings_end]
+    position = off_struct
+    depth = 0
+    paths = set()
+    stack = []
+    saw_root = False
+    saw_end = False
+    while position < struct_end:
+        token = struct.unpack_from(">I", fit, position)[0]
+        position += 4
+        if token == 1:  # FDT_BEGIN_NODE
+            terminator = fit.find(b"\0", position, struct_end)
+            if terminator < 0:
+                raise UpgradeError(f"{name} has an unterminated FIT node name")
+            node = fit[position:terminator].decode("ascii", errors="strict")
+            position = (terminator + 4) & ~3
+            if position > struct_end or (depth == 0 and (saw_root or node)):
+                raise UpgradeError(f"{name} has an invalid FIT root node")
+            saw_root = True
+            stack.append(node)
+            depth += 1
+            paths.add("/" + "/".join(part for part in stack if part))
+        elif token == 2:  # FDT_END_NODE
+            if depth == 0:
+                raise UpgradeError(f"{name} has unbalanced FIT nodes")
+            depth -= 1
+            stack.pop()
+        elif token == 3:  # FDT_PROP
+            if depth == 0 or position + 8 > struct_end:
+                raise UpgradeError(f"{name} has an invalid FIT property")
+            length, name_offset = struct.unpack_from(">II", fit, position)
+            position += 8
+            if name_offset >= strings_size or strings.find(b"\0", name_offset) < 0:
+                raise UpgradeError(f"{name} has an invalid FIT property name")
+            position = (position + length + 3) & ~3
+            if position > struct_end:
+                raise UpgradeError(f"{name} has a truncated FIT property")
+        elif token == 4:  # FDT_NOP
+            continue
+        elif token == 9:  # FDT_END
+            if depth or not saw_root:
+                raise UpgradeError(f"{name} has an incomplete FIT structure")
+            saw_end = True
+            if any(fit[position:struct_end]):
+                raise UpgradeError(f"{name} has data after the FIT end token")
+            break
+        else:
+            raise UpgradeError(f"{name} has an unknown FIT structure token")
+    if not saw_end or "/images" not in paths or "/configurations" not in paths:
+        raise UpgradeError(f"{name} is not a complete boot FIT")
 
 
 def validate_bootloader(data, name="bootloader"):
@@ -54,38 +160,73 @@ def validate_bootloader(data, name="bootloader"):
     if sum(words) & 0xFFFFFFFF != checksum:
         raise UpgradeError(f"{name} has an invalid SPL checksum")
     fit_offset = max(32768, spl_size)
-    if fit_offset + 8 > len(data):
+    if fit_offset + 40 > len(data):
         raise UpgradeError(f"{name} has no appended FIT")
-    magic, fit_size = struct.unpack_from(">II", data, fit_offset)
-    if magic != 0xD00DFEED or fit_size != len(data) - fit_offset:
-        raise UpgradeError(f"{name} has an invalid FIT extent")
+    validate_fit(data[fit_offset:], name)
+
+
+def authorize_candidate(candidate, manifest_bytes, expected_manifest_sha256):
+    expected = normalized_sha256(expected_manifest_sha256, "manifest SHA-256")
+    if sha256(manifest_bytes) != expected:
+        raise UpgradeError("candidate manifest SHA-256 does not match the reviewed manifest")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UpgradeError("candidate manifest is not valid JSON") from error
+    if not isinstance(manifest, dict):
+        raise UpgradeError("candidate manifest is not an object")
+    source_commits = {}
+    for source in ("firmware", "kernel"):
+        identity = manifest.get(source)
+        if not isinstance(identity, dict) or identity.get("dirty") is not False:
+            raise UpgradeError(f"candidate manifest does not identify a clean {source} source")
+        commit = identity.get("commit")
+        if (not isinstance(commit, str) or len(commit) != 40 or
+                any(character not in "0123456789abcdef" for character in commit.lower())):
+            raise UpgradeError(f"candidate manifest has an invalid {source} commit")
+        source_commits[source] = commit.lower()
+    files = manifest.get("files")
+    record = files.get("u-boot-sunxi-with-spl.bin") if isinstance(files, dict) else None
+    if not isinstance(record, dict):
+        raise UpgradeError("candidate manifest has no U-Boot artifact record")
+    recorded_hash = normalized_sha256(record.get("sha256"), "candidate artifact SHA-256")
+    recorded_bytes = record.get("bytes")
+    if (not isinstance(recorded_bytes, int) or isinstance(recorded_bytes, bool) or
+            recorded_bytes <= 0):
+        raise UpgradeError("candidate manifest has an invalid U-Boot artifact size")
+    if recorded_bytes != len(candidate) or recorded_hash != sha256(candidate):
+        raise UpgradeError("candidate does not match the reviewed manifest")
+    validate_bootloader(candidate, "candidate")
+    return CandidateIdentity(recorded_hash, recorded_bytes, expected,
+                             source_commits["firmware"], source_commits["kernel"])
 
 
 def parse_genimage_mbr(sector):
     if len(sector) != 512 or sector[510:512] != b"\x55\xaa":
         raise UpgradeError("card has no valid DOS partition table")
-    entries = []
+    raw_entries = []
     for index in range(4):
         entry = sector[446 + index * 16:462 + index * 16]
         boot, ptype = entry[0], entry[4]
         start, sectors = struct.unpack_from("<II", entry, 8)
-        if ptype or start or sectors:
-            entries.append((boot, ptype, start, sectors))
-    if len(entries) not in (1, 2):
-        raise UpgradeError("card does not use a known Brick partition layout")
-    boot = entries[0]
+        raw_entries.append((entry, (boot, ptype, start, sectors)))
+    boot = raw_entries[0][1]
     if (boot[0] != 0x80 or boot[1] != 0x0C or
             boot[2] != BOOT_PARTITION_START or
             boot[3] != BOOT_PARTITION_SECTORS):
         raise UpgradeError("card boot partition does not match the Brick genimage layout")
-    if len(entries) == 2:
-        data = entries[1]
+    entries = [boot]
+    second_raw, data = raw_entries[1]
+    if any(second_raw):
         if (data[0] != 0 or data[1] != 0x83 or
                 data[2] != DATA_PARTITION_START or
                 data[3] != DATA_PARTITION_SECTORS):
             raise UpgradeError("card data partition does not match the Brick genimage layout")
         if boot[2] + boot[3] > data[2]:
             raise UpgradeError("card boot and data partitions overlap")
+        entries.append(data)
+    if any(raw_entries[index][0] != b"\0" * 16 for index in (2, 3)):
+        raise UpgradeError("card has an unexpected partition outside the Brick genimage slots")
     return entries
 
 
@@ -238,16 +379,19 @@ class AdbCard:
         self.remote_files = []
         self.locked = False
 
-    def _run(self, arguments):
-        result = subprocess.run(self.prefix + arguments, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
+    def _run(self, arguments, timeout=ADB_COMMAND_TIMEOUT):
+        try:
+            result = subprocess.run(self.prefix + arguments, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise UpgradeError(f"ADB command timed out after {timeout} seconds") from error
         if result.returncode:
             message = result.stderr.decode(errors="replace").strip()
             raise UpgradeError(f"ADB command failed: {message or result.returncode}")
         return result.stdout
 
-    def shell(self, command):
-        return self._run(["shell", command]).replace(b"\r\n", b"\n")
+    def shell(self, command, timeout=ADB_COMMAND_TIMEOUT):
+        return self._run(["shell", command], timeout=timeout).replace(b"\r\n", b"\n")
 
     def __enter__(self):
         if self.shell("id -u").strip() != b"0":
@@ -312,7 +456,8 @@ class AdbCard:
         inner = offset % block
         count = (inner + size + block - 1) // block
         data = self._run(["exec-out", "/bin/busybox", "dd", f"if={self.path}",
-                          f"bs={block}", f"skip={first}", f"count={count}"])
+                          f"bs={block}", f"skip={first}", f"count={count}"],
+                         timeout=ADB_TRANSFER_TIMEOUT)
         expected = count * block
         # A final device block can be short, but every current use is far from EOF.
         if len(data) != expected:
@@ -332,15 +477,25 @@ class AdbCard:
             temporary.write(data)
             local = temporary.name
         try:
-            self._run(["push", local, remote])
+            self._run(["push", local, remote], timeout=ADB_TRANSFER_TIMEOUT)
         finally:
             os.unlink(local)
         digest = sha256(data)
-        self.shell(f"set -e; test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
-                   f"test \"$(/bin/busybox sha256sum {remote} | "
-                   f"/bin/busybox awk '{{print $1}}')\" = {digest}; "
-                   f"/bin/busybox dd if={remote} of={self.path} bs=4096 "
-                   f"seek={offset // 4096} conv=notrunc; /bin/busybox sync")
+        try:
+            self.shell(f"set -e; test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
+                       f"test \"$(/bin/busybox sha256sum {remote} | "
+                       f"/bin/busybox awk '{{print $1}}')\" = {digest}; "
+                       f"/bin/busybox dd if={remote} of={self.path} bs=4096 "
+                       f"seek={offset // 4096} conv=notrunc; /bin/busybox sync",
+                       timeout=ADB_TRANSFER_TIMEOUT)
+        except BaseException as error:
+            # ADB cannot prove that a remote dd stopped after a timeout,
+            # disconnect, or interruption. Starting an automatic restore could
+            # overlap that writer and make recovery worse.
+            raise WriteUncertainError(
+                "ADB raw-write completion is uncertain; reconnect, verify no "
+                "writer remains, then use the saved backup with restore"
+            ) from error
 
     def sync(self):
         self.shell("/bin/busybox sync")
@@ -376,7 +531,7 @@ def match_current(card, allowed):
     raise UpgradeError("current raw bootloader is not in the authorized allowlist")
 
 
-def backup_metadata(expected_cid, current, candidate, region, card_layout):
+def backup_metadata(expected_cid, current, candidate, candidate_identity, region, card_layout):
     return {
         "format": 1,
         "card_cid": expected_cid.lower(),
@@ -391,7 +546,13 @@ def backup_metadata(expected_cid, current, candidate, region, card_layout):
         "card_layout": card_layout,
         "backup": {"bytes": len(region), "sha256": sha256(region)},
         "current": current,
-        "candidate": {"bytes": len(candidate), "sha256": sha256(candidate)},
+        "candidate": {
+            "bytes": len(candidate),
+            "sha256": sha256(candidate),
+            "manifest_sha256": candidate_identity.manifest_sha256,
+            "firmware_commit": candidate_identity.firmware_commit,
+            "kernel_commit": candidate_identity.kernel_commit,
+        },
     }
 
 
@@ -419,7 +580,13 @@ def restore_region(card, original, expected_cid, expected_layout):
         raise RestoreError("restored boot region did not verify")
 
 
-def upgrade(card, candidate, allowed, expected_cid, backup_path, dry_run=False):
+def upgrade(card, candidate, candidate_identity, allowed, expected_cid, backup_path,
+            dry_run=False):
+    if not isinstance(candidate_identity, CandidateIdentity):
+        raise UpgradeError("candidate has no authenticated manifest identity")
+    if (candidate_identity.bytes != len(candidate) or
+            candidate_identity.sha256 != sha256(candidate)):
+        raise UpgradeError("candidate changed after manifest authentication")
     validate_bootloader(candidate, "candidate")
     for name, content in allowed:
         validate_bootloader(content, f"authorized current image {name}")
@@ -429,7 +596,8 @@ def upgrade(card, candidate, allowed, expected_cid, backup_path, dry_run=False):
     card_layout = authenticate(card, expected_cid)
     current = match_current(card, allowed)
     original = card.read(0, BACKUP_SIZE)
-    metadata = backup_metadata(expected_cid, current, candidate, original, card_layout)
+    metadata = backup_metadata(expected_cid, current, candidate, candidate_identity,
+                               original, card_layout)
     preserve_backup(backup_path, original, metadata)
     if dry_run:
         return metadata
@@ -449,6 +617,11 @@ def upgrade(card, candidate, allowed, expected_cid, backup_path, dry_run=False):
         if card.read(0, BACKUP_SIZE) != expected:
             raise UpgradeError("updated raw boot area did not match the expected image")
     except BaseException as update_error:
+        if isinstance(update_error, WriteUncertainError):
+            raise RestoreError(
+                f"upgrade write state is uncertain; no automatic restore was started; "
+                f"reconnect, verify no raw writer remains, then restore from {backup_path}"
+            ) from update_error
         try:
             restore_region(card, original[BOOT_START:BOOT_END], expected_cid, card_layout)
         except BaseException as restore_error:
@@ -510,6 +683,9 @@ def main(argv=None):
     update = subparsers.add_parser("upgrade", help="back up, update and verify a bootloader")
     update.add_argument("device", type=Path)
     update.add_argument("candidate", type=Path)
+    update.add_argument("--manifest", required=True, type=Path)
+    update.add_argument("--manifest-sha256", required=True,
+                        type=lambda value: normalized_sha256(value, "manifest SHA-256"))
     update.add_argument("--cid", required=True, type=normalized_cid)
     update.add_argument("--allow-current", required=True, action="append", type=Path)
     update.add_argument("--backup", required=True, type=Path)
@@ -536,8 +712,11 @@ def main(argv=None):
     with card_context as card:
         if args.action == "upgrade":
             candidate = args.candidate.read_bytes()
+            identity = authorize_candidate(candidate, args.manifest.read_bytes(),
+                                           args.manifest_sha256)
             allowed = [(str(path), path.read_bytes()) for path in args.allow_current]
-            metadata = upgrade(card, candidate, allowed, args.cid, args.backup, args.dry_run)
+            metadata = upgrade(card, candidate, identity, allowed, args.cid,
+                               args.backup, args.dry_run)
             verb = "DRY_RUN_VERIFIED" if args.dry_run else "UPGRADE_VERIFIED"
         else:
             metadata = restore(card, args.backup, args.cid, args.dry_run)
