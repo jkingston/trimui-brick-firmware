@@ -18,13 +18,25 @@ S40bluetoothd) daemon=/usr/libexec/bluetooth/bluetoothd; pidfile=/var/run/blueto
 S46bluealsa) daemon=/usr/bin/bluealsa; pidfile=/run/bluealsa.pid ;;
 *) exec "/usr/libexec/brick-init/$service" "$@" ;;
 esac
+require_bluetooth_identity() {
+	[ -f /run/brick-bluetooth-identity/ready ] || {
+		echo "$service: Bluetooth identity is not configured" >&2
+		exit 1
+	}
+}
 case "${1:-}" in
 stop)
 	exec /usr/libexec/brick-stop-daemon "$service" "$pidfile" "$daemon"
 	;;
 restart)
 	/usr/libexec/brick-stop-daemon "$service" "$pidfile" "$daemon" || exit $?
+	case "$service" in S40bluetoothd|S46bluealsa) require_bluetooth_identity ;; esac
 	exec "/usr/libexec/brick-init/$service" start
 	;;
-*) exec "/usr/libexec/brick-init/$service" "$@" ;;
+*)
+	case "$service:${1:-}" in
+	S40bluetoothd:start|S46bluealsa:start) require_bluetooth_identity ;;
+	esac
+	exec "/usr/libexec/brick-init/$service" "$@"
+	;;
 esac

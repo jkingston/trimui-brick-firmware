@@ -35,6 +35,12 @@ python3 tools/deploy.py output/build/images
 The updater verifies payload hashes, retains previous boot payloads, and does
 not replace the bootloader. Flashing the complete SD image erases the card.
 
+Import the preserved stock Bluetooth address once after the new image boots:
+
+```sh
+python3 tools/provision_bluetooth_identity.py /path/to/xr_bt.conf
+```
+
 The default image uses the bottom port as a USB peripheral and leaves internal
 eMMC, video/G2D/crypto accelerator nodes, and the experimental deep-sleep
 profile disabled until they pass device qualification. Run `make check` for the

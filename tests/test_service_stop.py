@@ -19,6 +19,8 @@ class ServiceStopTests(unittest.TestCase):
         self.mock.mkdir()
         self.state = self.root / 'state'
         self.state.write_text('persistent\n')
+        self.identity_ready = self.root / 'bluetooth-ready'
+        self.identity_ready.touch()
         self.log = self.root / 'calls'
         self.log.write_text('')
         self.helper = self.root / 'brick-stop-daemon'
@@ -35,6 +37,8 @@ class ServiceStopTests(unittest.TestCase):
         wrapper = (LIB / 'brick-state-service').read_text()
         self.wrapper = self.root / 'wrapper'
         self.wrapper.write_text(wrapper.replace('/run/brick-data/state', str(self.state))
+                                .replace('/run/brick-bluetooth-identity/ready',
+                                         str(self.identity_ready))
                                 .replace('/usr/libexec/brick-stop-daemon', str(self.helper))
                                 .replace('/usr/libexec/brick-init', str(self.originals))
                                 .replace('/var/run/', str(self.pids) + '/')

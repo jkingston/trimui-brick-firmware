@@ -1,0 +1,33 @@
+#!/bin/sh
+# Refuse shared or invented controller identities; apply only provisioned state.
+set -eu
+state=/run/brick-bluetooth-identity
+address=/data/bluetooth/public-address
+
+start() {
+	rm -rf "$state"
+	mkdir -m 0700 "$state"
+	[ "$(cat /run/brick-data/state 2>/dev/null || true)" = persistent ] || {
+		echo 'Bluetooth identity requires persistent data' >&2
+		return 0
+	}
+	[ -f "$address" ] || {
+		echo 'Bluetooth disabled: no provisioned public address' >&2
+		return 0
+	}
+	/usr/sbin/brick-bluetooth-identity apply "$address" > "$state/address.new"
+	chmod 0600 "$state/address.new"
+	mv "$state/address.new" "$state/address"
+	: > "$state/ready.new"
+	mv "$state/ready.new" "$state/ready"
+}
+
+stop() {
+	rm -rf "$state"
+}
+
+case "${1:-}" in
+start|stop) "$1" ;;
+restart) stop; start ;;
+*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
