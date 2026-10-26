@@ -59,8 +59,10 @@ class ProfileTests(unittest.TestCase):
  peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
 };'''
         wake = ''
-        if wake_profile == 'startup':
+        nmi_parent = '&gic'
+        if wake_profile in ('startup', 'deep'):
             timer_parent = '&wakeupgen' if broken_timer else '&gic'
+            nmi_parent = '&wakeupgen' if wake_profile == 'deep' else '&gic'
             wake = f'''
  interrupt-parent = <&wakeupgen>;
  wakeupgen: interrupt-controller {{
@@ -80,7 +82,7 @@ class ProfileTests(unittest.TestCase):
   interrupts = <1 9 0xf04>;
  }};
  nmi: interrupt-controller@7010320 {{ reg = <0x7010320 0xc>;
-  interrupt-controller; #interrupt-cells = <2>; interrupt-parent = <&gic>;
+  interrupt-controller; #interrupt-cells = <2>; interrupt-parent = <{nmi_parent}>;
   interrupts = <0 103 4>;
  }};
  musb: usb@5100000 {{ reg = <0x5100000 0x400>; status = "{gadget}"; dr_mode = "peripheral"; }};
@@ -149,6 +151,23 @@ class ProfileTests(unittest.TestCase):
     def test_startup_profile_rejects_host_usb_role(self):
         with self.assertRaisesRegex(ValueError, 'peripheral'):
             usb_profile.configure(self.config, 'host', 'startup')
+
+    def test_deep_profile_routes_nmi_wake_through_firmware(self):
+        scp_profile.configure(self.config, 'deep')
+        usb_profile.configure(self.config, 'peripheral', 'deep')
+        source, fdtget = self.compile_dtb('peripheral', wake_profile='deep')
+        expected = source.read_bytes()
+        usb_profile.install(self.root, self.config, fdtget)
+        canonical = self.root / (usb_profile.DTBS['peripheral'] + '.dtb')
+        self.assertEqual(canonical.read_bytes(), expected)
+
+    def test_deep_profile_rejects_direct_gic_nmi(self):
+        scp_profile.configure(self.config, 'deep')
+        usb_profile.configure(self.config, 'peripheral', 'deep')
+        source, fdtget = self.compile_dtb('peripheral', wake_profile='startup')
+        source.rename(self.root / (usb_profile.NATIVE_DEEP_DTB + '.dtb'))
+        with self.assertRaisesRegex(ValueError, 'NMI wake parent'):
+            usb_profile.install(self.root, self.config, fdtget)
 
     def test_host_profile_rejects_enabled_gadget_before_overwriting_payload(self):
         usb_profile.configure(self.config, 'host')

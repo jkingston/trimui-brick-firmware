@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Select and validate the Brick SCP startup profile at build time."""
+"""Select and validate the Brick SCP firmware profile at build time."""
 import argparse
 from pathlib import Path
 import re
 
 
 PACKAGE_KEY = 'BR2_PACKAGE_BRICK_SCP'
+SYSTEM_SUSPEND_KEY = 'BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment'
 LINES = {
-    'disabled': (f'# {PACKAGE_KEY} is not set', f'{FRAGMENT_KEY}=""'),
-    'startup': (f'{PACKAGE_KEY}=y', f'{FRAGMENT_KEY}="{FRAGMENT}"'),
+    'disabled': (f'# {PACKAGE_KEY} is not set',
+                 f'# {SYSTEM_SUSPEND_KEY} is not set', f'{FRAGMENT_KEY}=""'),
+    'startup': (f'{PACKAGE_KEY}=y', f'# {SYSTEM_SUSPEND_KEY} is not set',
+                f'{FRAGMENT_KEY}="{FRAGMENT}"'),
+    'deep': (f'{PACKAGE_KEY}=y', f'{SYSTEM_SUSPEND_KEY}=y',
+             f'{FRAGMENT_KEY}="{FRAGMENT}"'),
 }
 
 
@@ -26,11 +31,15 @@ def profile(config):
         config,
         rf'^(?:{re.escape(PACKAGE_KEY)}=y|# {re.escape(PACKAGE_KEY)} is not set)$',
         'Brick SCP package selection')
+    system_suspend = _one(
+        config,
+        rf'^(?:{re.escape(SYSTEM_SUSPEND_KEY)}=y|# {re.escape(SYSTEM_SUSPEND_KEY)} is not set)$',
+        'Brick SCP system-suspend selection')
     fragment = _one(
         config, rf'^{re.escape(FRAGMENT_KEY)}="[^"]*"$',
         'kernel fragment selection')
     for name, lines in LINES.items():
-        if (package, fragment) == lines:
+        if (package, system_suspend, fragment) == lines:
             return name
     raise ValueError('SCP package and native wake kernel fragment do not form a supported profile')
 
@@ -45,8 +54,10 @@ def configure(config, selected):
     replacements = (
         (rf'^(?:{re.escape(PACKAGE_KEY)}=y|# {re.escape(PACKAGE_KEY)} is not set)$',
          LINES[selected][0], 'SCP package'),
+        (rf'^(?:{re.escape(SYSTEM_SUSPEND_KEY)}=y|# {re.escape(SYSTEM_SUSPEND_KEY)} is not set)$',
+         LINES[selected][1], 'SCP system suspend'),
         (rf'^{re.escape(FRAGMENT_KEY)}="[^"]*"$',
-         LINES[selected][1], 'kernel fragment'),
+         LINES[selected][2], 'kernel fragment'),
     )
     for pattern, replacement, description in replacements:
         text, count = re.subn(pattern, replacement, text, flags=re.M)
@@ -64,7 +75,7 @@ def verify_kernel(config, kernel):
         kernel_config,
         r'^(?:CONFIG_SUN50I_A133_WAKEUPGEN=y|# CONFIG_SUN50I_A133_WAKEUPGEN is not set)$',
         'native wakeupgen kernel configuration') == 'CONFIG_SUN50I_A133_WAKEUPGEN=y'
-    expected = selected == 'startup'
+    expected = selected != 'disabled'
     if enabled != expected:
         raise ValueError('Kernel wakeupgen configuration does not match SCP profile')
     wakeupgen = kernel / 'drivers/irqchip/irq-sun50i-a133-wakeupgen.o'

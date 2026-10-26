@@ -11,21 +11,23 @@ DTBS = {'peripheral': 'sun50i-a133-trimui-brick',
         'host': 'sun50i-a133-trimui-brick-host',
         'auto': 'sun50i-a133-trimui-brick-auto-usb'}
 NATIVE_WAKE_DTB = 'sun50i-a133-trimui-brick-native-wake'
+NATIVE_DEEP_DTB = 'sun50i-a133-trimui-brick-native-deep'
+WAKE_DTBS = {'startup': NATIVE_WAKE_DTB, 'deep': NATIVE_DEEP_DTB}
 KEY = 'BR2_LINUX_KERNEL_INTREE_DTS_NAME'
 
 
 def expected_dtb(role, wake_profile):
-    if wake_profile == 'startup':
+    if wake_profile in WAKE_DTBS:
         if role != 'peripheral':
-            raise ValueError('SCP startup requires the USB peripheral profile')
-        return NATIVE_WAKE_DTB
+            raise ValueError('SCP firmware requires the USB peripheral profile')
+        return WAKE_DTBS[wake_profile]
     return DTBS[role]
 
 
 def selected_dtb(config):
     matches = re.findall(r'^' + KEY + r'="allwinner/([^"]+)"$',
                          config.read_text(), re.M)
-    allowed = set(DTBS.values()) | {NATIVE_WAKE_DTB}
+    allowed = set(DTBS.values()) | set(WAKE_DTBS.values())
     if len(matches) != 1 or matches[0] not in allowed:
         raise ValueError('Expected exactly one supported Brick kernel DTB')
     return matches[0]
@@ -34,7 +36,7 @@ def selected_dtb(config):
 def profile(config):
     selected = selected_dtb(config)
     for role, name in DTBS.items():
-        if selected == name or (role == 'peripheral' and selected == NATIVE_WAKE_DTB):
+        if selected == name or (role == 'peripheral' and selected in WAKE_DTBS.values()):
             return role
     raise ValueError('Expected exactly one supported Brick USB profile DTB')
 
@@ -75,10 +77,11 @@ def install(images, config, fdtget):
         return set(subprocess.check_output(
             [str(fdtget), '-p', str(source), path], text=True).split())
 
-    if wake_profile == 'startup':
+    if wake_profile in WAKE_DTBS:
         wakeupgen = '/interrupt-controller'
         gic = '/soc/interrupt-controller@3021000'
-        direct = (gic, '/timer', '/soc/interrupt-controller@7010320')
+        r_intc = '/soc/interrupt-controller@7010320'
+        direct = (gic, '/timer')
         gic_phandle = get(gic, 'phandle', 'x')
         wake_phandle = get(wakeupgen, 'phandle', 'x')
         if (get('/', 'interrupt-parent', 'x') != wake_phandle or
@@ -91,12 +94,16 @@ def install(images, config, fdtget):
         if any(get(node, 'interrupt-parent', 'x') != gic_phandle
                for node in direct):
             raise ValueError('Native wake profile does not preserve direct-GIC exceptions')
+        expected_r_parent = wake_phandle if wake_profile == 'deep' else gic_phandle
+        if get(r_intc, 'interrupt-parent', 'x') != expected_r_parent:
+            raise ValueError('Native wake profile has an invalid NMI wake parent')
         if get(gic, 'interrupts', 'x').split()[0] != '1':
             raise ValueError('GIC maintenance interrupt is not a PPI')
         timer = get('/timer', 'interrupts', 'x').split()
         if len(timer) != 12 or timer[0::3] != ['1'] * 4:
             raise ValueError('Architectural timer interrupts are not direct GIC PPIs')
-        if get('/soc/interrupt-controller@7010320', 'interrupts', 'x').split()[0] != '0':
+        nmi_irq = get(r_intc, 'interrupts', 'x').split()
+        if nmi_irq[:2] != ['0', '67']:
             raise ValueError('NMI cascade input is not a GIC SPI')
 
     for node, enabled in [('usb@5100000', role == 'peripheral'),
@@ -129,11 +136,11 @@ if __name__ == '__main__':
     guard = commands.add_parser('check-output')
     guard.add_argument('config', type=Path)
     guard.add_argument('role', choices=DTBS)
-    guard.add_argument('wake_profile', choices=('disabled', 'startup'), nargs='?', default='disabled')
+    guard.add_argument('wake_profile', choices=('disabled', 'startup', 'deep'), nargs='?', default='disabled')
     setup = commands.add_parser('configure')
     setup.add_argument('config', type=Path)
     setup.add_argument('role', choices=DTBS)
-    setup.add_argument('wake_profile', choices=('disabled', 'startup'), nargs='?', default='disabled')
+    setup.add_argument('wake_profile', choices=('disabled', 'startup', 'deep'), nargs='?', default='disabled')
     build = commands.add_parser('install')
     build.add_argument('images', type=Path)
     build.add_argument('config', type=Path)

@@ -17,6 +17,7 @@ class ScpProfileTests(unittest.TestCase):
         self.config = Path(directory.name) / '.config'
         self.config.write_text(
             'BR2_OTHER=y\n# BR2_PACKAGE_BRICK_SCP is not set\n'
+            '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n')
 
     def test_selection_preserves_unrelated_config(self):
@@ -24,7 +25,10 @@ class ScpProfileTests(unittest.TestCase):
         scp_profile.configure(self.config, 'startup')
         self.assertEqual(self.config.read_text(),
                          'BR2_OTHER=y\nBR2_PACKAGE_BRICK_SCP=y\n'
+                         '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
                          f'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="{scp_profile.FRAGMENT}"\n')
+        scp_profile.configure(self.config, 'deep')
+        self.assertEqual(scp_profile.profile(self.config), 'deep')
         scp_profile.configure(self.config, 'disabled')
         self.assertEqual(scp_profile.profile(self.config), 'disabled')
 
@@ -32,6 +36,8 @@ class ScpProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'fresh output'):
             scp_profile.check_output(self.config, 'startup')
         scp_profile.configure(self.config, 'startup')
+        with self.assertRaisesRegex(ValueError, 'fresh output'):
+            scp_profile.check_output(self.config, 'deep')
         with self.assertRaisesRegex(ValueError, 'fresh output'):
             scp_profile.check_output(self.config, 'disabled')
 
@@ -41,13 +47,15 @@ class ScpProfileTests(unittest.TestCase):
                      '# BR2_PACKAGE_BRICK_SCP is not set\n'):
             with self.subTest(text=text):
                 self.config.write_text(
-                    text + 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n')
+                    text + '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
+                    'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n')
                 with self.assertRaises(ValueError):
                     scp_profile.profile(self.config)
 
     def test_mixed_package_and_fragment_profiles_are_rejected(self):
         self.config.write_text(
             'BR2_PACKAGE_BRICK_SCP=y\n'
+            '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n')
         with self.assertRaisesRegex(ValueError, 'do not form'):
             scp_profile.profile(self.config)
@@ -65,6 +73,16 @@ class ScpProfileTests(unittest.TestCase):
             scp_profile.verify_kernel(self.config, kernel)
         obj.write_bytes(b'object')
         scp_profile.verify_kernel(self.config, kernel)
+        scp_profile.configure(self.config, 'deep')
+        scp_profile.verify_kernel(self.config, kernel)
+
+    def test_system_suspend_requires_complete_scp_profile(self):
+        self.config.write_text(
+            '# BR2_PACKAGE_BRICK_SCP is not set\n'
+            'BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND=y\n'
+            'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n')
+        with self.assertRaisesRegex(ValueError, 'do not form'):
+            scp_profile.profile(self.config)
 
     def test_new_output_is_accepted(self):
         scp_profile.check_output(self.config.with_name('new-config'), 'startup')

@@ -12,12 +12,12 @@ VE_PROFILE ?= disabled
 ifeq ($(filter $(USB_ROLE),peripheral host auto),)
 $(error USB_ROLE must be peripheral, host or auto)
 endif
-ifeq ($(filter $(SCP_PROFILE),disabled startup),)
-$(error SCP_PROFILE must be disabled or startup)
+ifeq ($(filter $(SCP_PROFILE),disabled startup deep),)
+$(error SCP_PROFILE must be disabled, startup or deep)
 endif
-ifeq ($(SCP_PROFILE),startup)
+ifneq ($(SCP_PROFILE),disabled)
 ifneq ($(USB_ROLE),peripheral)
-$(error SCP_PROFILE=startup requires USB_ROLE=peripheral)
+$(error SCP_PROFILE=$(SCP_PROFILE) requires USB_ROLE=peripheral)
 endif
 endif
 ifeq ($(filter $(VE_PROFILE),disabled qualification),)

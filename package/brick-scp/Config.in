@@ -5,5 +5,11 @@ config BR2_PACKAGE_BRICK_SCP
 	  Build the opt-in Brick SCP profile using the exact SCP and service
 	  device tree extracted from the official firmware archive. The profile
 	  includes bounded startup, mailbox loopback, the versioned native wake
-	  ABI and stock-compatible PSCI system suspend. Runtime exposure is
-	  conditional on successful SCP startup and complete capabilities.
+	  ABI and the source support needed for stock-compatible system suspend.
+
+config BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND
+	bool "Brick SCP system-suspend profile"
+	select BR2_PACKAGE_BRICK_SCP
+	help
+	  Expose the complete, default-off A133 PSCI system-suspend path. Select
+	  this only as part of the paired deep firmware and kernel-DT profile.
