@@ -1,0 +1,1487 @@
+From 3688496e4638bbe80ddf1d26f0926a64bf5908bf Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 11:54:26 +0000
+Subject: [PATCH] feat(allwinner): complete A133 system suspend
+
+Compose the reviewed SCP transaction with retained EL3 context and the
+stock GIC/SoC restore sequence. Advertise PSCI SYSTEM_SUSPEND only after
+runtime capability probing.
+
+Assisted-by: LLM
+---
+ .../allwinner/common/include/sunxi_a133_gic.h |  19 +
+ .../include/sunxi_a133_secure_context.h       |  78 ++++
+ .../include/sunxi_a133_system_suspend.h       |  20 +
+ .../include/sunxi_a133_vendor_scp_runtime.h   |   2 +
+ plat/allwinner/common/sunxi_a133_gic.c        |  94 +++++
+ .../common/sunxi_a133_secure_context.c        | 324 +++++++++++++++
+ .../common/sunxi_a133_system_suspend.c        | 147 +++++++
+ .../common/sunxi_a133_vendor_scp_runtime.c    |  15 +
+ plat/allwinner/common/sunxi_native_pm.c       |  74 ++++
+ plat/allwinner/common/sunxi_pm.c              |   7 +-
+ plat/allwinner/common/tests/Makefile          |  15 +-
+ .../common/tests/test_sunxi_a133_gic.c        |  95 +++++
+ .../tests/test_sunxi_a133_secure_context.c    | 380 ++++++++++++++++++
+ plat/allwinner/sun50i_a133/platform.mk        |  32 ++
+ 14 files changed, 1299 insertions(+), 3 deletions(-)
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_gic.h
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_secure_context.h
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_system_suspend.h
+ create mode 100644 plat/allwinner/common/sunxi_a133_gic.c
+ create mode 100644 plat/allwinner/common/sunxi_a133_secure_context.c
+ create mode 100644 plat/allwinner/common/sunxi_a133_system_suspend.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_gic.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_gic.h b/plat/allwinner/common/include/sunxi_a133_gic.h
+new file mode 100644
+index 0000000..cbc5ab0
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_gic.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_GIC_H
++#define SUNXI_A133_GIC_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++struct sunxi_a133_gic_backend {
++	void *cookie;
++	uint32_t (*read_32)(void *cookie, uintptr_t address);
++	void (*write_32)(void *cookie, uintptr_t address, uint32_t value);
++};
++
++/* Rebuild the exact stock A133 GICv2 CPU and distributor baseline. */
++bool sunxi_a133_gic_reset(const struct sunxi_a133_gic_backend *backend);
++
++#endif /* SUNXI_A133_GIC_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_secure_context.h b/plat/allwinner/common/include/sunxi_a133_secure_context.h
+new file mode 100644
+index 0000000..1b8b52d
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_secure_context.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_SECURE_CONTEXT_H
++#define SUNXI_A133_SECURE_CONTEXT_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define SUNXI_A133_CONTEXT_MAGIC		0x41313343U
++#define SUNXI_A133_CONTEXT_VERSION	1U
++#define SUNXI_A133_CONTEXT_PLL_POLLS	100000U
++
++enum sunxi_a133_context_status {
++	SUNXI_A133_CONTEXT_OK = 0,
++	SUNXI_A133_CONTEXT_EINVAL = -1,
++	SUNXI_A133_CONTEXT_ESTATE = -2,
++	SUNXI_A133_CONTEXT_ERETRY = -3,
++	SUNXI_A133_CONTEXT_EFAILSTOP = -4,
++	SUNXI_A133_CONTEXT_ETIMEOUT = -5,
++};
++
++enum sunxi_a133_context_phase {
++	SUNXI_A133_CONTEXT_IDLE,
++	SUNXI_A133_CONTEXT_SAVED,
++	SUNXI_A133_CONTEXT_COMMITTED,
++	SUNXI_A133_CONTEXT_FAILED,
++};
++
++enum sunxi_a133_context_transaction_status {
++	SUNXI_A133_CONTEXT_TX_OK,
++	SUNXI_A133_CONTEXT_TX_RETRY,
++	SUNXI_A133_CONTEXT_TX_FAILED,
++};
++
++struct sunxi_a133_context_backend {
++	void *cookie;
++	uint32_t (*read_32)(void *cookie, uintptr_t address);
++	void (*write_32)(void *cookie, uintptr_t address, uint32_t value);
++	void (*barrier)(void *cookie);
++	bool (*gic_reset)(void *cookie);
++	int (*transaction_commit)(void *cookie);
++	int (*transaction_finish)(void *cookie, uint32_t *wake_source);
++};
++
++struct sunxi_a133_secure_context {
++	uint32_t magic;
++	uint32_t version;
++	enum sunxi_a133_context_phase phase;
++	uint32_t trusted_warm_entry;
++	uint32_t counter_low;
++	uint32_t counter_high;
++	uint32_t counter_frequency_id;
++	uint32_t wake_source;
++	uint32_t pll_lock_polls;
++	int last_transaction_status;
++	struct sunxi_a133_context_backend backend;
++};
++
++/*
++ * trusted_warm_entry must be the sec_entrypoint passed to
++ * plat_setup_psci_ops(), and the interval must be the reserved BL31 image.
++ */
++int sunxi_a133_secure_context_init(
++	struct sunxi_a133_secure_context *context,
++	const struct sunxi_a133_context_backend *backend,
++	uint64_t trusted_warm_entry, uint64_t bl31_base, uint64_t bl31_limit,
++	uint32_t pll_lock_polls);
++int sunxi_a133_secure_context_save_early(
++	struct sunxi_a133_secure_context *context);
++int sunxi_a133_secure_context_commit_late(
++	struct sunxi_a133_secure_context *context);
++int sunxi_a133_secure_context_restore_early(
++	struct sunxi_a133_secure_context *context);
++int sunxi_a133_secure_context_abort(
++	struct sunxi_a133_secure_context *context);
++
++#endif /* SUNXI_A133_SECURE_CONTEXT_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_system_suspend.h b/plat/allwinner/common/include/sunxi_a133_system_suspend.h
+new file mode 100644
+index 0000000..c7e72f2
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_system_suspend.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_SYSTEM_SUSPEND_H
++#define SUNXI_A133_SYSTEM_SUSPEND_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <lib/psci/psci.h>
++
++bool sunxi_a133_system_suspend_runtime_setup(uintptr_t secure_resume_entry);
++bool sunxi_a133_system_suspend_runtime_available(void);
++void sunxi_a133_system_suspend_state(psci_power_state_t *target_state);
++int sunxi_a133_system_suspend_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr);
++int sunxi_a133_system_suspend_commit(void);
++int sunxi_a133_system_suspend_finish(void);
++
++#endif /* SUNXI_A133_SYSTEM_SUSPEND_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+index b2bf967..bc62f84 100644
+--- a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
++++ b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+@@ -4,6 +4,7 @@
+ #ifndef SUNXI_A133_VENDOR_SCP_RUNTIME_H
+ #define SUNXI_A133_VENDOR_SCP_RUNTIME_H
+ 
++#include <stdbool.h>
+ #include <stdint.h>
+ 
+ #if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
+@@ -18,6 +19,7 @@ int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
+ 						   uint8_t *scp_result);
+ 
+ #if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++bool sunxi_a133_vendor_scp_runtime_suspend_available(void);
+ void sunxi_a133_vendor_scp_runtime_suspend_state(
+ 	psci_power_state_t *target_state);
+ int sunxi_a133_vendor_scp_runtime_suspend_prepare(
+diff --git a/plat/allwinner/common/sunxi_a133_gic.c b/plat/allwinner/common/sunxi_a133_gic.c
+new file mode 100644
+index 0000000..bcbb81a
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_gic.c
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include <sunxi_a133_gic.h>
++
++#define A133_GICD_BASE		0x03021000U
++#define A133_GICC_BASE		0x03022000U
++
++#define GICD_CTLR		0x000U
++#define GICD_TYPER		0x004U
++#define GICD_IGROUPR		0x080U
++#define GICD_ISENABLER		0x100U
++#define GICD_ICENABLER		0x180U
++#define GICD_ISACTIVER		0x300U
++#define GICD_ICACTIVER		0x380U
++#define GICD_IPRIORITYR		0x400U
++#define GICD_ITARGETSR		0x800U
++#define GICD_ICFGR		0xc00U
++
++#define GICC_CTLR		0x000U
++#define GICC_PMR		0x004U
++
++#define A133_GIC_NUM_INTERRUPTS	160U
++#define A133_GIC_PRIVATE_INTERRUPTS 32U
++#define A133_GIC_PRIORITY	0xa0a0a0a0U
++#define A133_GIC_CPU0_TARGET	0x01010101U
++
++static void write_32(const struct sunxi_a133_gic_backend *backend,
++		     uintptr_t address, uint32_t value)
++{
++	backend->write_32(backend->cookie, address, value);
++}
++
++bool sunxi_a133_gic_reset(const struct sunxi_a133_gic_backend *backend)
++{
++	uint32_t num_interrupts;
++	unsigned int index;
++
++	assert((backend != NULL) && (backend->read_32 != NULL) &&
++	       (backend->write_32 != NULL));
++
++	num_interrupts = ((backend->read_32(backend->cookie,
++		A133_GICD_BASE + GICD_TYPER) & 0x1fU) + 1U) * 32U;
++	/*
++	 * Stock rejects fewer than 160 interrupts, then executes fixed A133
++	 * loops. Requiring the exact known implementation fails closed if this
++	 * platform code is ever used on a different GIC.
++	 */
++	if (num_interrupts != A133_GIC_NUM_INTERRUPTS) {
++		return false;
++	}
++
++	/* Stock 0x48000a00: rebuild the CPU/private interface. */
++	write_32(backend, A133_GICC_BASE + GICC_CTLR, 0U);
++	write_32(backend, A133_GICD_BASE + GICD_ICENABLER, 0xffff0000U);
++	write_32(backend, A133_GICD_BASE + GICD_ISENABLER, 0x0000ffffU);
++	for (index = 0U; index < A133_GIC_PRIVATE_INTERRUPTS; index += 4U) {
++		write_32(backend, A133_GICD_BASE + GICD_IPRIORITYR + index,
++			 A133_GIC_PRIORITY);
++	}
++	write_32(backend, A133_GICC_BASE + GICC_PMR, 0xf0U);
++	write_32(backend, A133_GICC_BASE + GICC_CTLR, 0xbU);
++
++	/* Stock 0x480008f8: rebuild the complete A133 distributor. */
++	write_32(backend, A133_GICD_BASE + GICD_CTLR, 0U);
++	for (index = 0U; index < 10U; ++index) {
++		write_32(backend, A133_GICD_BASE + GICD_IGROUPR + index * 4U,
++			 UINT32_MAX);
++	}
++	for (index = 0U; index < A133_GIC_NUM_INTERRUPTS; index += 16U) {
++		write_32(backend, A133_GICD_BASE + GICD_ICFGR + index / 4U,
++			 0U);
++	}
++	for (index = A133_GIC_PRIVATE_INTERRUPTS;
++	     index < 148U; index += 4U) {
++		write_32(backend, A133_GICD_BASE + GICD_IPRIORITYR + index,
++			 A133_GIC_PRIORITY);
++		write_32(backend, A133_GICD_BASE + GICD_ITARGETSR + index,
++			 A133_GIC_CPU0_TARGET);
++	}
++	for (index = A133_GIC_PRIVATE_INTERRUPTS;
++	     index < A133_GIC_NUM_INTERRUPTS; index += 32U) {
++		write_32(backend, A133_GICD_BASE + GICD_ICENABLER + index / 8U,
++			 UINT32_MAX);
++		write_32(backend, A133_GICD_BASE + GICD_ICACTIVER + index / 8U,
++			 UINT32_MAX);
++	}
++	write_32(backend, A133_GICD_BASE + GICD_CTLR, 3U);
++	return true;
++}
+diff --git a/plat/allwinner/common/sunxi_a133_secure_context.c b/plat/allwinner/common/sunxi_a133_secure_context.c
+new file mode 100644
+index 0000000..090b662
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_secure_context.c
+@@ -0,0 +1,324 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include <sunxi_a133_secure_context.h>
++
++#define A133_CPU_COUNT			4U
++
++#define A133_SYSCON_RESUME_REG		0x03000004U
++#define A133_PLL_COM_REG		0x03001060U
++#define A133_CCU_SEC_SWITCH_REG		0x03001f00U
++#define A133_DMA_SEC_REG		0x03002020U
++#define A133_SID_CHIPID_REG		0x03006200U
++#define A133_SPC_BASE			0x03008000U
++#define A133_SPC_PORT_SET_REG(port)	(A133_SPC_BASE + 0x4U + (port) * 0x10U)
++#define A133_SPC_SPECIAL0_REG		0x030080e0U
++#define A133_SPC_SPECIAL1_REG		0x030080e4U
++#define A133_GICC_CTLR_REG		0x03022000U
++#define A133_NSI_BASE			0x03100000U
++#define A133_R_PRCM_SEC_SWITCH_REG	0x07010290U
++#define A133_CPU_RVBAR_LO_REG(cpu)	(0x08100040U + (cpu) * 8U)
++#define A133_CPU_RVBAR_HI_REG(cpu)	(0x08100044U + (cpu) * 8U)
++#define A133_COUNTER_LOW_REG		0x08110000U
++#define A133_COUNTER_HIGH_REG		0x08110004U
++#define A133_COUNTER_CTRL_REG		0x08120000U
++#define A133_COUNTER_LOW_SET_REG	0x08120008U
++#define A133_COUNTER_HIGH_SET_REG	0x0812000cU
++#define A133_COUNTER_FREQID_REG		0x08120020U
++#define A133_CPUCFG_CLUSTER_CTRL1_REG	0x09010014U
++
++#define A133_GICC_ENABLE_MASK		0x3U
++#define A133_GICC_STOCK_BYPASS_MASK	0x1e0U
++#define A133_PLL_STOCK_BITS		0x2501U
++#define A133_PLL_ENABLE_BIT		0x80000000U
++#define A133_PLL_LOCK_ENABLE_BIT	0x20000000U
++#define A133_PLL_LOCK_BIT		0x10000000U
++#define A133_PLL_OUTPUT_BIT		0x08000000U
++
++struct a133_register_value {
++	uintptr_t address;
++	uint32_t value;
++};
++
++static const struct a133_register_value nsi_resume_values[] = {
++	{ A133_NSI_BASE + 0x1618U, 0x1U },
++	{ A133_NSI_BASE + 0x1818U, 0x1U },
++	{ A133_NSI_BASE + 0x1614U, 0xaU },
++	{ A133_NSI_BASE + 0x1814U, 0xaU },
++	{ A133_NSI_BASE + 0x1a18U, 0x1U },
++	{ A133_NSI_BASE + 0x1a14U, 0xaU },
++	{ A133_NSI_BASE + 0x1c18U, 0x1U },
++	{ A133_NSI_BASE + 0x1c14U, 0xaU },
++	{ A133_NSI_BASE + 0x1e14U, 0xaU },
++	{ A133_NSI_BASE + 0x2018U, 0x1U },
++	{ A133_NSI_BASE + 0x2414U, 0xfU },
++	{ A133_NSI_BASE + 0x2e90U, 0x20020202U },
++	{ A133_NSI_BASE + 0x2e94U, 0x0U },
++	{ A133_NSI_BASE + 0x2e98U, 0x0U },
++};
++
++static bool backend_complete(const struct sunxi_a133_context_backend *backend)
++{
++	return (backend != NULL) && (backend->read_32 != NULL) &&
++	       (backend->write_32 != NULL) &&
++	       (backend->barrier != NULL) &&
++	       (backend->gic_reset != NULL) &&
++	       (backend->transaction_commit != NULL) &&
++	       (backend->transaction_finish != NULL);
++}
++
++static bool context_valid(const struct sunxi_a133_secure_context *context)
++{
++	return (context != NULL) &&
++	       (context->magic == SUNXI_A133_CONTEXT_MAGIC) &&
++	       (context->version == SUNXI_A133_CONTEXT_VERSION) &&
++	       backend_complete(&context->backend);
++}
++
++static uint32_t read_32(struct sunxi_a133_secure_context *context,
++			uintptr_t address)
++{
++	return context->backend.read_32(context->backend.cookie, address);
++}
++
++static void write_32(struct sunxi_a133_secure_context *context,
++		     uintptr_t address, uint32_t value)
++{
++	context->backend.write_32(context->backend.cookie, address, value);
++}
++
++static void restore_trusted_rvbar(struct sunxi_a133_secure_context *context)
++{
++	unsigned int cpu;
++
++	for (cpu = 0U; cpu < A133_CPU_COUNT; ++cpu) {
++		write_32(context, A133_CPU_RVBAR_LO_REG(cpu),
++			 context->trusted_warm_entry);
++		write_32(context, A133_CPU_RVBAR_HI_REG(cpu), 0U);
++	}
++}
++
++static void restore_security_policy(
++	struct sunxi_a133_secure_context *context)
++{
++	unsigned int port;
++
++	for (port = 0U; port < 14U; ++port) {
++		write_32(context, A133_SPC_PORT_SET_REG(port), UINT32_MAX);
++	}
++	write_32(context, A133_CCU_SEC_SWITCH_REG, 0x7U);
++	write_32(context, A133_R_PRCM_SEC_SWITCH_REG, 0x7U);
++	write_32(context, A133_DMA_SEC_REG, 0xffU);
++	write_32(context, A133_SPC_SPECIAL0_REG, 0x3U);
++	write_32(context, A133_SPC_SPECIAL1_REG, 0x1U);
++}
++
++static void restore_counter(struct sunxi_a133_secure_context *context)
++{
++	write_32(context, A133_COUNTER_CTRL_REG, 0U);
++	write_32(context, A133_COUNTER_FREQID_REG,
++		 context->counter_frequency_id);
++	write_32(context, A133_COUNTER_LOW_SET_REG, context->counter_low);
++	write_32(context, A133_COUNTER_HIGH_SET_REG, context->counter_high);
++	write_32(context, A133_COUNTER_CTRL_REG, 1U);
++}
++
++static void restore_nsi(struct sunxi_a133_secure_context *context)
++{
++	uint32_t chipid;
++	unsigned int i;
++
++	for (i = 0U; i < sizeof(nsi_resume_values) /
++				 sizeof(nsi_resume_values[0]); ++i) {
++		write_32(context, nsi_resume_values[i].address,
++			 nsi_resume_values[i].value);
++	}
++
++	chipid = (read_32(context, A133_SID_CHIPID_REG) >> 22) & 0xfU;
++	if ((chipid == 0U) || (chipid == 0xaU)) {
++		write_32(context, A133_NSI_BASE + 0x3008U, 0U);
++	}
++}
++
++static bool restore_pll_com(struct sunxi_a133_secure_context *context)
++{
++	uint32_t value;
++	uint32_t poll;
++
++	value = read_32(context, A133_PLL_COM_REG) | A133_PLL_STOCK_BITS;
++	write_32(context, A133_PLL_COM_REG, value);
++	if ((value & A133_PLL_ENABLE_BIT) == 0U) {
++		value |= A133_PLL_ENABLE_BIT;
++		write_32(context, A133_PLL_COM_REG, value);
++	}
++
++	value |= A133_PLL_LOCK_ENABLE_BIT;
++	write_32(context, A133_PLL_COM_REG, value);
++	for (poll = 0U; poll < context->pll_lock_polls; ++poll) {
++		if ((read_32(context, A133_PLL_COM_REG) &
++		     A133_PLL_LOCK_BIT) != 0U) {
++			break;
++		}
++	}
++	if (poll == context->pll_lock_polls) {
++		return false;
++	}
++
++	value = read_32(context, A133_PLL_COM_REG);
++	value &= ~A133_PLL_LOCK_ENABLE_BIT;
++	write_32(context, A133_PLL_COM_REG, value);
++	value |= A133_PLL_OUTPUT_BIT;
++	write_32(context, A133_PLL_COM_REG, value);
++	return true;
++}
++
++int sunxi_a133_secure_context_init(
++	struct sunxi_a133_secure_context *context,
++	const struct sunxi_a133_context_backend *backend,
++	uint64_t trusted_warm_entry, uint64_t bl31_base, uint64_t bl31_limit,
++	uint32_t pll_lock_polls)
++{
++	if ((context == NULL) || !backend_complete(backend) ||
++	    (trusted_warm_entry == 0U) ||
++	    (trusted_warm_entry > UINT32_MAX) ||
++	    ((trusted_warm_entry & 3U) != 0U) ||
++	    (bl31_base >= bl31_limit) ||
++	    (trusted_warm_entry < bl31_base) ||
++	    (trusted_warm_entry >= bl31_limit) ||
++	    (pll_lock_polls == 0U)) {
++		return SUNXI_A133_CONTEXT_EINVAL;
++	}
++
++	memset(context, 0, sizeof(*context));
++	context->magic = SUNXI_A133_CONTEXT_MAGIC;
++	context->version = SUNXI_A133_CONTEXT_VERSION;
++	context->phase = SUNXI_A133_CONTEXT_IDLE;
++	context->trusted_warm_entry = (uint32_t)trusted_warm_entry;
++	context->pll_lock_polls = pll_lock_polls;
++	context->backend = *backend;
++	return SUNXI_A133_CONTEXT_OK;
++}
++
++int sunxi_a133_secure_context_save_early(
++	struct sunxi_a133_secure_context *context)
++{
++	if (!context_valid(context)) {
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	if (context->phase != SUNXI_A133_CONTEXT_IDLE) {
++		return SUNXI_A133_CONTEXT_ESTATE;
++	}
++
++	context->counter_low = read_32(context, A133_COUNTER_LOW_REG);
++	context->counter_high = read_32(context, A133_COUNTER_HIGH_REG);
++	context->counter_frequency_id = read_32(context,
++						 A133_COUNTER_FREQID_REG);
++	context->wake_source = 0U;
++	context->last_transaction_status = SUNXI_A133_CONTEXT_TX_OK;
++	context->phase = SUNXI_A133_CONTEXT_SAVED;
++	return SUNXI_A133_CONTEXT_OK;
++}
++
++int sunxi_a133_secure_context_commit_late(
++	struct sunxi_a133_secure_context *context)
++{
++	uint32_t value;
++	int status;
++
++	if (!context_valid(context)) {
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	if (context->phase != SUNXI_A133_CONTEXT_SAVED) {
++		return SUNXI_A133_CONTEXT_ESTATE;
++	}
++
++	value = read_32(context, A133_GICC_CTLR_REG);
++	value = (value & ~A133_GICC_ENABLE_MASK) |
++		A133_GICC_STOCK_BYPASS_MASK;
++	write_32(context, A133_GICC_CTLR_REG, value);
++	status = context->backend.transaction_commit(context->backend.cookie);
++	context->last_transaction_status = status;
++	if (status == SUNXI_A133_CONTEXT_TX_OK) {
++		context->phase = SUNXI_A133_CONTEXT_COMMITTED;
++		context->backend.barrier(context->backend.cookie);
++		return SUNXI_A133_CONTEXT_OK;
++	}
++	if (status == SUNXI_A133_CONTEXT_TX_RETRY) {
++		return SUNXI_A133_CONTEXT_ERETRY;
++	}
++
++	context->phase = SUNXI_A133_CONTEXT_FAILED;
++	return SUNXI_A133_CONTEXT_EFAILSTOP;
++}
++
++int sunxi_a133_secure_context_restore_early(
++	struct sunxi_a133_secure_context *context)
++{
++	int status;
++
++	if (!context_valid(context)) {
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	if (context->phase != SUNXI_A133_CONTEXT_COMMITTED) {
++		return SUNXI_A133_CONTEXT_ESTATE;
++	}
++
++	restore_trusted_rvbar(context);
++	/*
++	 * Stock resets the complete distributor before RESTORE_NOTIFY. Linux's
++	 * CPU-PM syscore notifier has already saved all normal-world Group-1
++	 * state and restores it after PSCI returns.
++	 */
++	if (!context->backend.gic_reset(context->backend.cookie)) {
++		context->phase = SUNXI_A133_CONTEXT_FAILED;
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	status = context->backend.transaction_finish(context->backend.cookie,
++						     &context->wake_source);
++	context->last_transaction_status = status;
++	if (status != SUNXI_A133_CONTEXT_TX_OK) {
++		context->phase = SUNXI_A133_CONTEXT_FAILED;
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++
++	restore_security_policy(context);
++	restore_counter(context);
++	/* Unknown stock resume prerequisite; keep it A133-specific. */
++	write_32(context, A133_SYSCON_RESUME_REG, 0U);
++	restore_nsi(context);
++	if (!restore_pll_com(context)) {
++		context->phase = SUNXI_A133_CONTEXT_FAILED;
++		return SUNXI_A133_CONTEXT_ETIMEOUT;
++	}
++	write_32(context, A133_CPUCFG_CLUSTER_CTRL1_REG, 2U);
++	context->backend.barrier(context->backend.cookie);
++
++	context->counter_low = 0U;
++	context->counter_high = 0U;
++	context->counter_frequency_id = 0U;
++	context->phase = SUNXI_A133_CONTEXT_IDLE;
++	return SUNXI_A133_CONTEXT_OK;
++}
++
++int sunxi_a133_secure_context_abort(
++	struct sunxi_a133_secure_context *context)
++{
++	if (!context_valid(context)) {
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	if (context->phase != SUNXI_A133_CONTEXT_SAVED) {
++		return SUNXI_A133_CONTEXT_ESTATE;
++	}
++
++	context->counter_low = 0U;
++	context->counter_high = 0U;
++	context->counter_frequency_id = 0U;
++	context->wake_source = 0U;
++	context->phase = SUNXI_A133_CONTEXT_IDLE;
++	return SUNXI_A133_CONTEXT_OK;
++}
+diff --git a/plat/allwinner/common/sunxi_a133_system_suspend.c b/plat/allwinner/common/sunxi_a133_system_suspend.c
+new file mode 100644
+index 0000000..181f0c4
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_system_suspend.c
+@@ -0,0 +1,147 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <arch_helpers.h>
++#include <platform_def.h>
++#include <lib/mmio.h>
++
++#include <sunxi_a133_gic.h>
++#include <sunxi_a133_psci_bridge.h>
++#include <sunxi_a133_secure_context.h>
++#include <sunxi_a133_system_suspend.h>
++#include <sunxi_a133_vendor_scp_runtime.h>
++
++#define A133_PLL_LOCK_POLLS	100000U
++
++static struct sunxi_a133_secure_context a133_secure_context;
++static bool a133_system_suspend_ready;
++
++static uint32_t runtime_read_32(void *cookie, uintptr_t address)
++{
++	(void)cookie;
++	return mmio_read_32(address);
++}
++
++static void runtime_write_32(void *cookie, uintptr_t address, uint32_t value)
++{
++	(void)cookie;
++	mmio_write_32(address, value);
++}
++
++static void runtime_barrier(void *cookie)
++{
++	(void)cookie;
++	dsbsy();
++}
++
++static bool runtime_gic_reset(void *cookie)
++{
++	const struct sunxi_a133_gic_backend backend = {
++		.read_32 = runtime_read_32,
++		.write_32 = runtime_write_32,
++	};
++
++	(void)cookie;
++	return sunxi_a133_gic_reset(&backend);
++}
++
++static int context_transaction_status(int status)
++{
++	if (status == SUNXI_A133_SUSPEND_OK) {
++		return SUNXI_A133_CONTEXT_TX_OK;
++	}
++	if (status == SUNXI_A133_SUSPEND_ERETRY) {
++		return SUNXI_A133_CONTEXT_TX_RETRY;
++	}
++	return SUNXI_A133_CONTEXT_TX_FAILED;
++}
++
++static int runtime_commit(void *cookie)
++{
++	(void)cookie;
++	return context_transaction_status(
++		sunxi_a133_psci_bridge_runtime_commit());
++}
++
++static int runtime_finish(void *cookie, uint32_t *wake_source)
++{
++	(void)cookie;
++	return context_transaction_status(
++		sunxi_a133_psci_bridge_runtime_finish(wake_source));
++}
++
++bool sunxi_a133_system_suspend_runtime_setup(uintptr_t secure_resume_entry)
++{
++	const struct sunxi_a133_context_backend backend = {
++		.read_32 = runtime_read_32,
++		.write_32 = runtime_write_32,
++		.barrier = runtime_barrier,
++		.gic_reset = runtime_gic_reset,
++		.transaction_commit = runtime_commit,
++		.transaction_finish = runtime_finish,
++	};
++	int ret;
++
++	a133_system_suspend_ready = false;
++	ret = sunxi_a133_psci_bridge_runtime_setup(secure_resume_entry);
++	if (ret != SUNXI_A133_SUSPEND_OK) {
++		return false;
++	}
++
++	ret = sunxi_a133_secure_context_init(&a133_secure_context, &backend,
++		secure_resume_entry, BL31_BASE, BL31_LIMIT,
++		A133_PLL_LOCK_POLLS);
++	if (ret != SUNXI_A133_CONTEXT_OK) {
++		return false;
++	}
++
++	a133_system_suspend_ready =
++		sunxi_a133_vendor_scp_runtime_suspend_available();
++	return a133_system_suspend_ready;
++}
++
++bool sunxi_a133_system_suspend_runtime_available(void)
++{
++	return a133_system_suspend_ready &&
++		sunxi_a133_vendor_scp_runtime_suspend_available();
++}
++
++void sunxi_a133_system_suspend_state(psci_power_state_t *target_state)
++{
++	sunxi_a133_psci_bridge_runtime_system_state(target_state);
++}
++
++int sunxi_a133_system_suspend_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr)
++{
++	int ret;
++
++	if (!sunxi_a133_system_suspend_runtime_available()) {
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++
++	ret = sunxi_a133_secure_context_save_early(&a133_secure_context);
++	if (ret != SUNXI_A133_CONTEXT_OK) {
++		return ret;
++	}
++
++	ret = sunxi_a133_psci_bridge_runtime_prepare(target_state, mpidr);
++	if (ret != SUNXI_A133_SUSPEND_OK) {
++		(void)sunxi_a133_secure_context_abort(&a133_secure_context);
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	return SUNXI_A133_CONTEXT_OK;
++}
++
++int sunxi_a133_system_suspend_commit(void)
++{
++	return sunxi_a133_secure_context_commit_late(&a133_secure_context);
++}
++
++int sunxi_a133_system_suspend_finish(void)
++{
++	return sunxi_a133_secure_context_restore_early(&a133_secure_context);
++}
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+index e145d02..3588605 100644
+--- a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+@@ -133,6 +133,21 @@ int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
+ }
+ 
+ #if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++bool sunxi_a133_vendor_scp_runtime_suspend_available(void)
++{
++	uint32_t capabilities;
++	bool available;
++
++	spin_lock(&a133_vendor_scp_lock);
++	capabilities = sunxi_vendor_scp_capabilities(
++		&a133_vendor_scp.transport);
++	available = a133_suspend_ready &&
++		((capabilities & SUNXI_A133_SUSPEND_REQUIRED_CAPS) ==
++		 SUNXI_A133_SUSPEND_REQUIRED_CAPS);
++	spin_unlock(&a133_vendor_scp_lock);
++	return available;
++}
++
+ void sunxi_a133_vendor_scp_runtime_suspend_state(
+ 	psci_power_state_t *target_state)
+ {
+diff --git a/plat/allwinner/common/sunxi_native_pm.c b/plat/allwinner/common/sunxi_native_pm.c
+index 28abd3c..5c0f6c3 100644
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -13,6 +13,10 @@
+ 
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++#include <sunxi_a133_secure_context.h>
++#include <sunxi_a133_system_suspend.h>
++#endif
+ 
+ #define SUNXI_WDOG0_CTRL_REG		(SUNXI_R_WDOG_BASE + 0x0010)
+ #define SUNXI_WDOG0_CFG_REG		(SUNXI_R_WDOG_BASE + 0x0014)
+@@ -74,7 +78,77 @@ static const plat_psci_ops_t sunxi_native_psci_ops = {
+ 	.validate_ns_entrypoint		= sunxi_validate_ns_entrypoint,
+ };
+ 
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++static void sunxi_a133_get_sys_suspend_power_state(
++	psci_power_state_t *target_state)
++{
++	sunxi_a133_system_suspend_state(target_state);
++}
++
++static void sunxi_a133_pwr_domain_suspend_pwrdown_early(
++	const psci_power_state_t *target_state)
++{
++	int ret = sunxi_a133_system_suspend_prepare(target_state, read_mpidr());
++
++	if (ret != SUNXI_A133_CONTEXT_OK) {
++		ERROR("PSCI: A133 suspend prepare failed: %d\n", ret);
++		panic();
++	}
++}
++
++static void sunxi_a133_pwr_domain_suspend(
++	const psci_power_state_t *target_state)
++{
++	int ret;
++
++	(void)target_state;
++	ret = sunxi_a133_system_suspend_commit();
++	if (ret != SUNXI_A133_CONTEXT_OK) {
++		ERROR("PSCI: A133 suspend commit failed: %d\n", ret);
++		panic();
++	}
++}
++
++static void sunxi_a133_pwr_domain_suspend_finish(
++	const psci_power_state_t *target_state)
++{
++	int ret;
++
++	(void)target_state;
++	ret = sunxi_a133_system_suspend_finish();
++	if (ret != SUNXI_A133_CONTEXT_OK) {
++		ERROR("PSCI: A133 suspend restore failed: %d\n", ret);
++		panic();
++	}
++	/* Generic Allwinner PSCI does not set USE_GIC_DRIVER. */
++	gicv2_cpuif_enable();
++}
++
++static const plat_psci_ops_t sunxi_a133_system_suspend_psci_ops = {
++	.pwr_domain_on			= sunxi_pwr_domain_on,
++	.pwr_domain_off			= sunxi_pwr_domain_off,
++	.pwr_domain_on_finish		= sunxi_pwr_domain_on_finish,
++	.pwr_domain_suspend_pwrdown_early =
++		sunxi_a133_pwr_domain_suspend_pwrdown_early,
++	.pwr_domain_suspend		= sunxi_a133_pwr_domain_suspend,
++	.pwr_domain_suspend_finish	= sunxi_a133_pwr_domain_suspend_finish,
++	.get_sys_suspend_power_state	=
++		sunxi_a133_get_sys_suspend_power_state,
++	.system_off			= sunxi_system_off,
++	.system_reset			= sunxi_system_reset,
++	.validate_ns_entrypoint		= sunxi_validate_ns_entrypoint,
++};
++#endif
++
+ void sunxi_set_native_psci_ops(const plat_psci_ops_t **psci_ops)
+ {
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++	if (sunxi_a133_system_suspend_runtime_available()) {
++		NOTICE("PSCI: A133 system suspend is available\n");
++		*psci_ops = &sunxi_a133_system_suspend_psci_ops;
++		return;
++	}
++	WARN("PSCI: A133 system suspend disabled: SCP is unavailable\n");
++#endif
+ 	*psci_ops = &sunxi_native_psci_ops;
+ }
+diff --git a/plat/allwinner/common/sunxi_pm.c b/plat/allwinner/common/sunxi_pm.c
+index 6f5026e..84c789e 100644
+--- a/plat/allwinner/common/sunxi_pm.c
++++ b/plat/allwinner/common/sunxi_pm.c
+@@ -18,6 +18,9 @@
+ #if defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
+ #include <sunxi_a133_psci_bridge.h>
+ #endif
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++#include <sunxi_a133_system_suspend.h>
++#endif
+ 
+ static bool psci_is_scpi;
+ 
+@@ -48,7 +51,9 @@ int plat_setup_psci_ops(uintptr_t sec_entrypoint,
+ {
+ 	assert(psci_ops);
+ 
+-#if defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++	(void)sunxi_a133_system_suspend_runtime_setup(sec_entrypoint);
++#elif defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
+ 	if (sunxi_a133_psci_bridge_runtime_setup(sec_entrypoint) !=
+ 	    SUNXI_A133_SUSPEND_OK) {
+ 		ERROR("PSCI: A133 secure warm entry rejected\n");
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+index ccac09b..2997dc8 100644
+--- a/plat/allwinner/common/tests/Makefile
++++ b/plat/allwinner/common/tests/Makefile
+@@ -10,7 +10,8 @@ ROOT := ../../../../..
+ 
+ all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+ 	test_sunxi_a133_native_svc test_sunxi_a133_suspend \
+-	test_sunxi_a133_psci_bridge
++	test_sunxi_a133_psci_bridge test_sunxi_a133_secure_context \
++	test_sunxi_a133_gic
+ 
+ test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+@@ -33,14 +34,24 @@ test_sunxi_a133_psci_bridge: test_sunxi_a133_psci_bridge.c \
+ 	$(CC) $(CFLAGS) -DSUNXI_A133_SUSPEND_HOST_TEST \
+ 		-DSUNXI_A133_PSCI_BRIDGE_HOST_TEST -I../include $^ -o $@
+ 
++test_sunxi_a133_secure_context: test_sunxi_a133_secure_context.c \
++		../sunxi_a133_secure_context.c
++	$(CC) $(CFLAGS) -I../include $^ -o $@
++
++test_sunxi_a133_gic: test_sunxi_a133_gic.c ../sunxi_a133_gic.c
++	$(CC) $(CFLAGS) -I../include $^ -o $@
++
+ test: all
+ 	./test_sunxi_vendor_scp
+ 	./test_sunxi_a133_vendor_scp
+ 	./test_sunxi_a133_native_svc
+ 	./test_sunxi_a133_suspend
+ 	./test_sunxi_a133_psci_bridge
++	./test_sunxi_a133_secure_context
++	./test_sunxi_a133_gic
+ 
+ clean:
+ 	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+ 		test_sunxi_a133_native_svc test_sunxi_a133_suspend \
+-		test_sunxi_a133_psci_bridge
++		test_sunxi_a133_psci_bridge test_sunxi_a133_secure_context \
++		test_sunxi_a133_gic
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_gic.c b/plat/allwinner/common/tests/test_sunxi_a133_gic.c
+new file mode 100644
+index 0000000..a60e342
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_gic.c
+@@ -0,0 +1,95 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++
++#include <sunxi_a133_gic.h>
++
++#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
++#define GICD 0x03021000U
++#define GICC 0x03022000U
++
++struct write_event {
++	uintptr_t address;
++	uint32_t value;
++};
++
++struct fake_backend {
++	struct write_event events[128];
++	size_t count;
++	uint32_t typer;
++};
++
++static uint32_t fake_read_32(void *cookie, uintptr_t address)
++{
++	struct fake_backend *fake = cookie;
++
++	assert(address == GICD + 0x004U);
++	return fake->typer;
++}
++
++static void fake_write_32(void *cookie, uintptr_t address, uint32_t value)
++{
++	struct fake_backend *fake = cookie;
++
++	assert(fake->count < ARRAY_SIZE(fake->events));
++	fake->events[fake->count++] = (struct write_event) {
++		.address = address,
++		.value = value,
++	};
++}
++
++static void expect(const struct fake_backend *fake, size_t index,
++		   uintptr_t address, uint32_t value)
++{
++	assert(index < fake->count);
++	assert(fake->events[index].address == address);
++	assert(fake->events[index].value == value);
++}
++
++int main(void)
++{
++	struct fake_backend fake = { .typer = 4U };
++	const struct sunxi_a133_gic_backend backend = {
++		.cookie = &fake,
++		.read_32 = fake_read_32,
++		.write_32 = fake_write_32,
++	};
++	size_t i;
++	size_t pos = 0U;
++
++	assert(sunxi_a133_gic_reset(&backend));
++	expect(&fake, pos++, GICC + 0x000U, 0U);
++	expect(&fake, pos++, GICD + 0x180U, 0xffff0000U);
++	expect(&fake, pos++, GICD + 0x100U, 0x0000ffffU);
++	for (i = 0U; i < 32U; i += 4U) {
++		expect(&fake, pos++, GICD + 0x400U + i, 0xa0a0a0a0U);
++	}
++	expect(&fake, pos++, GICC + 0x004U, 0xf0U);
++	expect(&fake, pos++, GICC + 0x000U, 0xbU);
++	expect(&fake, pos++, GICD + 0x000U, 0U);
++	for (i = 0U; i < 10U; ++i) {
++		expect(&fake, pos++, GICD + 0x080U + i * 4U, UINT32_MAX);
++	}
++	for (i = 0U; i < 160U; i += 16U) {
++		expect(&fake, pos++, GICD + 0xc00U + i / 4U, 0U);
++	}
++	for (i = 32U; i < 148U; i += 4U) {
++		expect(&fake, pos++, GICD + 0x400U + i, 0xa0a0a0a0U);
++		expect(&fake, pos++, GICD + 0x800U + i, 0x01010101U);
++	}
++	for (i = 32U; i < 160U; i += 32U) {
++		expect(&fake, pos++, GICD + 0x180U + i / 8U, UINT32_MAX);
++		expect(&fake, pos++, GICD + 0x380U + i / 8U, UINT32_MAX);
++	}
++	expect(&fake, pos++, GICD + 0x000U, 3U);
++	assert(pos == fake.count);
++	fake.count = 0U;
++	fake.typer = 3U;
++	assert(!sunxi_a133_gic_reset(&backend));
++	assert(fake.count == 0U);
++	puts("sunxi_a133 stock GIC reset tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c b/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
+new file mode 100644
+index 0000000..1f2e0f9
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
+@@ -0,0 +1,380 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_secure_context.h>
++
++#define ARRAY_SIZE(array)	(sizeof(array) / sizeof((array)[0]))
++
++#define COUNTER_LOW		0x08110000U
++#define COUNTER_HIGH		0x08110004U
++#define COUNTER_CTRL		0x08120000U
++#define COUNTER_LOW_SET		0x08120008U
++#define COUNTER_HIGH_SET	0x0812000cU
++#define COUNTER_FREQID		0x08120020U
++#define RVBAR_LO(cpu)		(0x08100040U + (cpu) * 8U)
++#define RVBAR_HI(cpu)		(0x08100044U + (cpu) * 8U)
++#define GICC_CTLR		0x03022000U
++#define CCU_SEC_SWITCH		0x03001f00U
++#define PLL_COM			0x03001060U
++#define CPUCFG_CLUSTER_CTRL1	0x09010014U
++
++enum event_kind {
++	EVENT_READ,
++	EVENT_WRITE,
++	EVENT_BARRIER,
++	EVENT_GIC_RESET,
++	EVENT_COMMIT,
++	EVENT_FINISH,
++};
++
++struct event {
++	enum event_kind kind;
++	uintptr_t address;
++	uint32_t value;
++};
++
++struct register_value {
++	uintptr_t address;
++	uint32_t value;
++};
++
++struct fake_backend {
++	struct event events[256];
++	struct register_value registers[64];
++	size_t event_count;
++	size_t register_count;
++	int commit_status;
++	int finish_status;
++	bool gic_reset_ok;
++	bool pll_never_locks;
++};
++
++static void record(struct fake_backend *fake, enum event_kind kind,
++		   uintptr_t address, uint32_t value)
++{
++	assert(fake->event_count < ARRAY_SIZE(fake->events));
++	fake->events[fake->event_count++] = (struct event) {
++		.kind = kind,
++		.address = address,
++		.value = value,
++	};
++}
++
++static void set_register(struct fake_backend *fake, uintptr_t address,
++			 uint32_t value)
++{
++	size_t i;
++
++	for (i = 0U; i < fake->register_count; ++i) {
++		if (fake->registers[i].address == address) {
++			fake->registers[i].value = value;
++			return;
++		}
++	}
++	assert(fake->register_count < ARRAY_SIZE(fake->registers));
++	fake->registers[fake->register_count++] = (struct register_value) {
++		.address = address,
++		.value = value,
++	};
++}
++
++static uint32_t get_register(const struct fake_backend *fake,
++			     uintptr_t address)
++{
++	size_t i;
++
++	for (i = 0U; i < fake->register_count; ++i) {
++		if (fake->registers[i].address == address) {
++			return fake->registers[i].value;
++		}
++	}
++	return 0U;
++}
++
++static uint32_t fake_read_32(void *cookie, uintptr_t address)
++{
++	struct fake_backend *fake = cookie;
++	uint32_t value = get_register(fake, address);
++
++	if ((address == PLL_COM) && !fake->pll_never_locks) {
++		value |= 0x10000000U;
++	}
++	record(fake, EVENT_READ, address, value);
++	return value;
++}
++
++static void fake_write_32(void *cookie, uintptr_t address, uint32_t value)
++{
++	struct fake_backend *fake = cookie;
++
++	set_register(fake, address, value);
++	record(fake, EVENT_WRITE, address, value);
++}
++
++static void fake_barrier(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	record(fake, EVENT_BARRIER, 0U, 0U);
++}
++
++static bool fake_gic_reset(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	record(fake, EVENT_GIC_RESET, 0U, 0U);
++	return fake->gic_reset_ok;
++}
++
++static int fake_commit(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	record(fake, EVENT_COMMIT, 0U, (uint32_t)fake->commit_status);
++	return fake->commit_status;
++}
++
++static int fake_finish(void *cookie, uint32_t *wake_source)
++{
++	struct fake_backend *fake = cookie;
++
++	*wake_source = 0x13579bdfU;
++	record(fake, EVENT_FINISH, 0U, (uint32_t)fake->finish_status);
++	return fake->finish_status;
++}
++
++static void setup(struct sunxi_a133_secure_context *context,
++		  struct fake_backend *fake, uint32_t pll_polls)
++{
++	const struct sunxi_a133_context_backend backend = {
++		.cookie = fake,
++		.read_32 = fake_read_32,
++		.write_32 = fake_write_32,
++		.barrier = fake_barrier,
++		.gic_reset = fake_gic_reset,
++		.transaction_commit = fake_commit,
++		.transaction_finish = fake_finish,
++	};
++
++	memset(fake, 0, sizeof(*fake));
++	fake->gic_reset_ok = true;
++	set_register(fake, COUNTER_LOW, 0x11223344U);
++	set_register(fake, COUNTER_HIGH, 0x55667788U);
++	set_register(fake, COUNTER_FREQID, 0x18U);
++	set_register(fake, GICC_CTLR, 0x3U);
++	assert(sunxi_a133_secure_context_init(context, &backend,
++					     0x40000100U, 0x40000000U,
++					     0x40020000U, pll_polls) ==
++	       SUNXI_A133_CONTEXT_OK);
++}
++
++static size_t find_event(const struct fake_backend *fake, size_t start,
++			 enum event_kind kind, uintptr_t address)
++{
++	size_t i;
++
++
++	for (i = start; i < fake->event_count; ++i) {
++		if ((fake->events[i].kind == kind) &&
++		    (fake->events[i].address == address)) {
++			return i;
++		}
++	}
++	return fake->event_count;
++}
++
++static void test_stock_order_and_exact_values(void)
++{
++	struct sunxi_a133_secure_context context;
++	struct fake_backend fake;
++	size_t restore_start;
++	size_t finish;
++	size_t security;
++	size_t counter;
++	size_t pll;
++	size_t cpucfg;
++	unsigned int cpu;
++
++	setup(&context, &fake, 4U);
++	assert(sunxi_a133_secure_context_save_early(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++	assert(fake.events[0].kind == EVENT_READ);
++	assert(fake.events[0].address == COUNTER_LOW);
++	assert(fake.events[1].address == COUNTER_HIGH);
++	assert(fake.events[2].address == COUNTER_FREQID);
++	assert(context.counter_low == 0x11223344U);
++	assert(context.counter_high == 0x55667788U);
++	assert(context.counter_frequency_id == 0x18U);
++
++	assert(sunxi_a133_secure_context_commit_late(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++	assert(fake.events[3].kind == EVENT_READ);
++	assert(fake.events[3].address == GICC_CTLR);
++	assert(fake.events[4].kind == EVENT_WRITE);
++	assert(fake.events[4].address == GICC_CTLR);
++	assert(fake.events[4].value == 0x1e0U);
++	assert(fake.events[5].kind == EVENT_COMMIT);
++	assert(fake.events[6].kind == EVENT_BARRIER);
++
++	restore_start = fake.event_count;
++	assert(sunxi_a133_secure_context_restore_early(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++	for (cpu = 0U; cpu < 4U; ++cpu) {
++		assert(fake.events[restore_start + cpu * 2U].kind == EVENT_WRITE);
++		assert(fake.events[restore_start + cpu * 2U].address ==
++		       RVBAR_LO(cpu));
++		assert(fake.events[restore_start + cpu * 2U].value ==
++		       0x40000100U);
++		assert(fake.events[restore_start + cpu * 2U + 1U].address ==
++		       RVBAR_HI(cpu));
++		assert(fake.events[restore_start + cpu * 2U + 1U].value == 0U);
++	}
++	assert(fake.events[restore_start + 8U].kind == EVENT_GIC_RESET);
++
++	finish = find_event(&fake, restore_start, EVENT_FINISH, 0U);
++	security = find_event(&fake, finish + 1U, EVENT_WRITE,
++			      CCU_SEC_SWITCH);
++	counter = find_event(&fake, security + 1U, EVENT_WRITE, COUNTER_CTRL);
++	pll = find_event(&fake, counter + 1U, EVENT_READ, PLL_COM);
++	cpucfg = find_event(&fake, pll + 1U, EVENT_WRITE,
++			    CPUCFG_CLUSTER_CTRL1);
++	assert(finish < security);
++	assert(security < counter);
++	assert(counter < pll);
++	assert(pll < cpucfg);
++	assert(get_register(&fake, COUNTER_FREQID) == 0x18U);
++	assert(get_register(&fake, COUNTER_LOW_SET) == 0x11223344U);
++	assert(get_register(&fake, COUNTER_HIGH_SET) == 0x55667788U);
++	assert(get_register(&fake, COUNTER_CTRL) == 1U);
++	assert(get_register(&fake, CPUCFG_CLUSTER_CTRL1) == 2U);
++
++	assert(context.wake_source == 0x13579bdfU);
++	assert(context.phase == SUNXI_A133_CONTEXT_IDLE);
++}
++
++static void test_trusted_entry_and_dependency_validation(void)
++{
++	struct sunxi_a133_secure_context context;
++	struct fake_backend fake;
++	struct sunxi_a133_context_backend backend;
++
++	setup(&context, &fake, 1U);
++	backend = context.backend;
++	assert(sunxi_a133_secure_context_init(NULL, &backend, 0x40000100U,
++					     0x40000000U, 0x40020000U,
++					     1U) == SUNXI_A133_CONTEXT_EINVAL);
++	assert(sunxi_a133_secure_context_init(&context, &backend, 0U,
++					     0x40000000U, 0x40020000U,
++					     1U) == SUNXI_A133_CONTEXT_EINVAL);
++	assert(sunxi_a133_secure_context_init(&context, &backend, 0x40000102U,
++					     0x40000000U, 0x40020000U,
++					     1U) == SUNXI_A133_CONTEXT_EINVAL);
++	assert(sunxi_a133_secure_context_init(&context, &backend, 0x40020000U,
++					     0x40000000U, 0x40020000U,
++					     1U) == SUNXI_A133_CONTEXT_EINVAL);
++	assert(sunxi_a133_secure_context_init(&context, &backend,
++					     UINT64_C(0x140000100),
++					     0x40000000U,
++					     UINT64_C(0x140020000), 1U) ==
++	       SUNXI_A133_CONTEXT_EINVAL);
++	backend.transaction_finish = NULL;
++	assert(sunxi_a133_secure_context_init(&context, &backend, 0x40000100U,
++					     0x40000000U, 0x40020000U,
++					     1U) == SUNXI_A133_CONTEXT_EINVAL);
++}
++
++static void test_phase_and_commit_faults(void)
++{
++	struct sunxi_a133_secure_context context;
++	struct fake_backend fake;
++
++	setup(&context, &fake, 1U);
++	assert(sunxi_a133_secure_context_commit_late(&context) ==
++	       SUNXI_A133_CONTEXT_ESTATE);
++	assert(sunxi_a133_secure_context_restore_early(&context) ==
++	       SUNXI_A133_CONTEXT_ESTATE);
++	assert(sunxi_a133_secure_context_save_early(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++	fake.commit_status = SUNXI_A133_CONTEXT_TX_RETRY;
++	assert(sunxi_a133_secure_context_commit_late(&context) ==
++	       SUNXI_A133_CONTEXT_ERETRY);
++	assert(context.phase == SUNXI_A133_CONTEXT_SAVED);
++	assert(sunxi_a133_secure_context_abort(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++
++	assert(sunxi_a133_secure_context_save_early(&context) ==
++	       SUNXI_A133_CONTEXT_OK);
++	fake.commit_status = SUNXI_A133_CONTEXT_TX_FAILED;
++	assert(sunxi_a133_secure_context_commit_late(&context) ==
++	       SUNXI_A133_CONTEXT_EFAILSTOP);
++	assert(context.phase == SUNXI_A133_CONTEXT_FAILED);
++	assert(sunxi_a133_secure_context_abort(&context) ==
++	       SUNXI_A133_CONTEXT_ESTATE);
++}
++
++static void test_restore_fault_stops_order(void)
++{
++	struct sunxi_a133_secure_context context;
++	struct fake_backend fake;
++	size_t finish;
++
++	setup(&context, &fake, 1U);
++	assert(sunxi_a133_secure_context_save_early(&context) == 0);
++	assert(sunxi_a133_secure_context_commit_late(&context) == 0);
++	fake.finish_status = SUNXI_A133_CONTEXT_TX_FAILED;
++	assert(sunxi_a133_secure_context_restore_early(&context) ==
++	       SUNXI_A133_CONTEXT_EFAILSTOP);
++	finish = find_event(&fake, 0U, EVENT_FINISH, 0U);
++	assert(finish < fake.event_count);
++	assert(find_event(&fake, finish + 1U, EVENT_WRITE, CCU_SEC_SWITCH) ==
++	       fake.event_count);
++	assert(context.phase == SUNXI_A133_CONTEXT_FAILED);
++
++	setup(&context, &fake, 1U);
++	assert(sunxi_a133_secure_context_save_early(&context) == 0);
++	assert(sunxi_a133_secure_context_commit_late(&context) == 0);
++	fake.gic_reset_ok = false;
++	assert(sunxi_a133_secure_context_restore_early(&context) ==
++	       SUNXI_A133_CONTEXT_EFAILSTOP);
++	assert(find_event(&fake, 0U, EVENT_FINISH, 0U) == fake.event_count);
++	assert(context.phase == SUNXI_A133_CONTEXT_FAILED);
++
++	setup(&context, &fake, 2U);
++	assert(sunxi_a133_secure_context_save_early(&context) == 0);
++	assert(sunxi_a133_secure_context_commit_late(&context) == 0);
++	fake.pll_never_locks = true;
++	assert(sunxi_a133_secure_context_restore_early(&context) ==
++	       SUNXI_A133_CONTEXT_ETIMEOUT);
++	assert(find_event(&fake, 0U, EVENT_WRITE, CPUCFG_CLUSTER_CTRL1) ==
++	       fake.event_count);
++	assert(context.phase == SUNXI_A133_CONTEXT_FAILED);
++}
++
++static void test_retained_header_corruption_fails_closed(void)
++{
++	struct sunxi_a133_secure_context context;
++	struct fake_backend fake;
++
++	setup(&context, &fake, 1U);
++	context.magic ^= 1U;
++	assert(sunxi_a133_secure_context_save_early(&context) ==
++	       SUNXI_A133_CONTEXT_EFAILSTOP);
++	assert(fake.event_count == 0U);
++}
++
++int main(void)
++{
++	test_stock_order_and_exact_values();
++	test_trusted_entry_and_dependency_validation();
++	test_phase_and_commit_faults();
++	test_restore_fault_stops_order();
++	test_retained_header_corruption_fails_closed();
++	puts("sunxi_a133 secure context tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index 34979a1..76d1277 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -107,3 +107,35 @@ $(eval $(call add_define,SUNXI_A133_PSCI_SUSPEND_PRECURSOR))
+ BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_psci_bridge.c \
+ 				${AW_PLAT}/common/sunxi_a133_psci_bridge_runtime.c
+ endif
++
++# Expose PSCI SYSTEM_SUSPEND only as the complete A133 stack. At runtime the
++# native PSCI table is selected only after SCP startup and capability probing.
++SUNXI_A133_SYSTEM_SUSPEND	?=	0
++$(call assert_boolean,SUNXI_A133_SYSTEM_SUSPEND)
++ifeq (${SUNXI_A133_SYSTEM_SUSPEND},1)
++ifneq (${ARCH},aarch64)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires ARCH=aarch64)
++endif
++ifneq (${SUNXI_A133_PSCI_SUSPEND_PRECURSOR},1)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires SUNXI_A133_PSCI_SUSPEND_PRECURSOR=1)
++endif
++ifneq (${SUNXI_A133_VENDOR_SCP_STARTUP},1)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires SUNXI_A133_VENDOR_SCP_STARTUP=1)
++endif
++ifneq (${SUNXI_A133_NATIVE_WAKE_ABI},1)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires SUNXI_A133_NATIVE_WAKE_ABI=1)
++endif
++ifneq (${SUNXI_A133_SUSPEND_ORCHESTRATOR},1)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires SUNXI_A133_SUSPEND_ORCHESTRATOR=1)
++endif
++ifneq (${SUNXI_A133_STANDBY_SCRATCH},1)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires SUNXI_A133_STANDBY_SCRATCH=1)
++endif
++ifneq (${HW_ASSISTED_COHERENCY},0)
++$(error SUNXI_A133_SYSTEM_SUSPEND requires HW_ASSISTED_COHERENCY=0)
++endif
++$(eval $(call add_define,SUNXI_A133_SYSTEM_SUSPEND))
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_secure_context.c \
++				${AW_PLAT}/common/sunxi_a133_gic.c \
++				${AW_PLAT}/common/sunxi_a133_system_suspend.c
++endif
+-- 
+2.55.0
+
