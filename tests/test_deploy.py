@@ -136,6 +136,8 @@ exec "$REAL_BB" "$command" "$@"
         self.assertIn('UPDATE_VERIFIED', result.stdout)
         self.assertEqual((self.current / 'Image').read_bytes(), b'new')
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
+                         bytes((0xbd, 1, 0, 1)))
         self.assert_clean()
 
     def test_missing_current_manifest_preserves_existing_payloads(self):

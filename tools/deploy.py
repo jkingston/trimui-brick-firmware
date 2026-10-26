@@ -46,12 +46,14 @@ mountpoint=$work/sd
 stage=$mountpoint/brick-next
 previous=$mountpoint/brick-previous
 current=$mountpoint/brick-diag
+bootstate_tmp=$mountpoint/.brick-bootcount.pending.{token}
 [ "$($bb cat /sys/class/block/mmcblk0/device/type)" = SD ]
 $bb grep -q 'trimui,brick' /sys/firmware/devicetree/base/compatible
 $bb mkdir /tmp/.brick-update-lock
 mounted=0
 staged=0
 cleanup() {{
+ $bb rm -f "$bootstate_tmp"
  if [ "$staged" = 1 ]; then $bb rm -r "$stage"; fi
  if [ "$mounted" = 1 ]; then $bb umount "$mountpoint"; fi
  $bb rmdir /tmp/.brick-update-lock
@@ -89,6 +91,11 @@ $bb mkdir "$stage"
 staged=1
 $bb cp "$work/payload/"* "$stage/"
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
+# Arm rollback before publishing. This makes a power loss during either rename
+# recoverable even when the newly staged payload never starts.
+$bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
+$bb sync
+$bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
 $bb sync
 $bb mv "$current" "$previous"
 if ! $bb mv "$stage" "$current"; then

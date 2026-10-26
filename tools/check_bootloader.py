@@ -18,15 +18,30 @@ def require(condition, message):
 
 config = dict(line.split('=', 1) for line in (a.uboot / '.config').read_text().splitlines()
               if line.startswith('CONFIG_') and '=' in line)
-for name in ('ENV_IS_IN_FAT', 'ENV_IS_IN_MMC', 'MMC_WRITE', 'SPL_MMC_WRITE',
-             'FAT_WRITE', 'CMD_SAVEENV', 'BOOTSTD', 'DISTRO_DEFAULTS'):
+for name in ('ENV_IS_IN_FAT', 'ENV_IS_IN_MMC', 'SPL_MMC_WRITE', 'CMD_SAVEENV',
+             'BOOTSTD', 'DISTRO_DEFAULTS'):
     require(config.get('CONFIG_' + name) != 'y', f'Unexpected storage writer: {name}')
 for name, value in {'ENV_IS_NOWHERE': 'y', 'MMC_SUNXI_SLOT_EXTRA': '-1',
                     'TRIMUI_BRICK_SD_DIAGNOSTIC': 'y', 'SUPPORT_RAW_INITRD': 'y',
                     'DRAM_SUNXI_TPR11': '0x1b191012', 'DRAM_SUNXI_TPR12': '0x0e111010'}.items():
     require(config.get('CONFIG_' + name) == value, f'Unexpected {name}')
+for name in ('MMC_WRITE', 'FAT_WRITE', 'BOOTCOUNT_LIMIT', 'BOOTCOUNT_FS',
+             'WATCHDOG_AUTOSTART'):
+    require(config.get('CONFIG_' + name) == 'y', f'Missing rollback support: {name}')
+for name, value in {'BOOTCOUNT_BOOTLIMIT': '1',
+                    'SYS_BOOTCOUNT_FS_INTERFACE': '"mmc"',
+                    'SYS_BOOTCOUNT_FS_DEVPART': '"0:1"',
+                    'SYS_BOOTCOUNT_FS_NAME': '"/brick-bootcount"',
+                    'SYS_BOOTCOUNT_ADDR': '0x45000000'}.items():
+    require(config.get('CONFIG_' + name) == value, f'Unexpected {name}')
 require('for brick_bootdir in brick-diag brick-previous brick-baseline;' in
         config.get('CONFIG_BOOTCOMMAND', ''), 'Missing SD payload fallback')
+require('brick.bootdir=${brick_bootdir}' in config.get('CONFIG_BOOTCOMMAND', ''),
+        'Booted payload is not identified to userspace')
+altbootcmd = config.get('CONFIG_BOOTCOUNT_ALTBOOTCMD', '')
+require('for brick_bootdir in brick-previous brick-baseline;' in altbootcmd,
+        'Missing retained-payload rollback')
+require('brick-diag' not in altbootcmd, 'Rollback must not retry the pending payload')
 image = (a.uboot / 'u-boot-sunxi-with-spl.bin').read_bytes()
 require(image[4:12] == b'eGON.BT0', 'Invalid SPL magic')
 checksum, size = struct.unpack_from('<II', image, 12)
@@ -59,4 +74,4 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
     for address, status in [('4020000', 'okay'), ('4021000', 'disabled'), ('4022000', 'disabled')]:
         require(prop(board, '/soc/mmc@' + address, 'status', 's') == status, 'Unexpected MMC state')
     require(prop(board, '/aliases', 'mmc0', 's') == '/soc/mmc@4020000', 'SD alias mismatch')
-print('PASS: SPL checksum, SD load offsets, embedded TF-A/DT and disabled eMMC/writes')
+print('PASS: SPL layout, embedded TF-A/DT and guarded FAT boot rollback')

@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+case " $(cat /proc/cmdline) " in
+	*" brick.bootdir=brick-diag "*) ;;
+	*) exit 0 ;;
+esac
+
+device=/dev/mmcblk0p1
+mountpoint=/run/brick-boot
+state=$mountpoint/brick-bootcount
+temporary=$mountpoint/.brick-bootcount.good.$$
+
+[ -b "$device" ]
+[ -c /dev/watchdog ]
+mkdir -p "$mountpoint"
+mount -o rw,sync "$device" "$mountpoint"
+cleanup() {
+	rm -f "$temporary"
+	umount "$mountpoint"
+}
+trap cleanup EXIT
+
+(cd "$mountpoint/brick-diag" && sha256sum -c SHA256SUMS)
+
+# The candidate reached late init with an intact payload. Stop the handoff
+# watchdog before committing success so a later failure cannot repeatedly boot
+# a candidate already recorded as good.
+printf V > /dev/watchdog
+
+# U-Boot bootcount_fs: magic, version, count=0, upgrade_available=0.
+printf '\275\001\000\000' > "$temporary"
+sync
+mv "$temporary" "$state"
+sync
+umount "$mountpoint"
+trap - EXIT
