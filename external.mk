@@ -18,6 +18,9 @@ UBOOT_POST_INSTALL_IMAGES_HOOKS += BRICK_CHECK_BOOTLOADER
 
 ifeq ($(BR2_PACKAGE_BRICK_SCP),y)
 UBOOT_DEPENDENCIES += brick-scp
+# external.mk is parsed after U-Boot's generic dependency prerequisites have
+# been expanded. Add the concrete artifact edge needed by binman explicitly.
+$(UBOOT_TARGET_BUILD): | $(BRICK_SCP_TARGET_INSTALL)
 UBOOT_MAKE_OPTS += \
 	SCP=$(BINARIES_DIR)/brick-scp.bin \
 	SCP_FDT=$(BINARIES_DIR)/brick-scp-service.dtb
