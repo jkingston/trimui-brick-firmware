@@ -2,6 +2,8 @@
 """Safely update or restore the Brick SD card's raw bootloader region."""
 
 import argparse
+import base64
+import binascii
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -520,10 +522,33 @@ class AdbCard:
         first = offset // block
         inner = offset % block
         count = (inner + size + block - 1) // block
-        data = self._run(["exec-out", "/bin/busybox", "dd", f"if={self.path}",
-                          f"bs={block}", f"skip={first}", f"count={count}"],
-                         timeout=ADB_TRANSFER_TIMEOUT)
         expected = count * block
+        arguments = ["/bin/busybox", "dd", f"if={self.path}",
+                     f"bs={block}", f"skip={first}", f"count={count}"]
+        try:
+            data = self._run(["exec-out", *arguments], timeout=ADB_TRANSFER_TIMEOUT)
+        except UpgradeError as exec_error:
+            # The Brick's stock adbd closes exec-out and only offers a legacy
+            # PTY shell, which performs CR/LF conversion.  Encode remotely so
+            # the PTY carries text, then strictly decode and size-check it.
+            command = (" ".join(arguments) +
+                       " 2>/dev/null | /bin/busybox base64")
+            try:
+                encoded = self._run(["shell", command], timeout=ADB_TRANSFER_TIMEOUT)
+            except UpgradeError as shell_error:
+                if hasattr(shell_error, "add_note"):
+                    shell_error.add_note(f"exec-out also failed: {exec_error}")
+                raise
+            compact = b"".join(encoded.split())
+            encoded_size = 4 * ((expected + 2) // 3)
+            if len(compact) != encoded_size:
+                raise UpgradeError(
+                    f"invalid base64 ADB card read length: expected {encoded_size}, "
+                    f"received {len(compact)}")
+            try:
+                data = base64.b64decode(compact, validate=True)
+            except binascii.Error as error:
+                raise UpgradeError("invalid base64 ADB card read") from error
         # A final device block can be short, but every current use is far from EOF.
         if len(data) != expected:
             raise UpgradeError(f"short ADB card read: expected {expected}, received {len(data)}")

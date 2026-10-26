@@ -344,6 +344,7 @@ class FakeAdb:
         self.write_state = None
         self.writer_active = False
         self.fail_cleanup = False
+        self.fail_exec_out = False
 
     @staticmethod
     def completed(argv, stdout=b"", returncode=0, stderr=b""):
@@ -357,6 +358,8 @@ class FakeAdb:
             self.remote[argv[index + 2]] = Path(argv[index + 1]).read_bytes()
             return self.completed(argv)
         if action == "exec-out":
+            if self.fail_exec_out:
+                return self.completed(argv, returncode=1, stderr=b"error: closed")
             arguments = argv[index + 1:]
             values = {item.split("=", 1)[0]: int(item.split("=", 1)[1])
                       for item in arguments if item.startswith(("bs=", "skip=", "count="))}
@@ -364,6 +367,14 @@ class FakeAdb:
             end = start + values["bs"] * values["count"]
             return self.completed(argv, bytes(self.disk[start:end]))
         command = argv[index + 1]
+        if command.startswith("/bin/busybox dd if=/dev/mmcblk1 bs=4096 "):
+            values = {item.split("=", 1)[0]: int(item.split("=", 1)[1])
+                      for item in command.split()
+                      if item.startswith(("bs=", "skip=", "count="))}
+            start = values["bs"] * values["skip"]
+            end = start + values["bs"] * values["count"]
+            encoded = boot.base64.encodebytes(bytes(self.disk[start:end]))
+            return self.completed(argv, encoded.replace(b"\n", b"\r\n"))
         if command == "id -u":
             return self.completed(argv, b"0\n")
         if command == f"if test -e {boot.ADB_LOCK}; then echo locked; fi":
@@ -479,6 +490,19 @@ class AdbBackendTests(unittest.TestCase):
         self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END], original)
         self.assertFalse(any("push" in argv for argv, _kwargs in fake.calls))
         self.assertEqual(fake.destructive_calls, 0)
+
+    def test_adb_read_falls_back_to_binary_safe_legacy_shell(self):
+        _root, _current, _candidate, _identity, _original, disk, fake = self.fixture()
+        fake.fail_exec_out = True
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=False, adb="mock-adb") as card:
+                self.assertEqual(card.read(boot.BOOT_START, 12345),
+                                 bytes(disk[boot.BOOT_START:boot.BOOT_START + 12345]))
+        fallback = [argv for argv, _kwargs in fake.calls
+                    if "shell" in argv and argv[-1].startswith("/bin/busybox dd ")]
+        self.assertEqual(len(fallback), 1)
+        self.assertTrue(fallback[0][-1].endswith(
+            "2>/dev/null | /bin/busybox base64"))
 
     def test_corrupt_adb_readback_is_automatically_restored(self):
         root, current, candidate, identity, original, disk, fake = self.fixture()
