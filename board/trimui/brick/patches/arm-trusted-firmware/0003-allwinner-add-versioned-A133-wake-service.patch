@@ -1,0 +1,762 @@
+From a0ade28f6971ca976c73914410ae13676293a30d Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 09:45:22 +0000
+Subject: [PATCH] feat(allwinner): add versioned A133 wake service
+
+Add a default-off SiP service with distinct identity, version and
+capability queries, plus raw-SPI wake calls over the reviewed SCP
+transport.
+
+Serialize runtime mailbox ownership and preserve the existing startup-only
+binary when the service is disabled. Keep PSCI system suspend blocked.
+
+---
+ .../common/include/sunxi_a133_native_svc.h    |  67 +++++
+ .../include/sunxi_a133_vendor_scp_runtime.h   |  16 ++
+ plat/allwinner/common/sunxi_a133_native_svc.c | 193 ++++++++++++++
+ .../common/sunxi_a133_vendor_scp_runtime.c    |  85 +++++++
+ plat/allwinner/common/sunxi_bl31_setup.c      |  11 +-
+ plat/allwinner/common/tests/Makefile          |  12 +-
+ .../common/tests/test_sunxi_a133_native_svc.c | 238 ++++++++++++++++++
+ plat/allwinner/sun50i_a133/platform.mk        |  16 ++
+ 8 files changed, 635 insertions(+), 3 deletions(-)
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_native_svc.h
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+ create mode 100644 plat/allwinner/common/sunxi_a133_native_svc.c
+ create mode 100644 plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_native_svc.h b/plat/allwinner/common/include/sunxi_a133_native_svc.h
+new file mode 100644
+index 0000000..bc7f618
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_native_svc.h
+@@ -0,0 +1,67 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_NATIVE_SVC_H
++#define SUNXI_A133_NATIVE_SVC_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Allwinner A133 SiP service: fast SMC32 calls. */
++#define SUNXI_A133_SIP_CALL_COUNT	0x8200ff00U
++#define SUNXI_A133_SIP_UID		0x8200ff01U
++#define SUNXI_A133_SIP_VERSION		0x8200ff03U
++#define SUNXI_A133_SIP_CAPABILITIES	0x82000100U
++#define SUNXI_A133_SIP_SET_WAKE_SOURCE	0x82000101U
++#define SUNXI_A133_SIP_CLEAR_WAKE_SOURCE	0x82000102U
++
++#define SUNXI_A133_SIP_NUM_CALLS		6U
++#define SUNXI_A133_SIP_VERSION_MAJOR	1U
++#define SUNXI_A133_SIP_VERSION_MINOR	0U
++
++/* UUID 2052c028-f921-540c-8330-bba08ba2c772 in SMCCC register order. */
++#define SUNXI_A133_SIP_UID_WORD0		0x28c05220U
++#define SUNXI_A133_SIP_UID_WORD1		0x0c5421f9U
++#define SUNXI_A133_SIP_UID_WORD2		0xa0bb3083U
++#define SUNXI_A133_SIP_UID_WORD3		0x72c7a28bU
++
++#define SUNXI_A133_SIP_CAP_WAKE_SOURCE		(1U << 0)
++#define SUNXI_A133_SIP_CAP_RAW_SPI_INDEX		(1U << 1)
++
++/* GICv2 SPI INTIDs are 32 through 1019; the ABI carries INTID - 32. */
++#define SUNXI_A133_SIP_NUM_SPI_INDICES		988U
++
++enum sunxi_a133_sip_status {
++	SUNXI_A133_SIP_SUCCESS = 0,
++	SUNXI_A133_SIP_NOT_SUPPORTED = -1,
++	SUNXI_A133_SIP_INVALID_PARAMETER = -4,
++	SUNXI_A133_SIP_NOT_READY = -5,
++	SUNXI_A133_SIP_TIMEOUT = -6,
++	SUNXI_A133_SIP_POISONED = -7,
++	SUNXI_A133_SIP_PROTOCOL_ERROR = -8,
++	SUNXI_A133_SIP_REMOTE_ERROR = -9,
++};
++
++struct sunxi_a133_native_svc_backend {
++	void *cookie;
++	uint32_t (*capabilities)(void *cookie);
++	int (*set_wake_source)(void *cookie, uint32_t wake_source,
++			       uint8_t *scp_result);
++	int (*clear_wake_source)(void *cookie, uint32_t wake_source,
++				 uint8_t *scp_result);
++};
++
++struct sunxi_a133_native_svc_response {
++	uint32_t x0;
++	uint32_t x1;
++	uint32_t x2;
++	uint32_t x3;
++};
++
++void sunxi_a133_native_svc_dispatch(
++	const struct sunxi_a133_native_svc_backend *backend,
++	bool non_secure, uint32_t smc_fid, uint32_t x1, uint32_t x2,
++	uint32_t x3, uint32_t x4,
++	struct sunxi_a133_native_svc_response *response);
++
++#endif /* SUNXI_A133_NATIVE_SVC_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+new file mode 100644
+index 0000000..f1099ec
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_VENDOR_SCP_RUNTIME_H
++#define SUNXI_A133_VENDOR_SCP_RUNTIME_H
++
++#include <stdint.h>
++
++void sunxi_a133_vendor_scp_runtime_setup(void);
++uint32_t sunxi_a133_vendor_scp_runtime_capabilities(void);
++int sunxi_a133_vendor_scp_runtime_set_wake_source(uint32_t wake_source,
++						 uint8_t *scp_result);
++int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
++						   uint8_t *scp_result);
++
++#endif /* SUNXI_A133_VENDOR_SCP_RUNTIME_H */
+diff --git a/plat/allwinner/common/sunxi_a133_native_svc.c b/plat/allwinner/common/sunxi_a133_native_svc.c
+new file mode 100644
+index 0000000..883b92e
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_native_svc.c
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifndef SUNXI_A133_NATIVE_SVC_HOST_TEST
++#include <common/runtime_svc.h>
++#include <lib/smccc.h>
++
++#include <sunxi_a133_vendor_scp_runtime.h>
++#endif
++
++#include <sunxi_a133_native_svc.h>
++#include <sunxi_vendor_scp.h>
++
++static uint32_t map_transport_status(int status)
++{
++	switch (status) {
++	case SUNXI_VENDOR_SCP_OK:
++		return SUNXI_A133_SIP_SUCCESS;
++	case SUNXI_VENDOR_SCP_EINVAL:
++		return SUNXI_A133_SIP_INVALID_PARAMETER;
++	case SUNXI_VENDOR_SCP_ETIMEOUT:
++		return SUNXI_A133_SIP_TIMEOUT;
++	case SUNXI_VENDOR_SCP_ENOTREADY:
++		return SUNXI_A133_SIP_NOT_READY;
++	case SUNXI_VENDOR_SCP_EPOISONED:
++		return SUNXI_A133_SIP_POISONED;
++	case SUNXI_VENDOR_SCP_EPROTO:
++		return SUNXI_A133_SIP_PROTOCOL_ERROR;
++	default:
++		return SUNXI_A133_SIP_PROTOCOL_ERROR;
++	}
++}
++
++static uint32_t abi_capabilities(
++	const struct sunxi_a133_native_svc_backend *backend)
++{
++	uint32_t transport;
++
++	if ((backend == NULL) || (backend->capabilities == NULL) ||
++	    (backend->set_wake_source == NULL) ||
++	    (backend->clear_wake_source == NULL)) {
++		return 0U;
++	}
++
++	transport = backend->capabilities(backend->cookie);
++	if ((transport & SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE) == 0U) {
++		return 0U;
++	}
++
++	return SUNXI_A133_SIP_CAP_WAKE_SOURCE |
++	       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX;
++}
++
++static void dispatch_wake_source(
++	const struct sunxi_a133_native_svc_backend *backend, bool set,
++	uint32_t wake_source, uint32_t x2, uint32_t x3, uint32_t x4,
++	struct sunxi_a133_native_svc_response *response)
++{
++	uint8_t scp_result = 0U;
++	int ret;
++
++	if ((wake_source >= SUNXI_A133_SIP_NUM_SPI_INDICES) ||
++	    (x2 != 0U) || (x3 != 0U) || (x4 != 0U)) {
++		response->x0 = SUNXI_A133_SIP_INVALID_PARAMETER;
++		return;
++	}
++	if ((abi_capabilities(backend) & SUNXI_A133_SIP_CAP_WAKE_SOURCE) == 0U) {
++		response->x0 = SUNXI_A133_SIP_NOT_READY;
++		return;
++	}
++
++	if (set) {
++		ret = backend->set_wake_source(backend->cookie, wake_source,
++					       &scp_result);
++	} else {
++		ret = backend->clear_wake_source(backend->cookie, wake_source,
++						 &scp_result);
++	}
++	response->x0 = map_transport_status(ret);
++	response->x1 = scp_result;
++	if ((ret == SUNXI_VENDOR_SCP_OK) && (scp_result != 0U)) {
++		response->x0 = SUNXI_A133_SIP_REMOTE_ERROR;
++	}
++}
++
++void sunxi_a133_native_svc_dispatch(
++	const struct sunxi_a133_native_svc_backend *backend,
++	bool non_secure, uint32_t smc_fid, uint32_t x1, uint32_t x2,
++	uint32_t x3, uint32_t x4,
++	struct sunxi_a133_native_svc_response *response)
++{
++	*response = (struct sunxi_a133_native_svc_response){ 0U };
++	if (!non_secure) {
++		response->x0 = SUNXI_A133_SIP_NOT_SUPPORTED;
++		return;
++	}
++
++	switch (smc_fid) {
++	case SUNXI_A133_SIP_CALL_COUNT:
++		response->x0 = SUNXI_A133_SIP_NUM_CALLS;
++		break;
++	case SUNXI_A133_SIP_UID:
++		response->x0 = SUNXI_A133_SIP_UID_WORD0;
++		response->x1 = SUNXI_A133_SIP_UID_WORD1;
++		response->x2 = SUNXI_A133_SIP_UID_WORD2;
++		response->x3 = SUNXI_A133_SIP_UID_WORD3;
++		break;
++	case SUNXI_A133_SIP_VERSION:
++		response->x0 = SUNXI_A133_SIP_VERSION_MAJOR;
++		response->x1 = SUNXI_A133_SIP_VERSION_MINOR;
++		break;
++	case SUNXI_A133_SIP_CAPABILITIES:
++		response->x0 = SUNXI_A133_SIP_SUCCESS;
++		response->x1 = abi_capabilities(backend);
++		break;
++	case SUNXI_A133_SIP_SET_WAKE_SOURCE:
++		dispatch_wake_source(backend, true, x1, x2, x3, x4,
++				     response);
++		break;
++	case SUNXI_A133_SIP_CLEAR_WAKE_SOURCE:
++		dispatch_wake_source(backend, false, x1, x2, x3, x4,
++				     response);
++		break;
++	default:
++		response->x0 = SUNXI_A133_SIP_NOT_SUPPORTED;
++		break;
++	}
++}
++
++#ifndef SUNXI_A133_NATIVE_SVC_HOST_TEST
++static uint32_t runtime_capabilities(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_capabilities();
++}
++
++static int runtime_set_wake_source(void *cookie, uint32_t wake_source,
++				   uint8_t *scp_result)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_set_wake_source(wake_source,
++							   scp_result);
++}
++
++static int runtime_clear_wake_source(void *cookie, uint32_t wake_source,
++				     uint8_t *scp_result)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_clear_wake_source(wake_source,
++							     scp_result);
++}
++
++static const struct sunxi_a133_native_svc_backend runtime_backend = {
++	.capabilities = runtime_capabilities,
++	.set_wake_source = runtime_set_wake_source,
++	.clear_wake_source = runtime_clear_wake_source,
++};
++
++static int32_t sunxi_a133_native_svc_setup(void)
++{
++	return 0;
++}
++
++static uintptr_t sunxi_a133_native_svc_handler(uint32_t smc_fid,
++					       u_register_t x1,
++					       u_register_t x2,
++					       u_register_t x3,
++					       u_register_t x4,
++					       void *cookie,
++					       void *handle,
++					       u_register_t flags)
++{
++	struct sunxi_a133_native_svc_response response;
++
++	(void)cookie;
++	sunxi_a133_native_svc_dispatch(&runtime_backend,
++		is_caller_non_secure(flags), smc_fid, (uint32_t)x1,
++		(uint32_t)x2, (uint32_t)x3, (uint32_t)x4, &response);
++	SMC_RET4(handle, response.x0, response.x1, response.x2, response.x3);
++}
++
++DECLARE_RT_SVC(
++	sunxi_a133_native_svc,
++	OEN_SIP_START,
++	OEN_SIP_END,
++	SMC_TYPE_FAST,
++	sunxi_a133_native_svc_setup,
++	sunxi_a133_native_svc_handler
++);
++#endif
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+new file mode 100644
+index 0000000..93f8936
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stdbool.h>
++
++#include <arch_helpers.h>
++#include <common/debug.h>
++#include <lib/spinlock.h>
++#include <plat/common/platform.h>
++
++#include <sunxi_a133_vendor_scp.h>
++#include <sunxi_a133_vendor_scp_runtime.h>
++#include <sunxi_def.h>
++
++static struct sunxi_a133_vendor_scp a133_vendor_scp;
++static spinlock_t a133_vendor_scp_lock;
++
++static uint64_t runtime_timeout_ticks(void)
++{
++	return plat_get_syscnt_freq2() / 2U;
++}
++
++void sunxi_a133_vendor_scp_runtime_setup(void)
++{
++	uint64_t now = read_cntpct_el0();
++	int ret;
++
++	ret = sunxi_a133_vendor_scp_init(&a133_vendor_scp,
++					 SUNXI_MSGBOX_BASE);
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++		ret = sunxi_a133_vendor_scp_startup(&a133_vendor_scp,
++						   (uint32_t)now,
++						   runtime_timeout_ticks());
++	}
++
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++		NOTICE("BL31: A133 vendor SCP transport ready\n");
++	} else {
++		WARN("BL31: A133 vendor SCP startup failed: %d\n", ret);
++	}
++}
++
++uint32_t sunxi_a133_vendor_scp_runtime_capabilities(void)
++{
++	uint32_t capabilities;
++
++	spin_lock(&a133_vendor_scp_lock);
++	capabilities = sunxi_vendor_scp_capabilities(
++		&a133_vendor_scp.transport);
++	spin_unlock(&a133_vendor_scp_lock);
++
++	return capabilities;
++}
++
++static int runtime_wake_source(bool set, uint32_t wake_source,
++			       uint8_t *scp_result)
++{
++	int ret;
++
++	spin_lock(&a133_vendor_scp_lock);
++	if (set) {
++		ret = sunxi_vendor_scp_set_wake_source(
++			&a133_vendor_scp.transport, wake_source, scp_result,
++			runtime_timeout_ticks());
++	} else {
++		ret = sunxi_vendor_scp_clear_wake_source(
++			&a133_vendor_scp.transport, wake_source, scp_result,
++			runtime_timeout_ticks());
++	}
++	spin_unlock(&a133_vendor_scp_lock);
++
++	return ret;
++}
++
++int sunxi_a133_vendor_scp_runtime_set_wake_source(uint32_t wake_source,
++						 uint8_t *scp_result)
++{
++	return runtime_wake_source(true, wake_source, scp_result);
++}
++
++int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
++						   uint8_t *scp_result)
++{
++	return runtime_wake_source(false, wake_source, scp_result);
++}
+diff --git a/plat/allwinner/common/sunxi_bl31_setup.c b/plat/allwinner/common/sunxi_bl31_setup.c
+index 84c0005..284ead7 100644
+--- a/plat/allwinner/common/sunxi_bl31_setup.c
++++ b/plat/allwinner/common/sunxi_bl31_setup.c
+@@ -25,8 +25,12 @@
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
+ #if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++#if defined(SUNXI_A133_NATIVE_WAKE_ABI)
++#include <sunxi_a133_vendor_scp_runtime.h>
++#else
+ #include <sunxi_a133_vendor_scp.h>
+ #endif
++#endif
+ 
+ 
+ static entry_point_info_t bl32_image_ep_info;
+@@ -36,7 +40,8 @@ static console_t console;
+ 
+ static void *fdt;
+ 
+-#if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++#if defined(SUNXI_A133_VENDOR_SCP_STARTUP) && \
++	!defined(SUNXI_A133_NATIVE_WAKE_ABI)
+ static struct sunxi_a133_vendor_scp a133_vendor_scp;
+ 
+ static void sunxi_a133_vendor_scp_setup(void)
+@@ -166,7 +171,11 @@ void bl31_platform_setup(void)
+ 	NOTICE("BL31: Detected Allwinner %s SoC (%04x)\n", soc_name, soc_id);
+ 
+ #if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++#if defined(SUNXI_A133_NATIVE_WAKE_ABI)
++	sunxi_a133_vendor_scp_runtime_setup();
++#else
+ 	sunxi_a133_vendor_scp_setup();
++#endif
+ #endif
+ 
+ 	generic_delay_timer_init();
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+index 0f0d753..701ab68 100644
+--- a/plat/allwinner/common/tests/Makefile
++++ b/plat/allwinner/common/tests/Makefile
+@@ -8,7 +8,8 @@ ROOT := ../../../../..
+ 
+ .PHONY: all clean test
+ 
+-all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp
++all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
++	test_sunxi_a133_native_svc
+ 
+ test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+@@ -17,9 +18,16 @@ test_sunxi_a133_vendor_scp: test_sunxi_a133_vendor_scp.c \
+ 		../sunxi_a133_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+ 
++test_sunxi_a133_native_svc: test_sunxi_a133_native_svc.c \
++		../sunxi_a133_native_svc.c
++	$(CC) $(CFLAGS) -DSUNXI_A133_NATIVE_SVC_HOST_TEST \
++		-I../include $^ -o $@
++
+ test: all
+ 	./test_sunxi_vendor_scp
+ 	./test_sunxi_a133_vendor_scp
++	./test_sunxi_a133_native_svc
+ 
+ clean:
+-	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp
++	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
++		test_sunxi_a133_native_svc
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c b/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
+new file mode 100644
+index 0000000..dc3c180
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
+@@ -0,0 +1,238 @@
++// SPDX-License-Identifier: BSD-3-Clause
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++
++#include <sunxi_a133_native_svc.h>
++#include <sunxi_vendor_scp.h>
++
++#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
++
++struct fake_backend {
++	uint32_t capabilities;
++	uint32_t last_wake_source;
++	unsigned int capability_calls;
++	unsigned int set_calls;
++	unsigned int clear_calls;
++	int status;
++	uint8_t result;
++};
++
++static uint32_t fake_capabilities(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->capability_calls++;
++	return fake->capabilities;
++}
++
++static int fake_set(void *cookie, uint32_t wake_source, uint8_t *result)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->set_calls++;
++	fake->last_wake_source = wake_source;
++	*result = fake->result;
++	return fake->status;
++}
++
++static int fake_clear(void *cookie, uint32_t wake_source, uint8_t *result)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->clear_calls++;
++	fake->last_wake_source = wake_source;
++	*result = fake->result;
++	return fake->status;
++}
++
++static void init_backend(struct fake_backend *fake,
++			 struct sunxi_a133_native_svc_backend *backend)
++{
++	*fake = (struct fake_backend){
++		.capabilities = SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE,
++	};
++	*backend = (struct sunxi_a133_native_svc_backend){
++		.cookie = fake,
++		.capabilities = fake_capabilities,
++		.set_wake_source = fake_set,
++		.clear_wake_source = fake_clear,
++	};
++}
++
++static struct sunxi_a133_native_svc_response dispatch(
++	const struct sunxi_a133_native_svc_backend *backend, bool non_secure,
++	uint32_t fid, uint32_t x1, uint32_t x2, uint32_t x3, uint32_t x4)
++{
++	struct sunxi_a133_native_svc_response response;
++
++	sunxi_a133_native_svc_dispatch(backend, non_secure, fid, x1, x2,
++				       x3, x4, &response);
++	return response;
++}
++
++static void test_discovery_is_stable(void)
++{
++	struct sunxi_a133_native_svc_response response;
++
++	response = dispatch(NULL, true, SUNXI_A133_SIP_CALL_COUNT,
++			    0U, 0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_NUM_CALLS);
++	response = dispatch(NULL, true, SUNXI_A133_SIP_UID, 0U, 0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_UID_WORD0);
++	assert(response.x1 == SUNXI_A133_SIP_UID_WORD1);
++	assert(response.x2 == SUNXI_A133_SIP_UID_WORD2);
++	assert(response.x3 == SUNXI_A133_SIP_UID_WORD3);
++	response = dispatch(NULL, true, SUNXI_A133_SIP_VERSION,
++			    0U, 0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_VERSION_MAJOR);
++	assert(response.x1 == SUNXI_A133_SIP_VERSION_MINOR);
++}
++
++static void test_security_and_unknown_calls(void)
++{
++	struct sunxi_a133_native_svc_response response;
++
++	response = dispatch(NULL, false, SUNXI_A133_SIP_UID, 0U, 0U, 0U, 0U);
++	assert(response.x0 == UINT32_MAX);
++	response = dispatch(NULL, true, 0x82000103U, 0U, 0U, 0U, 0U);
++	assert(response.x0 == UINT32_MAX);
++	response = dispatch(NULL, true, 0xc2000100U, 0U, 0U, 0U, 0U);
++	assert(response.x0 == UINT32_MAX);
++}
++
++static void test_capability_requires_ready_complete_backend(void)
++{
++	struct sunxi_a133_native_svc_backend backend;
++	struct sunxi_a133_native_svc_response response;
++	struct fake_backend fake;
++
++	init_backend(&fake, &backend);
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
++			    0U, 0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_SUCCESS);
++	assert(response.x1 == (SUNXI_A133_SIP_CAP_WAKE_SOURCE |
++			       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX));
++
++	fake.capabilities = 0U;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
++			    0U, 0U, 0U, 0U);
++	assert(response.x1 == 0U);
++	backend.clear_wake_source = NULL;
++	fake.capabilities = SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
++			    0U, 0U, 0U, 0U);
++	assert(response.x1 == 0U);
++}
++
++static void test_raw_spi_set_and_clear(void)
++{
++	struct sunxi_a133_native_svc_backend backend;
++	struct sunxi_a133_native_svc_response response;
++	struct fake_backend fake;
++
++	init_backend(&fake, &backend);
++	response = dispatch(&backend, true, SUNXI_A133_SIP_SET_WAKE_SOURCE,
++			    0x67U, 0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_SUCCESS);
++	assert(response.x1 == 0U);
++	assert(fake.set_calls == 1U && fake.clear_calls == 0U);
++	assert(fake.last_wake_source == 0x67U);
++
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CLEAR_WAKE_SOURCE,
++			    SUNXI_A133_SIP_NUM_SPI_INDICES - 1U,
++			    0U, 0U, 0U);
++	assert(response.x0 == SUNXI_A133_SIP_SUCCESS);
++	assert(fake.set_calls == 1U && fake.clear_calls == 1U);
++	assert(fake.last_wake_source == SUNXI_A133_SIP_NUM_SPI_INDICES - 1U);
++}
++
++static void test_invalid_arguments_do_not_reach_scp(void)
++{
++	struct sunxi_a133_native_svc_backend backend;
++	struct sunxi_a133_native_svc_response response;
++	struct fake_backend fake;
++	unsigned int i;
++	const uint32_t extra[][3] = {
++		{ 1U, 0U, 0U },
++		{ 0U, 1U, 0U },
++		{ 0U, 0U, 1U },
++	};
++
++	init_backend(&fake, &backend);
++	response = dispatch(&backend, true, SUNXI_A133_SIP_SET_WAKE_SOURCE,
++			    SUNXI_A133_SIP_NUM_SPI_INDICES, 0U, 0U, 0U);
++	assert(response.x0 == (uint32_t)SUNXI_A133_SIP_INVALID_PARAMETER);
++	for (i = 0U; i < ARRAY_SIZE(extra); i++) {
++		response = dispatch(&backend, true,
++				    SUNXI_A133_SIP_CLEAR_WAKE_SOURCE, 0x67U,
++				    extra[i][0], extra[i][1], extra[i][2]);
++		assert(response.x0 ==
++		       (uint32_t)SUNXI_A133_SIP_INVALID_PARAMETER);
++	}
++	assert(fake.set_calls == 0U && fake.clear_calls == 0U);
++}
++
++static void test_not_ready_does_not_reach_scp(void)
++{
++	struct sunxi_a133_native_svc_backend backend;
++	struct sunxi_a133_native_svc_response response;
++	struct fake_backend fake;
++
++	init_backend(&fake, &backend);
++	fake.capabilities = 0U;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_SET_WAKE_SOURCE,
++			    0x67U, 0U, 0U, 0U);
++	assert(response.x0 == (uint32_t)SUNXI_A133_SIP_NOT_READY);
++	assert(fake.set_calls == 0U && fake.clear_calls == 0U);
++}
++
++static void test_transport_and_remote_errors_are_stable(void)
++{
++	struct sunxi_a133_native_svc_backend backend;
++	struct sunxi_a133_native_svc_response response;
++	struct fake_backend fake;
++	unsigned int i;
++	const struct {
++		int transport;
++		uint32_t abi;
++	} errors[] = {
++		{ SUNXI_VENDOR_SCP_EINVAL, SUNXI_A133_SIP_INVALID_PARAMETER },
++		{ SUNXI_VENDOR_SCP_ETIMEOUT, SUNXI_A133_SIP_TIMEOUT },
++		{ SUNXI_VENDOR_SCP_ENOTREADY, SUNXI_A133_SIP_NOT_READY },
++		{ SUNXI_VENDOR_SCP_EPOISONED, SUNXI_A133_SIP_POISONED },
++		{ SUNXI_VENDOR_SCP_EPROTO, SUNXI_A133_SIP_PROTOCOL_ERROR },
++		{ -99, SUNXI_A133_SIP_PROTOCOL_ERROR },
++	};
++
++	init_backend(&fake, &backend);
++	for (i = 0U; i < ARRAY_SIZE(errors); i++) {
++		fake.status = errors[i].transport;
++		response = dispatch(&backend, true,
++				    SUNXI_A133_SIP_SET_WAKE_SOURCE, 0x67U,
++				    0U, 0U, 0U);
++		assert(response.x0 == errors[i].abi);
++		assert(response.x1 == 0U);
++	}
++
++	fake.status = SUNXI_VENDOR_SCP_OK;
++	fake.result = 0xa5U;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CLEAR_WAKE_SOURCE,
++			    0x67U, 0U, 0U, 0U);
++	assert(response.x0 == (uint32_t)SUNXI_A133_SIP_REMOTE_ERROR);
++	assert(response.x1 == 0xa5U);
++}
++
++int main(void)
++{
++	test_discovery_is_stable();
++	test_security_and_unknown_calls();
++	test_capability_requires_ready_complete_backend();
++	test_raw_spi_set_and_clear();
++	test_invalid_arguments_do_not_reach_scp();
++	test_not_ready_does_not_reach_scp();
++	test_transport_and_remote_errors_are_stable();
++	puts("sunxi_a133_native_svc tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index 5016057..f429b9f 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -26,6 +26,17 @@ endif
+ $(eval $(call add_define,SUNXI_A133_VENDOR_SCP_STARTUP))
+ endif
+ 
++# Publish the native A133 SiP identity, capabilities and wake-source calls.
++# This service is separate from the stock monitor ABI and remains default-off.
++SUNXI_A133_NATIVE_WAKE_ABI	?=	0
++$(call assert_boolean,SUNXI_A133_NATIVE_WAKE_ABI)
++ifeq (${SUNXI_A133_NATIVE_WAKE_ABI},1)
++ifneq (${SUNXI_A133_VENDOR_SCP_STARTUP},1)
++$(error SUNXI_A133_NATIVE_WAKE_ABI requires SUNXI_A133_VENDOR_SCP_STARTUP=1)
++endif
++$(eval $(call add_define,SUNXI_A133_NATIVE_WAKE_ABI))
++endif
++
+ # Cap BL31 at the start of stock's standby scratch. The common DT fixup still
+ # reserves the complete 0x40000000..0x40040000 firmware window from Linux.
+ SUNXI_A133_STANDBY_SCRATCH	?=	0
+@@ -56,3 +67,8 @@ endif
+ ifeq (${SUNXI_A133_VENDOR_SCP_STARTUP},1)
+ BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_vendor_scp.c
+ endif
++
++ifeq (${SUNXI_A133_NATIVE_WAKE_ABI},1)
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_native_svc.c \
++				${AW_PLAT}/common/sunxi_a133_vendor_scp_runtime.c
++endif
+-- 
+2.55.0
+
