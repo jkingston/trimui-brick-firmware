@@ -5,5 +5,5 @@ config BR2_PACKAGE_BRICK_SCP
 	  Build the opt-in Brick SCP profile using the exact SCP and service
 	  device tree extracted from the official firmware archive. The profile
 	  includes bounded startup, mailbox loopback, the versioned native wake
-	  ABI and its dormant suspend transaction. It does not expose PSCI system
-	  suspend or remove CPU or DRAM power.
+	  ABI, its dormant suspend transaction and trusted TF-A warm-entry bridge.
+	  It does not expose PSCI system suspend or remove CPU or DRAM power.

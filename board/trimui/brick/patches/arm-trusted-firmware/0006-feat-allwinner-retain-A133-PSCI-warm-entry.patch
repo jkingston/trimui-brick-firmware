@@ -1,0 +1,771 @@
+From 733a68c25b7b438df805e50794cb0eef320af0ca Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 11:07:37 +0000
+Subject: [PATCH] feat(allwinner): retain A133 PSCI warm entry
+
+Capture TF-A's trusted BL31 warm entry behind a default-off A133 bridge.
+Expose checked suspend transaction steps without installing PSCI callbacks
+or advertising SYSTEM_SUSPEND.
+
+Validate BL31 ownership, preserve rollback and fail-stop ordering, and add
+host coverage plus strict build dependencies.
+
+Assisted-by: LLM
+---
+ .../common/include/sunxi_a133_psci_bridge.h   |  67 ++++
+ .../allwinner/common/sunxi_a133_psci_bridge.c | 168 ++++++++++
+ .../common/sunxi_a133_psci_bridge_runtime.c   |  93 ++++++
+ plat/allwinner/common/sunxi_pm.c              |  11 +
+ plat/allwinner/common/tests/Makefile          |  12 +-
+ .../tests/test_sunxi_a133_psci_bridge.c       | 297 ++++++++++++++++++
+ plat/allwinner/sun50i_a133/platform.mk        |  20 ++
+ 7 files changed, 666 insertions(+), 2 deletions(-)
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_psci_bridge.h
+ create mode 100644 plat/allwinner/common/sunxi_a133_psci_bridge.c
+ create mode 100644 plat/allwinner/common/sunxi_a133_psci_bridge_runtime.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_psci_bridge.c
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_psci_bridge.h b/plat/allwinner/common/include/sunxi_a133_psci_bridge.h
+new file mode 100644
+index 0000000..b5a5681
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_psci_bridge.h
+@@ -0,0 +1,67 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_PSCI_BRIDGE_H
++#define SUNXI_A133_PSCI_BRIDGE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <sunxi_a133_suspend.h>
++
++enum sunxi_a133_psci_bridge_phase {
++	SUNXI_A133_PSCI_BRIDGE_UNINITIALIZED,
++	SUNXI_A133_PSCI_BRIDGE_IDLE,
++	SUNXI_A133_PSCI_BRIDGE_PREPARED,
++	SUNXI_A133_PSCI_BRIDGE_COMMITTED,
++	SUNXI_A133_PSCI_BRIDGE_FAILED,
++};
++
++struct sunxi_a133_psci_bridge_backend {
++	void *cookie;
++	void (*system_state)(void *cookie, psci_power_state_t *target_state);
++	int (*prepare)(void *cookie, const psci_power_state_t *target_state,
++		       uint64_t mpidr, uint64_t secure_resume_entry);
++	int (*abort)(void *cookie);
++	int (*commit)(void *cookie);
++	int (*finish)(void *cookie, uint32_t *wake_source);
++};
++
++struct sunxi_a133_psci_bridge {
++	struct sunxi_a133_psci_bridge_backend backend;
++	enum sunxi_a133_psci_bridge_phase phase;
++	uint32_t secure_resume_entry;
++};
++
++/*
++ * These checked, return-valued steps are deliberately not PSCI callbacks.
++ * In particular, no void callback may discard a transport failure.
++ */
++int sunxi_a133_psci_bridge_init(
++	struct sunxi_a133_psci_bridge *bridge,
++	const struct sunxi_a133_psci_bridge_backend *backend,
++	uint64_t secure_resume_entry, uint64_t secure_region_base,
++	uint64_t secure_region_limit);
++int sunxi_a133_psci_bridge_system_state(
++	struct sunxi_a133_psci_bridge *bridge,
++	psci_power_state_t *target_state);
++int sunxi_a133_psci_bridge_prepare(struct sunxi_a133_psci_bridge *bridge,
++				   const psci_power_state_t *target_state,
++				   uint64_t mpidr);
++int sunxi_a133_psci_bridge_abort(struct sunxi_a133_psci_bridge *bridge);
++int sunxi_a133_psci_bridge_commit(struct sunxi_a133_psci_bridge *bridge);
++int sunxi_a133_psci_bridge_finish(struct sunxi_a133_psci_bridge *bridge,
++				  uint32_t *wake_source);
++
++#ifndef SUNXI_A133_PSCI_BRIDGE_HOST_TEST
++int sunxi_a133_psci_bridge_runtime_setup(uintptr_t secure_resume_entry);
++int sunxi_a133_psci_bridge_runtime_system_state(
++	psci_power_state_t *target_state);
++int sunxi_a133_psci_bridge_runtime_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr);
++int sunxi_a133_psci_bridge_runtime_abort(void);
++int sunxi_a133_psci_bridge_runtime_commit(void);
++int sunxi_a133_psci_bridge_runtime_finish(uint32_t *wake_source);
++#endif
++
++#endif /* SUNXI_A133_PSCI_BRIDGE_H */
+diff --git a/plat/allwinner/common/sunxi_a133_psci_bridge.c b/plat/allwinner/common/sunxi_a133_psci_bridge.c
+new file mode 100644
+index 0000000..19f9fcd
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_psci_bridge.c
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include <sunxi_a133_psci_bridge.h>
++
++static bool backend_complete(
++	const struct sunxi_a133_psci_bridge_backend *backend)
++{
++	return (backend != NULL) && (backend->system_state != NULL) &&
++	       (backend->prepare != NULL) && (backend->abort != NULL) &&
++	       (backend->commit != NULL) && (backend->finish != NULL);
++}
++
++static bool secure_entry_valid(uint64_t entry, uint64_t region_base,
++			       uint64_t region_limit)
++{
++	return (entry != 0U) && (region_base < region_limit) &&
++	       (entry >= region_base) &&
++	       (entry < region_limit) && (entry <= UINT32_MAX) &&
++	       ((entry & 3U) == 0U);
++}
++
++static void fail_if_terminal(struct sunxi_a133_psci_bridge *bridge, int ret)
++{
++	if (ret == SUNXI_A133_SUSPEND_EFAILSTOP) {
++		bridge->phase = SUNXI_A133_PSCI_BRIDGE_FAILED;
++	}
++}
++
++int sunxi_a133_psci_bridge_init(
++	struct sunxi_a133_psci_bridge *bridge,
++	const struct sunxi_a133_psci_bridge_backend *backend,
++	uint64_t secure_resume_entry, uint64_t secure_region_base,
++	uint64_t secure_region_limit)
++{
++	if ((bridge == NULL) || !backend_complete(backend) ||
++	    !secure_entry_valid(secure_resume_entry, secure_region_base,
++				secure_region_limit)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_UNINITIALIZED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	memset(bridge, 0, sizeof(*bridge));
++	bridge->backend = *backend;
++	bridge->secure_resume_entry = (uint32_t)secure_resume_entry;
++	bridge->phase = SUNXI_A133_PSCI_BRIDGE_IDLE;
++	return SUNXI_A133_SUSPEND_OK;
++}
++
++int sunxi_a133_psci_bridge_system_state(
++	struct sunxi_a133_psci_bridge *bridge,
++	psci_power_state_t *target_state)
++{
++	if ((bridge == NULL) || (target_state == NULL)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase == SUNXI_A133_PSCI_BRIDGE_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_IDLE) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	bridge->backend.system_state(bridge->backend.cookie, target_state);
++	return SUNXI_A133_SUSPEND_OK;
++}
++
++int sunxi_a133_psci_bridge_prepare(struct sunxi_a133_psci_bridge *bridge,
++				   const psci_power_state_t *target_state,
++				   uint64_t mpidr)
++{
++	int ret;
++
++	if ((bridge == NULL) || (target_state == NULL)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase == SUNXI_A133_PSCI_BRIDGE_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_IDLE) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	ret = bridge->backend.prepare(bridge->backend.cookie, target_state,
++				      mpidr, bridge->secure_resume_entry);
++	if (ret == SUNXI_A133_SUSPEND_OK) {
++		bridge->phase = SUNXI_A133_PSCI_BRIDGE_PREPARED;
++	} else {
++		fail_if_terminal(bridge, ret);
++	}
++	return ret;
++}
++
++int sunxi_a133_psci_bridge_abort(struct sunxi_a133_psci_bridge *bridge)
++{
++	int ret;
++
++	if (bridge == NULL) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase == SUNXI_A133_PSCI_BRIDGE_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_PREPARED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	ret = bridge->backend.abort(bridge->backend.cookie);
++	if (ret == SUNXI_A133_SUSPEND_OK) {
++		bridge->phase = SUNXI_A133_PSCI_BRIDGE_IDLE;
++	} else {
++		fail_if_terminal(bridge, ret);
++	}
++	return ret;
++}
++
++int sunxi_a133_psci_bridge_commit(struct sunxi_a133_psci_bridge *bridge)
++{
++	int ret;
++
++	if (bridge == NULL) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase == SUNXI_A133_PSCI_BRIDGE_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_PREPARED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	ret = bridge->backend.commit(bridge->backend.cookie);
++	if (ret == SUNXI_A133_SUSPEND_OK) {
++		bridge->phase = SUNXI_A133_PSCI_BRIDGE_COMMITTED;
++	} else {
++		fail_if_terminal(bridge, ret);
++	}
++	return ret;
++}
++
++int sunxi_a133_psci_bridge_finish(struct sunxi_a133_psci_bridge *bridge,
++				  uint32_t *wake_source)
++{
++	int ret;
++
++	if ((bridge == NULL) || (wake_source == NULL)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (bridge->phase == SUNXI_A133_PSCI_BRIDGE_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (bridge->phase != SUNXI_A133_PSCI_BRIDGE_COMMITTED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	ret = bridge->backend.finish(bridge->backend.cookie, wake_source);
++	if (ret == SUNXI_A133_SUSPEND_OK) {
++		bridge->phase = SUNXI_A133_PSCI_BRIDGE_IDLE;
++	} else {
++		fail_if_terminal(bridge, ret);
++	}
++	return ret;
++}
+diff --git a/plat/allwinner/common/sunxi_a133_psci_bridge_runtime.c b/plat/allwinner/common/sunxi_a133_psci_bridge_runtime.c
+new file mode 100644
+index 0000000..1d847d7
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_psci_bridge_runtime.c
+@@ -0,0 +1,93 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdint.h>
++
++#include <platform_def.h>
++
++#include <sunxi_a133_psci_bridge.h>
++#include <sunxi_a133_vendor_scp_runtime.h>
++
++CASSERT(BL31_BASE <= UINT32_MAX, assert_a133_bl31_base_fits_cpu_op);
++CASSERT((BL31_LIMIT - 1U) <= UINT32_MAX,
++	assert_a133_bl31_limit_fits_cpu_op);
++
++static struct sunxi_a133_psci_bridge a133_psci_bridge;
++
++static void runtime_system_state(void *cookie,
++				 psci_power_state_t *target_state)
++{
++	(void)cookie;
++	sunxi_a133_vendor_scp_runtime_suspend_state(target_state);
++}
++
++static int runtime_prepare(void *cookie,
++			   const psci_power_state_t *target_state,
++			   uint64_t mpidr, uint64_t secure_resume_entry)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_suspend_prepare(
++		target_state, mpidr, secure_resume_entry);
++}
++
++static int runtime_abort(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_suspend_abort();
++}
++
++static int runtime_commit(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_suspend_commit();
++}
++
++static int runtime_finish(void *cookie, uint32_t *wake_source)
++{
++	(void)cookie;
++	return sunxi_a133_vendor_scp_runtime_suspend_finish(wake_source);
++}
++
++int sunxi_a133_psci_bridge_runtime_setup(uintptr_t secure_resume_entry)
++{
++	const struct sunxi_a133_psci_bridge_backend backend = {
++		.system_state = runtime_system_state,
++		.prepare = runtime_prepare,
++		.abort = runtime_abort,
++		.commit = runtime_commit,
++		.finish = runtime_finish,
++	};
++
++	return sunxi_a133_psci_bridge_init(&a133_psci_bridge, &backend,
++		secure_resume_entry, BL31_BASE, BL31_LIMIT);
++}
++
++int sunxi_a133_psci_bridge_runtime_system_state(
++	psci_power_state_t *target_state)
++{
++	return sunxi_a133_psci_bridge_system_state(&a133_psci_bridge,
++					    target_state);
++}
++
++int sunxi_a133_psci_bridge_runtime_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr)
++{
++	return sunxi_a133_psci_bridge_prepare(&a133_psci_bridge, target_state,
++					      mpidr);
++}
++
++int sunxi_a133_psci_bridge_runtime_abort(void)
++{
++	return sunxi_a133_psci_bridge_abort(&a133_psci_bridge);
++}
++
++int sunxi_a133_psci_bridge_runtime_commit(void)
++{
++	return sunxi_a133_psci_bridge_commit(&a133_psci_bridge);
++}
++
++int sunxi_a133_psci_bridge_runtime_finish(uint32_t *wake_source)
++{
++	return sunxi_a133_psci_bridge_finish(&a133_psci_bridge, wake_source);
++}
+diff --git a/plat/allwinner/common/sunxi_pm.c b/plat/allwinner/common/sunxi_pm.c
+index ebc406b..6f5026e 100644
+--- a/plat/allwinner/common/sunxi_pm.c
++++ b/plat/allwinner/common/sunxi_pm.c
+@@ -15,6 +15,9 @@
+ 
+ #include <sunxi_cpucfg.h>
+ #include <sunxi_private.h>
++#if defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
++#include <sunxi_a133_psci_bridge.h>
++#endif
+ 
+ static bool psci_is_scpi;
+ 
+@@ -45,6 +48,14 @@ int plat_setup_psci_ops(uintptr_t sec_entrypoint,
+ {
+ 	assert(psci_ops);
+ 
++#if defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
++	if (sunxi_a133_psci_bridge_runtime_setup(sec_entrypoint) !=
++	    SUNXI_A133_SUSPEND_OK) {
++		ERROR("PSCI: A133 secure warm entry rejected\n");
++		return -1;
++	}
++#endif
++
+ 	/* Program all CPU entry points. */
+ 	for (unsigned int cpu = 0; cpu < PLATFORM_CORE_COUNT; ++cpu) {
+ 		if (sunxi_cpucfg_has_per_cluster_regs()) {
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+index 201177f..ccac09b 100644
+--- a/plat/allwinner/common/tests/Makefile
++++ b/plat/allwinner/common/tests/Makefile
+@@ -9,7 +9,8 @@ ROOT := ../../../../..
+ .PHONY: all clean test
+ 
+ all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+-	test_sunxi_a133_native_svc test_sunxi_a133_suspend
++	test_sunxi_a133_native_svc test_sunxi_a133_suspend \
++	test_sunxi_a133_psci_bridge
+ 
+ test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+@@ -27,12 +28,19 @@ test_sunxi_a133_suspend: test_sunxi_a133_suspend.c ../sunxi_a133_suspend.c
+ 	$(CC) $(CFLAGS) -DSUNXI_A133_SUSPEND_HOST_TEST \
+ 		-I../include $^ -o $@
+ 
++test_sunxi_a133_psci_bridge: test_sunxi_a133_psci_bridge.c \
++		../sunxi_a133_psci_bridge.c
++	$(CC) $(CFLAGS) -DSUNXI_A133_SUSPEND_HOST_TEST \
++		-DSUNXI_A133_PSCI_BRIDGE_HOST_TEST -I../include $^ -o $@
++
+ test: all
+ 	./test_sunxi_vendor_scp
+ 	./test_sunxi_a133_vendor_scp
+ 	./test_sunxi_a133_native_svc
+ 	./test_sunxi_a133_suspend
++	./test_sunxi_a133_psci_bridge
+ 
+ clean:
+ 	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+-		test_sunxi_a133_native_svc test_sunxi_a133_suspend
++		test_sunxi_a133_native_svc test_sunxi_a133_suspend \
++		test_sunxi_a133_psci_bridge
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_psci_bridge.c b/plat/allwinner/common/tests/test_sunxi_a133_psci_bridge.c
+new file mode 100644
+index 0000000..b695467
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_psci_bridge.c
+@@ -0,0 +1,297 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_psci_bridge.h>
++
++#define TEST_BL31_BASE		UINT64_C(0x40000000)
++#define TEST_BL31_LIMIT		UINT64_C(0x40020000)
++#define TEST_SECURE_ENTRY	UINT64_C(0x40000188)
++
++struct mock_backend {
++	char calls[16];
++	size_t call_count;
++	int prepare_ret;
++	int abort_ret;
++	int commit_ret;
++	int finish_ret;
++	uint64_t mpidr;
++	uint64_t secure_resume_entry;
++};
++
++static void record_call(struct mock_backend *mock, char call)
++{
++	assert(mock->call_count < sizeof(mock->calls));
++	mock->calls[mock->call_count++] = call;
++}
++
++static void mock_system_state(void *cookie, psci_power_state_t *target_state)
++{
++	struct mock_backend *mock = cookie;
++
++	record_call(mock, 'S');
++	for (size_t i = 0; i <= PLAT_MAX_PWR_LVL; i++) {
++		target_state->pwr_domain_state[i] = PLAT_MAX_OFF_STATE;
++	}
++}
++
++static int mock_prepare(void *cookie,
++			const psci_power_state_t *target_state,
++			uint64_t mpidr, uint64_t secure_resume_entry)
++{
++	struct mock_backend *mock = cookie;
++
++	(void)target_state;
++	record_call(mock, 'P');
++	mock->mpidr = mpidr;
++	mock->secure_resume_entry = secure_resume_entry;
++	return mock->prepare_ret;
++}
++
++static int mock_abort(void *cookie)
++{
++	struct mock_backend *mock = cookie;
++
++	record_call(mock, 'A');
++	return mock->abort_ret;
++}
++
++static int mock_commit(void *cookie)
++{
++	struct mock_backend *mock = cookie;
++
++	record_call(mock, 'C');
++	return mock->commit_ret;
++}
++
++static int mock_finish(void *cookie, uint32_t *wake_source)
++{
++	struct mock_backend *mock = cookie;
++
++	record_call(mock, 'F');
++	*wake_source = 0x12345678U;
++	return mock->finish_ret;
++}
++
++static struct sunxi_a133_psci_bridge_backend backend_for(
++	struct mock_backend *mock)
++{
++	const struct sunxi_a133_psci_bridge_backend backend = {
++		.cookie = mock,
++		.system_state = mock_system_state,
++		.prepare = mock_prepare,
++		.abort = mock_abort,
++		.commit = mock_commit,
++		.finish = mock_finish,
++	};
++
++	return backend;
++}
++
++static void init_bridge(struct sunxi_a133_psci_bridge *bridge,
++			struct mock_backend *mock)
++{
++	struct sunxi_a133_psci_bridge_backend backend = backend_for(mock);
++
++	assert(sunxi_a133_psci_bridge_init(
++		bridge, &backend, TEST_SECURE_ENTRY, TEST_BL31_BASE,
++		TEST_BL31_LIMIT) == SUNXI_A133_SUSPEND_OK);
++}
++
++static psci_power_state_t system_state(
++	struct sunxi_a133_psci_bridge *bridge)
++{
++	psci_power_state_t state = { 0 };
++
++	assert(sunxi_a133_psci_bridge_system_state(bridge, &state) ==
++	       SUNXI_A133_SUSPEND_OK);
++	for (size_t i = 0; i <= PLAT_MAX_PWR_LVL; i++) {
++		assert(state.pwr_domain_state[i] == PLAT_MAX_OFF_STATE);
++	}
++	return state;
++}
++
++static void test_trusted_entry_custody(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = { 0 };
++	struct sunxi_a133_psci_bridge_backend backend = backend_for(&mock);
++	psci_power_state_t state;
++
++	init_bridge(&bridge, &mock);
++	assert(bridge.secure_resume_entry == TEST_SECURE_ENTRY);
++	assert(sunxi_a133_psci_bridge_init(
++		&bridge, &backend, TEST_SECURE_ENTRY + 4U, TEST_BL31_BASE,
++		TEST_BL31_LIMIT) == SUNXI_A133_SUSPEND_ESTATE);
++	assert(bridge.secure_resume_entry == TEST_SECURE_ENTRY);
++
++	state = system_state(&bridge);
++	assert(sunxi_a133_psci_bridge_prepare(&bridge, &state,
++		UINT64_C(0x80000000)) == SUNXI_A133_SUSPEND_OK);
++	assert(mock.mpidr == UINT64_C(0x80000000));
++	assert(mock.secure_resume_entry == TEST_SECURE_ENTRY);
++	assert(memcmp(mock.calls, "SP", 2) == 0);
++	assert(sunxi_a133_psci_bridge_abort(&bridge) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(memcmp(mock.calls, "SPA", 3) == 0);
++}
++
++static void test_rejects_untrusted_entries(void)
++{
++	struct mock_backend mock = { 0 };
++	struct sunxi_a133_psci_bridge_backend backend = backend_for(&mock);
++	const uint64_t invalid_entries[] = {
++		0U,
++		TEST_BL31_BASE - 4U,
++		TEST_BL31_BASE + 2U,
++		TEST_BL31_LIMIT,
++		UINT64_C(0x100000000),
++	};
++
++	for (size_t i = 0; i < sizeof(invalid_entries) /
++				      sizeof(invalid_entries[0]); i++) {
++		struct sunxi_a133_psci_bridge bridge = { 0 };
++
++		assert(sunxi_a133_psci_bridge_init(
++			&bridge, &backend, invalid_entries[i], TEST_BL31_BASE,
++			TEST_BL31_LIMIT) == SUNXI_A133_SUSPEND_EINVAL);
++		assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_UNINITIALIZED);
++	}
++
++	{
++		struct sunxi_a133_psci_bridge bridge = { 0 };
++
++		assert(sunxi_a133_psci_bridge_init(
++			&bridge, &backend, 0U, 0U, 4U) ==
++		       SUNXI_A133_SUSPEND_EINVAL);
++	}
++
++	{
++		struct sunxi_a133_psci_bridge bridge = { 0 };
++		struct sunxi_a133_psci_bridge_backend incomplete = backend;
++
++		incomplete.finish = NULL;
++		assert(sunxi_a133_psci_bridge_init(
++			&bridge, &incomplete, TEST_SECURE_ENTRY,
++			TEST_BL31_BASE, TEST_BL31_LIMIT) ==
++		       SUNXI_A133_SUSPEND_EINVAL);
++	}
++}
++
++static void test_complete_order(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = { 0 };
++	psci_power_state_t state;
++	uint32_t wake = 0U;
++
++	init_bridge(&bridge, &mock);
++	state = system_state(&bridge);
++	assert(sunxi_a133_psci_bridge_prepare(&bridge, &state, 3U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_psci_bridge_commit(&bridge) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_psci_bridge_finish(&bridge, &wake) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(wake == 0x12345678U);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_IDLE);
++	assert(memcmp(mock.calls, "SPCF", 4) == 0);
++}
++
++static void test_retry_and_failstop_order(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = { 0 };
++	psci_power_state_t state;
++
++	init_bridge(&bridge, &mock);
++	state = system_state(&bridge);
++	assert(sunxi_a133_psci_bridge_prepare(&bridge, &state, 0U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	mock.commit_ret = SUNXI_A133_SUSPEND_ERETRY;
++	assert(sunxi_a133_psci_bridge_commit(&bridge) ==
++	       SUNXI_A133_SUSPEND_ERETRY);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_PREPARED);
++	mock.commit_ret = SUNXI_A133_SUSPEND_EFAILSTOP;
++	assert(sunxi_a133_psci_bridge_commit(&bridge) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_FAILED);
++	assert(sunxi_a133_psci_bridge_abort(&bridge) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(memcmp(mock.calls, "SPCC", 4) == 0);
++}
++
++static void test_safe_prepare_failure(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = {
++		.prepare_ret = SUNXI_A133_SUSPEND_ENOTREADY,
++	};
++	psci_power_state_t state;
++
++	init_bridge(&bridge, &mock);
++	state = system_state(&bridge);
++	assert(sunxi_a133_psci_bridge_prepare(&bridge, &state, 0U) ==
++	       SUNXI_A133_SUSPEND_ENOTREADY);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_IDLE);
++	assert(sunxi_a133_psci_bridge_abort(&bridge) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(memcmp(mock.calls, "SP", 2) == 0);
++}
++
++static void test_finish_retry_preserves_commit(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = { 0 };
++	psci_power_state_t state;
++	uint32_t wake = 0U;
++
++	init_bridge(&bridge, &mock);
++	state = system_state(&bridge);
++	assert(sunxi_a133_psci_bridge_prepare(&bridge, &state, 0U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_psci_bridge_commit(&bridge) ==
++	       SUNXI_A133_SUSPEND_OK);
++	mock.finish_ret = SUNXI_A133_SUSPEND_ERETRY;
++	assert(sunxi_a133_psci_bridge_finish(&bridge, &wake) ==
++	       SUNXI_A133_SUSPEND_ERETRY);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_COMMITTED);
++	mock.finish_ret = SUNXI_A133_SUSPEND_OK;
++	assert(sunxi_a133_psci_bridge_finish(&bridge, &wake) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(bridge.phase == SUNXI_A133_PSCI_BRIDGE_IDLE);
++	assert(memcmp(mock.calls, "SPCFF", 5) == 0);
++}
++
++static void test_invalid_order_is_side_effect_free(void)
++{
++	struct sunxi_a133_psci_bridge bridge = { 0 };
++	struct mock_backend mock = { 0 };
++	uint32_t wake;
++
++	init_bridge(&bridge, &mock);
++	assert(sunxi_a133_psci_bridge_abort(&bridge) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_psci_bridge_commit(&bridge) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_psci_bridge_finish(&bridge, &wake) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(mock.call_count == 0U);
++}
++
++int main(void)
++{
++	test_trusted_entry_custody();
++	test_rejects_untrusted_entries();
++	test_complete_order();
++	test_retry_and_failstop_order();
++	test_safe_prepare_failure();
++	test_finish_retry_preserves_commit();
++	test_invalid_order_is_side_effect_free();
++	puts("sunxi_a133_psci_bridge tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index adb270f..34979a1 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -87,3 +87,23 @@ endif
+ ifeq (${SUNXI_A133_SUSPEND_ORCHESTRATOR},1)
+ BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_suspend.c
+ endif
++
++# Retain TF-A's own secure warm entry and expose checked transaction steps for
++# later PSCI callback composition. This deliberately does not add any callback
++# to plat_psci_ops_t, advertise SYSTEM_SUSPEND, issue CPU_OP, or enter WFI.
++SUNXI_A133_PSCI_SUSPEND_PRECURSOR	?=	0
++$(call assert_boolean,SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
++ifeq (${SUNXI_A133_PSCI_SUSPEND_PRECURSOR},1)
++ifneq (${ARCH},aarch64)
++$(error SUNXI_A133_PSCI_SUSPEND_PRECURSOR requires ARCH=aarch64)
++endif
++ifneq (${SUNXI_A133_SUSPEND_ORCHESTRATOR},1)
++$(error SUNXI_A133_PSCI_SUSPEND_PRECURSOR requires SUNXI_A133_SUSPEND_ORCHESTRATOR=1)
++endif
++ifneq (${SUNXI_A133_STANDBY_SCRATCH},1)
++$(error SUNXI_A133_PSCI_SUSPEND_PRECURSOR requires SUNXI_A133_STANDBY_SCRATCH=1)
++endif
++$(eval $(call add_define,SUNXI_A133_PSCI_SUSPEND_PRECURSOR))
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_psci_bridge.c \
++				${AW_PLAT}/common/sunxi_a133_psci_bridge_runtime.c
++endif
+-- 
+2.55.0
+
