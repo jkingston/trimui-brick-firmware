@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 
+from scp_profile import profile as scp_profile
 from usb_profile import profile as usb_profile
 
 
@@ -15,6 +16,8 @@ DTB = 'sun50i-a133-trimui-brick.dtb'
 NODE = '/soc/mmc@4022000'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,emmc-recovery'
+G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
+VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
 
 
 def enabled(config):
@@ -85,6 +88,12 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('eMMC recovery installation requires the opt-in configuration')
     if usb_profile(config) != 'peripheral':
         raise ValueError('eMMC recovery requires the independently verified USB gadget profile')
+    if scp_profile(config) != 'disabled':
+        raise ValueError('eMMC recovery and SCP qualification must remain separate')
+    text = config.read_text()
+    if (re.search(r'^' + G2D_KEY + r'=y$', text, re.M) or
+            re.search(r'^' + VE_KEY + r'=y$', text, re.M)):
+        raise ValueError('eMMC and accelerator qualification must remain separate')
     destination = images / DTB
     if not destination.is_file():
         raise FileNotFoundError(destination)

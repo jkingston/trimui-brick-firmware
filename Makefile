@@ -32,6 +32,25 @@ endif
 ifeq ($(filter $(EMMC_RECOVERY),0 1),)
 $(error EMMC_RECOVERY must be 0 or 1)
 endif
+ifneq ($(EMMC_RECOVERY),0)
+ifneq ($(USB_ROLE),peripheral)
+$(error EMMC_RECOVERY=1 requires USB_ROLE=peripheral)
+endif
+ifneq ($(SCP_PROFILE),disabled)
+$(error EMMC_RECOVERY=1 and SCP_PROFILE are mutually exclusive)
+endif
+ifneq ($(G2D_PROFILE):$(VE_PROFILE),disabled:disabled)
+$(error EMMC_RECOVERY=1 and accelerator qualification are mutually exclusive)
+endif
+endif
+ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE)),)
+ifneq ($(USB_ROLE),peripheral)
+$(error Accelerator qualification requires USB_ROLE=peripheral)
+endif
+ifneq ($(SCP_PROFILE),disabled)
+$(error Accelerator qualification and SCP_PROFILE are mutually exclusive)
+endif
+endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 

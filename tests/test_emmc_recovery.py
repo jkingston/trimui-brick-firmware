@@ -103,6 +103,28 @@ class RecoveryProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'USB gadget'):
             emmc_recovery.install(self.root, self.config, fdtget, fdtput)
 
+    def test_install_rejects_other_hardware_qualification_profiles(self):
+        self.compile_dtb()
+        fdtget, fdtput = self.tools()
+        emmc_recovery.configure(self.config, '1')
+        cases = []
+        cases.append(('SCP', self.config.read_text().replace(
+            '# BR2_PACKAGE_BRICK_SCP is not set',
+            'BR2_PACKAGE_BRICK_SCP=y').replace(
+            'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""',
+            'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment"')))
+        cases.append(('accelerator', self.config.read_text().replace(
+            '# BR2_BRICK_G2D_QUALIFICATION is not set',
+            'BR2_BRICK_G2D_QUALIFICATION=y')))
+        cases.append(('accelerator', self.config.read_text().replace(
+            '# BR2_BRICK_VE_QUALIFICATION is not set',
+            'BR2_BRICK_VE_QUALIFICATION=y')))
+        for message, text in cases:
+            with self.subTest(message=message):
+                self.config.write_text(text)
+                with self.assertRaisesRegex(ValueError, message):
+                    emmc_recovery.install(self.root, self.config, fdtget, fdtput)
+
     def test_boot_success_writer_revalidates_removable_sd(self):
         service = (ROOT / 'board/trimui/brick/rootfs-overlay/etc/init.d/S99boot-success').read_text()
         identity = 'cat /sys/class/block/mmcblk0/device/type'
