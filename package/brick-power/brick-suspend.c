@@ -224,6 +224,23 @@ static char *bluez_owner(void)
 	return result;
 }
 
+/* Confirm absence separately from a D-Bus failure. An unprovisioned image
+ * deliberately has no bluetoothd, which is already a quiescent radio state.
+ */
+static int bluez_present(void)
+{
+	DBusError error = DBUS_ERROR_INIT;
+	dbus_bool_t present;
+
+	present = dbus_bus_name_has_owner(bus, "org.bluez", &error);
+	if (dbus_error_is_set(&error)) {
+		fprintf(stderr, "D-Bus: %s\n", error.message);
+		dbus_error_free(&error);
+		return -1;
+	}
+	return present;
+}
+
 static bool same_owner(void)
 {
 	char *current = bluez_owner();
@@ -390,7 +407,8 @@ static int transaction(void)
 {
 	struct audio_state audio = { .lock = -1 };
 	struct led_policy_state leds = { .lock = -1 };
-	bool was_on, restored;
+	bool bluetooth = owner != NULL;
+	bool was_on = false, restored;
 	bool attempted_off = false;
 	int result = -1;
 
@@ -406,18 +424,25 @@ static int transaction(void)
 		fprintf(stderr, "Mood LED quiesce failed; suspend aborted.\n");
 		goto restore_leds;
 	}
-	if (get_power(&was_on))
-		goto restore_leds;
-	if (interrupted())
-		goto restore_leds;
-	if (was_on) {
-		/* A timeout can still mean the daemon applied our request. */
-		attempted_off = true;
-		if (set_power(false))
+	if (bluetooth) {
+		if (get_power(&was_on))
+			goto restore_leds;
+		if (interrupted())
+			goto restore_leds;
+		if (was_on) {
+			/* A timeout can still mean the daemon applied our request. */
+			attempted_off = true;
+			if (set_power(false))
+				goto restore;
+		}
+		if (!same_owner() || wait_power_off() || interrupted())
 			goto restore;
-	}
-	if (!same_owner() || wait_power_off() || interrupted())
+	} else if (bluez_present() != 0 || interrupted()) {
+		/* A newly started daemon may be opening or powering the controller.
+		 * Let a later request retry from a stable, observable state.
+		 */
 		goto restore;
+	}
 	result = freeze_once();
 	if (result)
 		fprintf(stderr, "Suspend not completed: %s\n", strerror(errno));
@@ -426,7 +451,7 @@ restore:
 		fprintf(stderr, "Audio restoration failed; check codec mixer state.\n");
 		result = -1;
 	}
-	if (was_on && attempted_off) {
+	if (bluetooth && was_on && attempted_off) {
 		/* Never send restoration to a replacement daemon/controller owner.
 		 * Always issue Set, even if a timed-out off request still reports
 		 * Powered=true: BlueZ checks pending requests before its no-op path.
@@ -498,13 +523,21 @@ int main(int argc, char **argv)
 		goto signals;
 	}
 	dbus_connection_set_exit_on_disconnect(bus, false);
-	owner = bluez_owner();
-	if (owner) {
+	int bluetooth = bluez_present();
+	if (bluetooth < 0)
+		goto close_bus;
+	if (bluetooth) {
+		owner = bluez_owner();
+		if (!owner)
+			goto close_bus;
 		fprintf(stderr, "Requesting s2idle; Bluetooth and Wi-Fi will disconnect.\n");
-		if (!transaction())
-			result = EXIT_SUCCESS;
-		free(owner);
+	} else {
+		fprintf(stderr, "Requesting s2idle; Bluetooth is already stopped and Wi-Fi will disconnect.\n");
 	}
+	if (!transaction())
+		result = EXIT_SUCCESS;
+	free(owner);
+close_bus:
 	dbus_connection_close(bus);
 	dbus_connection_unref(bus);
 signals:

@@ -173,6 +173,60 @@ int main(void)
                             '-o', str(directory / 'test')], check=True)
             subprocess.run([str(directory / 'test')], check=True)
 
+    def test_confirmed_bluez_absence_is_already_quiescent(self):
+        source = (ROOT / 'package/brick-power/brick-suspend.c').read_text()
+        transaction = item(source, 'static int transaction')
+        harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+struct audio_state { int lock; };
+struct led_policy_state { int lock; };
+static char *owner;
+static int present, get_calls, same_calls, wait_calls, freeze_calls;
+static bool supports_freeze(void) { return true; }
+static int audio_quiesce(struct audio_state *state) { (void)state; return 0; }
+static int audio_restore(struct audio_state *state) { (void)state; return 0; }
+static int led_policy_quiesce(struct led_policy_state *state) { (void)state; return 0; }
+static int led_policy_restore(struct led_policy_state *state) { (void)state; return 0; }
+static int bluez_present(void) { return present; }
+static int get_power(bool *powered) { get_calls++; *powered = false; return 0; }
+static int set_power(bool powered) { (void)powered; return 0; }
+static bool same_owner(void) { same_calls++; return true; }
+static int wait_power_off(void) { wait_calls++; return 0; }
+static bool interrupted(void) { return false; }
+static int freeze_once(void) { freeze_calls++; return 0; }
+TRANSACTION
+int main(void)
+{
+    owner = NULL; present = 0;
+    assert(!transaction());
+    assert(!get_calls && !same_calls && !wait_calls && freeze_calls == 1);
+
+    freeze_calls = 0; present = 1;
+    assert(transaction() < 0);
+    assert(!get_calls && !freeze_calls);
+
+    present = -1;
+    assert(transaction() < 0);
+    assert(!get_calls && !freeze_calls);
+
+    owner = "org.bluez.owner"; present = 1;
+    assert(!transaction());
+    assert(get_calls == 1 && same_calls == 1 && wait_calls == 1 && freeze_calls == 1);
+    puts("PASS confirmed BlueZ absence and exact-owner Bluetooth quiescence");
+}
+'''.replace('TRANSACTION', transaction)
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / 'test.c').write_text(harness)
+            subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2',
+                            '-Wall', '-Wextra', '-Werror', str(directory / 'test.c'),
+                            '-o', str(directory / 'test')], check=True)
+            subprocess.run([str(directory / 'test')], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()
