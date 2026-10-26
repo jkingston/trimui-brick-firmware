@@ -8,6 +8,10 @@ USB_ROLE ?= peripheral
 ifeq ($(filter $(USB_ROLE),peripheral host auto),)
 $(error USB_ROLE must be peripheral, host or auto)
 endif
+SCP_PROFILE ?= disabled
+ifeq ($(filter $(SCP_PROFILE),disabled startup),)
+$(error SCP_PROFILE must be disabled or startup)
+endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
@@ -28,9 +32,12 @@ $(BUILDROOT)/.brick-extracted: $(ARCHIVE)
 
 configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE)
+	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE)
+	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
+	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 
 $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure

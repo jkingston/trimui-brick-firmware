@@ -1,0 +1,1455 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] allwinner: start the Brick A133 vendor SCP transport
+
+Implement the exact bounded vendor mailbox startup and nonce loopback,
+validate SCP-owned queue routing, and reserve the stock standby scratch.
+The opt-in profile exposes no PSCI system-suspend operation.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+diff --git a/plat/allwinner/common/include/platform_def.h b/plat/allwinner/common/include/platform_def.h
+index c9d075a..ae81c58 100644
+--- a/plat/allwinner/common/include/platform_def.h
++++ b/plat/allwinner/common/include/platform_def.h
+@@ -16,7 +16,13 @@
+ #ifdef SUNXI_BL31_IN_DRAM
+ 
+ #define BL31_BASE			SUNXI_DRAM_BASE
+-#define BL31_LIMIT			(SUNXI_DRAM_BASE + 0x40000)
++#ifndef SUNXI_BL31_LIMIT
++#define SUNXI_BL31_LIMIT		(SUNXI_DRAM_BASE + 0x40000)
++#endif
++#ifndef SUNXI_BL31_RESERVED_LIMIT
++#define SUNXI_BL31_RESERVED_LIMIT	SUNXI_BL31_LIMIT
++#endif
++#define BL31_LIMIT			SUNXI_BL31_LIMIT
+ 
+ #define MAX_XLAT_TABLES			4
+ #define PLAT_VIRT_ADDR_SPACE_SIZE	(1ULL << 32)
+diff --git a/plat/allwinner/common/include/sunxi_a133_vendor_scp.h b/plat/allwinner/common/include/sunxi_a133_vendor_scp.h
+new file mode 100644
+index 0000000..52c8777
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_vendor_scp.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_VENDOR_SCP_H
++#define SUNXI_A133_VENDOR_SCP_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <sunxi_vendor_scp.h>
++
++struct sunxi_a133_vendor_scp {
++	struct sunxi_vendor_scp transport;
++	uintptr_t msgbox_base;
++	bool owners_validated;
++	bool ownership_fault;
++};
++
++int sunxi_a133_vendor_scp_init(struct sunxi_a133_vendor_scp *scp,
++			       uintptr_t msgbox_base);
++int sunxi_a133_vendor_scp_startup(struct sunxi_a133_vendor_scp *scp,
++				  uint32_t nonce, uint64_t timeout_ticks);
++
++#ifdef SUNXI_A133_VENDOR_SCP_MMIO_HOST_TEST
++uint32_t sunxi_a133_vendor_scp_test_mmio_read(uintptr_t address);
++void sunxi_a133_vendor_scp_test_mmio_write(uintptr_t address, uint32_t value);
++#endif
++
++#endif /* SUNXI_A133_VENDOR_SCP_H */
+diff --git a/plat/allwinner/common/include/sunxi_vendor_scp.h b/plat/allwinner/common/include/sunxi_vendor_scp.h
+new file mode 100644
+index 0000000..75f5398
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_vendor_scp.h
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) 2026, The Trusted Firmware Project Contributors.
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef SUNXI_VENDOR_SCP_H
++#define SUNXI_VENDOR_SCP_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define SUNXI_VENDOR_SCP_CAP_CPU_OP		(1U << 0)
++#define SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY	(1U << 1)
++
++enum sunxi_vendor_scp_status {
++	SUNXI_VENDOR_SCP_OK = 0,
++	SUNXI_VENDOR_SCP_EINVAL = -1,
++	SUNXI_VENDOR_SCP_ETIMEOUT = -2,
++	SUNXI_VENDOR_SCP_ENOTREADY = -3,
++	SUNXI_VENDOR_SCP_EPOISONED = -4,
++	SUNXI_VENDOR_SCP_EPROTO = -5,
++};
++
++struct sunxi_vendor_scp_io {
++	void *cookie;
++	bool (*tx_ready)(void *cookie, unsigned int channel);
++	void (*tx_write)(void *cookie, unsigned int channel, uint32_t value);
++	bool (*rx_ready)(void *cookie, unsigned int channel);
++	uint32_t (*rx_read)(void *cookie, unsigned int channel);
++};
++
++struct sunxi_vendor_scp {
++	struct sunxi_vendor_scp_io io;
++	uint32_t startup_payload[13];
++	uint8_t startup_state;
++	bool ready;
++	bool poisoned;
++};
++
++/* The caller must serialize every operation on a context and its queues. */
++
++int sunxi_vendor_scp_init(struct sunxi_vendor_scp *scp,
++			  const struct sunxi_vendor_scp_io *io);
++
++/*
++ * Accept the exact stock q2 startup notification, acknowledge it on q3 with
++ * the stock zero image-base value, then prove q4/q5 hard-sync transport with
++ * an exact nonce echo. timeout_ticks is measured by the architectural physical
++ * counter, so callers should derive it from plat_get_syscnt_freq2().
++ */
++int sunxi_vendor_scp_startup(struct sunxi_vendor_scp *scp,
++			     uint32_t nonce, uint64_t timeout_ticks);
++
++uint32_t sunxi_vendor_scp_capabilities(const struct sunxi_vendor_scp *scp);
++
++/* Send the stock five-argument, asynchronous type 0x22 CPU_OP frame. */
++int sunxi_vendor_scp_cpu_op(struct sunxi_vendor_scp *scp, uint32_t mpidr,
++			    uint32_t resume_entry, uint32_t cpu_state,
++			    uint32_t cluster_state, uint32_t system_state,
++			    uint64_t timeout_ticks);
++
++/*
++ * Send the hard-synchronous type 0x11 restore notification and return the
++ * wake source carried by its one-word response.
++ */
++int sunxi_vendor_scp_restore_notify(struct sunxi_vendor_scp *scp,
++				    uint32_t *wake_source,
++				    uint64_t timeout_ticks);
++
++#endif /* SUNXI_VENDOR_SCP_H */
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp.c b/plat/allwinner/common/sunxi_a133_vendor_scp.c
+new file mode 100644
+index 0000000..868834e
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp.c
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stddef.h>
++
++#ifndef SUNXI_A133_VENDOR_SCP_MMIO_HOST_TEST
++#include <lib/mmio.h>
++#endif
++
++#include <sunxi_a133_vendor_scp.h>
++
++#define MSGBOX_CTRL0_REG	0x0000U
++#define MSGBOX_CTRL1_REG	0x0004U
++#define MSGBOX_FIFO_STAT_REG(n)	(0x0100U + (4U * (n)))
++#define MSGBOX_MSG_STAT_REG(n)	(0x0140U + (4U * (n)))
++#define MSGBOX_MSG_DATA_REG(n)	(0x0180U + (4U * (n)))
++
++#define MSGBOX_FIFO_FULL	(1U << 0)
++#define MSGBOX_MSG_COUNT_MASK	0x7U
++
++/* q0..q5 owner fields after the SCP initializes the old mailbox IP. */
++#define A133_MSGBOX_CTRL0_OWNERS	0x10011001U
++#define A133_MSGBOX_CTRL1_OWNERS	0x00000110U
++
++#ifdef SUNXI_A133_VENDOR_SCP_MMIO_HOST_TEST
++static uint32_t msgbox_read(uintptr_t address)
++{
++	return sunxi_a133_vendor_scp_test_mmio_read(address);
++}
++
++static void msgbox_write(uintptr_t address, uint32_t value)
++{
++	sunxi_a133_vendor_scp_test_mmio_write(address, value);
++}
++#else
++static uint32_t msgbox_read(uintptr_t address)
++{
++	return mmio_read_32(address);
++}
++
++static void msgbox_write(uintptr_t address, uint32_t value)
++{
++	mmio_write_32(address, value);
++}
++#endif
++
++static bool validate_owners(struct sunxi_a133_vendor_scp *scp)
++{
++	uint32_t ctrl0;
++	uint32_t ctrl1;
++
++	if (scp->owners_validated)
++		return true;
++
++	ctrl0 = msgbox_read(scp->msgbox_base + MSGBOX_CTRL0_REG);
++	ctrl1 = msgbox_read(scp->msgbox_base + MSGBOX_CTRL1_REG);
++	if ((ctrl0 != A133_MSGBOX_CTRL0_OWNERS) ||
++	    (ctrl1 != A133_MSGBOX_CTRL1_OWNERS)) {
++		scp->ownership_fault = true;
++		return false;
++	}
++
++	scp->owners_validated = true;
++	return true;
++}
++
++static bool a133_tx_ready(void *cookie, unsigned int channel)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	if ((channel >= 6U) || scp->ownership_fault ||
++	    !scp->owners_validated) {
++		return false;
++	}
++
++	return (msgbox_read(scp->msgbox_base + MSGBOX_FIFO_STAT_REG(channel)) &
++		MSGBOX_FIFO_FULL) == 0U;
++}
++
++static void a133_tx_write(void *cookie, unsigned int channel, uint32_t value)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	msgbox_write(scp->msgbox_base + MSGBOX_MSG_DATA_REG(channel), value);
++}
++
++static bool a133_rx_ready(void *cookie, unsigned int channel)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++	uint32_t count;
++
++	if ((channel >= 6U) || scp->ownership_fault)
++		return false;
++
++	count = msgbox_read(scp->msgbox_base + MSGBOX_MSG_STAT_REG(channel)) &
++		MSGBOX_MSG_COUNT_MASK;
++	if (count == 0U)
++		return false;
++
++	/* The SCP owns initialization. Validate its contract without writing it. */
++	return validate_owners(scp);
++}
++
++static uint32_t a133_rx_read(void *cookie, unsigned int channel)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	return msgbox_read(scp->msgbox_base + MSGBOX_MSG_DATA_REG(channel));
++}
++
++int sunxi_a133_vendor_scp_init(struct sunxi_a133_vendor_scp *scp,
++			       uintptr_t msgbox_base)
++{
++	struct sunxi_vendor_scp_io io;
++
++	if ((scp == NULL) || (msgbox_base == 0U) ||
++	    ((msgbox_base & (sizeof(uint32_t) - 1U)) != 0U)) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++
++	*scp = (struct sunxi_a133_vendor_scp){
++		.msgbox_base = msgbox_base,
++	};
++	io = (struct sunxi_vendor_scp_io){
++		.cookie = scp,
++		.tx_ready = a133_tx_ready,
++		.tx_write = a133_tx_write,
++		.rx_ready = a133_rx_ready,
++		.rx_read = a133_rx_read,
++	};
++
++	return sunxi_vendor_scp_init(&scp->transport, &io);
++}
++
++int sunxi_a133_vendor_scp_startup(struct sunxi_a133_vendor_scp *scp,
++				  uint32_t nonce, uint64_t timeout_ticks)
++{
++	int ret;
++
++	if (scp == NULL)
++		return SUNXI_VENDOR_SCP_EINVAL;
++
++	ret = sunxi_vendor_scp_startup(&scp->transport, nonce, timeout_ticks);
++	if (scp->ownership_fault) {
++		scp->transport.poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	return ret;
++}
+diff --git a/plat/allwinner/common/sunxi_bl31_setup.c b/plat/allwinner/common/sunxi_bl31_setup.c
+index 605ace5..84c0005 100644
+--- a/plat/allwinner/common/sunxi_bl31_setup.c
++++ b/plat/allwinner/common/sunxi_bl31_setup.c
+@@ -24,6 +24,9 @@
+ #include <sunxi_def.h>
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
++#if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++#include <sunxi_a133_vendor_scp.h>
++#endif
+ 
+ 
+ static entry_point_info_t bl32_image_ep_info;
+@@ -33,6 +36,30 @@ static console_t console;
+ 
+ static void *fdt;
+ 
++#if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++static struct sunxi_a133_vendor_scp a133_vendor_scp;
++
++static void sunxi_a133_vendor_scp_setup(void)
++{
++	uint64_t now = read_cntpct_el0();
++	int ret;
++
++	ret = sunxi_a133_vendor_scp_init(&a133_vendor_scp,
++					 SUNXI_MSGBOX_BASE);
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++		ret = sunxi_a133_vendor_scp_startup(&a133_vendor_scp,
++						   (uint32_t)now,
++						   plat_get_syscnt_freq2() / 2U);
++	}
++
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++		NOTICE("BL31: A133 vendor SCP transport ready\n");
++	} else {
++		WARN("BL31: A133 vendor SCP startup failed: %d\n", ret);
++	}
++}
++#endif
++
+ static const gicv2_driver_data_t sunxi_gic_data = {
+ 	.gicd_base = SUNXI_GICD_BASE,
+ 	.gicc_base = SUNXI_GICC_BASE,
+@@ -138,6 +165,10 @@ void bl31_platform_setup(void)
+ 	}
+ 	NOTICE("BL31: Detected Allwinner %s SoC (%04x)\n", soc_name, soc_id);
+ 
++#if defined(SUNXI_A133_VENDOR_SCP_STARTUP)
++	sunxi_a133_vendor_scp_setup();
++#endif
++
+ 	generic_delay_timer_init();
+ 
+ 	sunxi_find_dtb();
+diff --git a/plat/allwinner/common/sunxi_prepare_dtb.c b/plat/allwinner/common/sunxi_prepare_dtb.c
+index 0f68974..d17d50d 100644
+--- a/plat/allwinner/common/sunxi_prepare_dtb.c
++++ b/plat/allwinner/common/sunxi_prepare_dtb.c
+@@ -27,9 +27,9 @@ void sunxi_prepare_dtb(void *fdt)
+ 	}
+ 
+ #ifdef SUNXI_BL31_IN_DRAM
+-	/* Reserve memory used by Trusted Firmware. */
++	/* Reserve the complete platform firmware window from the normal world. */
+ 	if (fdt_add_reserved_memory(fdt, "tf-a@40000000", BL31_BASE,
+-				    BL31_LIMIT - BL31_BASE)) {
++				    SUNXI_BL31_RESERVED_LIMIT - BL31_BASE)) {
+ 		WARN("Failed to add reserved memory nodes to DT.\n");
+ 	}
+ #endif
+diff --git a/plat/allwinner/common/sunxi_vendor_scp.c b/plat/allwinner/common/sunxi_vendor_scp.c
+new file mode 100644
+index 0000000..15a194b
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_vendor_scp.c
+@@ -0,0 +1,389 @@
++/*
++ * Copyright (c) 2026, The Trusted Firmware Project Contributors.
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#include <string.h>
++
++#ifndef SUNXI_VENDOR_SCP_HOST_TEST
++#include <arch_helpers.h>
++#endif
++
++#include <sunxi_vendor_scp.h>
++
++#define SCP_CH_ASYNC_RX		0U
++#define SCP_CH_ASYNC_TX		1U
++#define SCP_CH_SYNC_RX		2U
++#define SCP_CH_SYNC_FEEDBACK	3U
++#define SCP_CH_HARD_TX		4U
++#define SCP_CH_HARD_RX		5U
++
++#define SCP_STATE_ALLOCATED	2U
++#define SCP_ATTR_HARDSYNC	2U
++#define SCP_TYPE_RESTORE_NOTIFY	0x11U
++#define SCP_TYPE_CPU_OP		0x22U
++#define SCP_TYPE_LOOPBACK	0x61U
++#define SCP_TYPE_STARTUP_NOTIFY	0x90U
++#define SCP_MAX_WORDS		16U
++#define SCP_STARTUP_WORDS	13U
++
++struct scp_frame {
++	uint8_t state;
++	uint8_t attr;
++	uint8_t type;
++	uint8_t result;
++	uint8_t count;
++	uint32_t payload[SCP_MAX_WORDS];
++};
++
++static uint32_t frame_header(const struct scp_frame *frame)
++{
++	return (uint32_t)frame->state |
++	       ((uint32_t)frame->attr << 8) |
++	       ((uint32_t)frame->type << 16) |
++	       ((uint32_t)frame->result << 24);
++}
++
++#ifdef SUNXI_VENDOR_SCP_HOST_TEST
++uint64_t sunxi_vendor_scp_test_time_now(void *cookie);
++#endif
++
++static uint64_t time_now(struct sunxi_vendor_scp *scp)
++{
++#ifdef SUNXI_VENDOR_SCP_HOST_TEST
++	return sunxi_vendor_scp_test_time_now(scp->io.cookie);
++#else
++	(void)scp;
++	return read_cntpct_el0();
++#endif
++}
++
++static bool deadline_elapsed(struct sunxi_vendor_scp *scp, uint64_t deadline)
++{
++	return (int64_t)(time_now(scp) - deadline) >= 0;
++}
++
++static int deadline_init(struct sunxi_vendor_scp *scp, uint64_t timeout_ticks,
++			 uint64_t *deadline)
++{
++	if (timeout_ticks > INT64_MAX) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++
++	*deadline = time_now(scp) + timeout_ticks;
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++static int wait_tx(struct sunxi_vendor_scp *scp, unsigned int channel,
++		   uint64_t deadline)
++{
++	while (!scp->io.tx_ready(scp->io.cookie, channel)) {
++		if (deadline_elapsed(scp, deadline)) {
++			return SUNXI_VENDOR_SCP_ETIMEOUT;
++		}
++	}
++	if (deadline_elapsed(scp, deadline)) {
++		return SUNXI_VENDOR_SCP_ETIMEOUT;
++	}
++
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++static int wait_rx(struct sunxi_vendor_scp *scp, unsigned int channel,
++		   uint64_t deadline)
++{
++	while (!scp->io.rx_ready(scp->io.cookie, channel)) {
++		if (deadline_elapsed(scp, deadline)) {
++			return SUNXI_VENDOR_SCP_ETIMEOUT;
++		}
++	}
++	if (deadline_elapsed(scp, deadline)) {
++		return SUNXI_VENDOR_SCP_ETIMEOUT;
++	}
++
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++static int write_word(struct sunxi_vendor_scp *scp, unsigned int channel,
++		      uint32_t value, uint64_t deadline,
++		      unsigned int *written)
++{
++	int ret;
++
++	ret = wait_tx(scp, channel, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		if (*written != 0U) {
++			scp->poisoned = true;
++		}
++		return ret;
++	}
++
++	scp->io.tx_write(scp->io.cookie, channel, value);
++	(*written)++;
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++static int send_frame(struct sunxi_vendor_scp *scp, unsigned int channel,
++		      const struct scp_frame *frame, uint64_t deadline)
++{
++	unsigned int i;
++	unsigned int written = 0U;
++	int ret;
++
++	if (frame->count > SCP_MAX_WORDS) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++
++	ret = write_word(scp, channel, frame_header(frame), deadline, &written);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	ret = write_word(scp, channel, frame->count, deadline, &written);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	for (i = 0U; i < frame->count; i++) {
++		ret = write_word(scp, channel, frame->payload[i], deadline,
++				 &written);
++		if (ret != SUNXI_VENDOR_SCP_OK) {
++			return ret;
++		}
++	}
++
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++static int receive_frame(struct sunxi_vendor_scp *scp, unsigned int channel,
++			 struct scp_frame *frame, uint64_t deadline)
++{
++	uint32_t header;
++	uint32_t count;
++	unsigned int i;
++	int ret;
++
++	ret = wait_rx(scp, channel, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	header = scp->io.rx_read(scp->io.cookie, channel);
++
++	ret = wait_rx(scp, channel, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++	count = scp->io.rx_read(scp->io.cookie, channel);
++	if (count > UINT8_MAX) {
++		scp->poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	frame->state = header & 0xffU;
++	frame->attr = (header >> 8) & 0xffU;
++	frame->type = (header >> 16) & 0xffU;
++	frame->result = (header >> 24) & 0xffU;
++	frame->count = count;
++
++	for (i = 0U; i < count; i++) {
++		ret = wait_rx(scp, channel, deadline);
++		if (ret != SUNXI_VENDOR_SCP_OK) {
++			scp->poisoned = true;
++			return ret;
++		}
++		if (i < SCP_MAX_WORDS) {
++			frame->payload[i] = scp->io.rx_read(scp->io.cookie,
++						       channel);
++		} else {
++			(void)scp->io.rx_read(scp->io.cookie, channel);
++		}
++	}
++
++	return count > SCP_MAX_WORDS ? SUNXI_VENDOR_SCP_EPROTO :
++		SUNXI_VENDOR_SCP_OK;
++}
++
++int sunxi_vendor_scp_init(struct sunxi_vendor_scp *scp,
++			  const struct sunxi_vendor_scp_io *io)
++{
++	if ((scp == NULL) || (io == NULL) || (io->tx_ready == NULL) ||
++	    (io->tx_write == NULL) || (io->rx_ready == NULL) ||
++	    (io->rx_read == NULL)) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++
++	memset(scp, 0, sizeof(*scp));
++	scp->io = *io;
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++int sunxi_vendor_scp_startup(struct sunxi_vendor_scp *scp,
++			     uint32_t nonce, uint64_t timeout_ticks)
++{
++	struct scp_frame frame;
++	struct scp_frame reply;
++	uint64_t deadline;
++	int ret;
++
++	if ((scp == NULL) || scp->poisoned) {
++		return scp == NULL ? SUNXI_VENDOR_SCP_EINVAL :
++			SUNXI_VENDOR_SCP_EPOISONED;
++	}
++
++	ret = deadline_init(scp, timeout_ticks, &deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	memset(&frame, 0, sizeof(frame));
++	ret = receive_frame(scp, SCP_CH_SYNC_RX, &frame, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	if ((frame.attr != SCP_ATTR_HARDSYNC) ||
++	    (frame.type != SCP_TYPE_STARTUP_NOTIFY) || (frame.result != 0U) ||
++	    (frame.count != SCP_STARTUP_WORDS)) {
++		scp->poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	scp->startup_state = frame.state;
++	memcpy(scp->startup_payload, frame.payload,
++	       sizeof(scp->startup_payload));
++	memset(&reply, 0, sizeof(reply));
++	reply.state = frame.state;
++	reply.attr = SCP_ATTR_HARDSYNC;
++	reply.type = SCP_TYPE_STARTUP_NOTIFY;
++	reply.count = 1U;
++	/* Stock uses zero for the disabled SCP image-base field. */
++	reply.payload[0] = 0U;
++	ret = send_frame(scp, SCP_CH_SYNC_FEEDBACK, &reply, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++
++	memset(&frame, 0, sizeof(frame));
++	frame.state = SCP_STATE_ALLOCATED;
++	frame.attr = SCP_ATTR_HARDSYNC;
++	frame.type = SCP_TYPE_LOOPBACK;
++	frame.count = 1U;
++	frame.payload[0] = nonce;
++	ret = send_frame(scp, SCP_CH_HARD_TX, &frame, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++
++	memset(&reply, 0, sizeof(reply));
++	ret = receive_frame(scp, SCP_CH_HARD_RX, &reply, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++	if ((reply.state != SCP_STATE_ALLOCATED) ||
++	    (reply.attr != SCP_ATTR_HARDSYNC) ||
++	    (reply.type != SCP_TYPE_LOOPBACK) || (reply.result != 0U) ||
++	    (reply.count != 1U) || (reply.payload[0] != nonce)) {
++		scp->poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	scp->ready = true;
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++uint32_t sunxi_vendor_scp_capabilities(const struct sunxi_vendor_scp *scp)
++{
++	if ((scp == NULL) || !scp->ready || scp->poisoned) {
++		return 0U;
++	}
++
++	return SUNXI_VENDOR_SCP_CAP_CPU_OP |
++	       SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY;
++}
++
++int sunxi_vendor_scp_cpu_op(struct sunxi_vendor_scp *scp, uint32_t mpidr,
++			    uint32_t resume_entry, uint32_t cpu_state,
++			    uint32_t cluster_state, uint32_t system_state,
++			    uint64_t timeout_ticks)
++{
++	struct scp_frame frame;
++	uint64_t deadline;
++	int ret;
++
++	if (scp == NULL) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++	if (scp->poisoned) {
++		return SUNXI_VENDOR_SCP_EPOISONED;
++	}
++	if (!scp->ready) {
++		return SUNXI_VENDOR_SCP_ENOTREADY;
++	}
++
++	memset(&frame, 0, sizeof(frame));
++	frame.state = SCP_STATE_ALLOCATED;
++	frame.type = SCP_TYPE_CPU_OP;
++	frame.count = 5U;
++	frame.payload[0] = mpidr;
++	frame.payload[1] = resume_entry;
++	frame.payload[2] = cpu_state;
++	frame.payload[3] = cluster_state;
++	frame.payload[4] = system_state;
++
++	ret = deadline_init(scp, timeout_ticks, &deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	return send_frame(scp, SCP_CH_ASYNC_TX, &frame, deadline);
++}
++
++int sunxi_vendor_scp_restore_notify(struct sunxi_vendor_scp *scp,
++				    uint32_t *wake_source,
++				    uint64_t timeout_ticks)
++{
++	struct scp_frame request;
++	struct scp_frame reply;
++	uint64_t deadline;
++	int ret;
++
++	if ((scp == NULL) || (wake_source == NULL)) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++	if (scp->poisoned) {
++		return SUNXI_VENDOR_SCP_EPOISONED;
++	}
++	if (!scp->ready) {
++		return SUNXI_VENDOR_SCP_ENOTREADY;
++	}
++
++	memset(&request, 0, sizeof(request));
++	request.state = SCP_STATE_ALLOCATED;
++	request.attr = SCP_ATTR_HARDSYNC;
++	request.type = SCP_TYPE_RESTORE_NOTIFY;
++
++	ret = deadline_init(scp, timeout_ticks, &deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	ret = send_frame(scp, SCP_CH_HARD_TX, &request, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++
++	memset(&reply, 0, sizeof(reply));
++	ret = receive_frame(scp, SCP_CH_HARD_RX, &reply, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++	if ((reply.state != SCP_STATE_ALLOCATED) ||
++	    (reply.attr != SCP_ATTR_HARDSYNC) ||
++	    (reply.type != SCP_TYPE_RESTORE_NOTIFY) ||
++	    (reply.result != 0U) || (reply.count != 1U)) {
++		scp->poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	*wake_source = reply.payload[0];
++	return SUNXI_VENDOR_SCP_OK;
++}
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+new file mode 100644
+index 0000000..0f0d753
+--- /dev/null
++++ b/plat/allwinner/common/tests/Makefile
+@@ -0,0 +1,25 @@
++# SPDX-License-Identifier: BSD-3-Clause
++
++CC ?= cc
++CFLAGS := -std=c11 -Wall -Wextra -Werror -pedantic -O2 \
++	-DSUNXI_VENDOR_SCP_HOST_TEST \
++	-DSUNXI_A133_VENDOR_SCP_MMIO_HOST_TEST
++ROOT := ../../../../..
++
++.PHONY: all clean test
++
++all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp
++
++test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
++	$(CC) $(CFLAGS) -I../include $^ -o $@
++
++test_sunxi_a133_vendor_scp: test_sunxi_a133_vendor_scp.c \
++		../sunxi_a133_vendor_scp.c ../sunxi_vendor_scp.c
++	$(CC) $(CFLAGS) -I../include $^ -o $@
++
++test: all
++	./test_sunxi_vendor_scp
++	./test_sunxi_a133_vendor_scp
++
++clean:
++	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+new file mode 100644
+index 0000000..18fd233
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+@@ -0,0 +1,261 @@
++// SPDX-License-Identifier: BSD-3-Clause
++
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_vendor_scp.h>
++
++#define TEST_BASE	0x03003000U
++#define CTRL0		0x0000U
++#define CTRL1		0x0004U
++#define FIFO_STAT(n)	(0x0100U + (4U * (n)))
++#define MSG_STAT(n)	(0x0140U + (4U * (n)))
++#define MSG_DATA(n)	(0x0180U + (4U * (n)))
++#define OWNER0		0x10011001U
++#define OWNER1		0x00000110U
++#define QUEUE_WORDS	64U
++
++struct queue {
++	uint32_t words[QUEUE_WORDS];
++	unsigned int read;
++	unsigned int write;
++};
++
++struct fake_mmio {
++	struct queue rx[6];
++	struct queue tx[6];
++	uint32_t owner0;
++	uint32_t owner1;
++	bool force_full[6];
++	unsigned int control_reads;
++	unsigned int control_writes;
++	unsigned int bad_accesses;
++	uint64_t now;
++};
++
++static struct fake_mmio fake;
++
++static void queue_push(struct queue *queue, uint32_t word)
++{
++	assert(queue->write < QUEUE_WORDS);
++	queue->words[queue->write++] = word;
++}
++
++static uint32_t queue_pop(struct queue *queue)
++{
++	assert(queue->read < queue->write);
++	return queue->words[queue->read++];
++}
++
++static unsigned int queue_count(const struct queue *queue)
++{
++	return queue->write - queue->read;
++}
++
++uint64_t sunxi_vendor_scp_test_time_now(void *cookie)
++{
++	(void)cookie;
++	return fake.now++;
++}
++
++uint32_t sunxi_a133_vendor_scp_test_mmio_read(uintptr_t address)
++{
++	uintptr_t offset;
++	unsigned int channel;
++	unsigned int count;
++
++	assert(address >= TEST_BASE);
++	offset = address - TEST_BASE;
++	if (offset == CTRL0) {
++		fake.control_reads++;
++		return fake.owner0;
++	}
++	if (offset == CTRL1) {
++		fake.control_reads++;
++		return fake.owner1;
++	}
++	if ((offset >= FIFO_STAT(0)) && (offset <= FIFO_STAT(5)) &&
++	    (((offset - FIFO_STAT(0)) & 3U) == 0U)) {
++		channel = (offset - FIFO_STAT(0)) / 4U;
++		return fake.force_full[channel] ? 1U : 0U;
++	}
++	if ((offset >= MSG_STAT(0)) && (offset <= MSG_STAT(5)) &&
++	    (((offset - MSG_STAT(0)) & 3U) == 0U)) {
++		channel = (offset - MSG_STAT(0)) / 4U;
++		count = queue_count(&fake.rx[channel]);
++		return count > 7U ? 7U : count;
++	}
++	if ((offset >= MSG_DATA(0)) && (offset <= MSG_DATA(5)) &&
++	    (((offset - MSG_DATA(0)) & 3U) == 0U)) {
++		channel = (offset - MSG_DATA(0)) / 4U;
++		return queue_pop(&fake.rx[channel]);
++	}
++
++	fake.bad_accesses++;
++	return 0U;
++}
++
++void sunxi_a133_vendor_scp_test_mmio_write(uintptr_t address, uint32_t value)
++{
++	uintptr_t offset;
++	unsigned int channel;
++
++	assert(address >= TEST_BASE);
++	offset = address - TEST_BASE;
++	if ((offset == CTRL0) || (offset == CTRL1)) {
++		fake.control_writes++;
++		return;
++	}
++	if ((offset >= MSG_DATA(0)) && (offset <= MSG_DATA(5)) &&
++	    (((offset - MSG_DATA(0)) & 3U) == 0U)) {
++		channel = (offset - MSG_DATA(0)) / 4U;
++		queue_push(&fake.tx[channel], value);
++		if ((channel == 4U) && (queue_count(&fake.tx[4]) == 3U)) {
++			queue_push(&fake.rx[5], fake.tx[4].words[0]);
++			queue_push(&fake.rx[5], fake.tx[4].words[1]);
++			queue_push(&fake.rx[5], fake.tx[4].words[2]);
++		}
++		return;
++	}
++
++	fake.bad_accesses++;
++}
++
++static void reset_fake(void)
++{
++	memset(&fake, 0, sizeof(fake));
++	fake.owner0 = OWNER0;
++	fake.owner1 = OWNER1;
++}
++
++static void add_startup(uint8_t state, unsigned int payload_words)
++{
++	unsigned int i;
++
++	queue_push(&fake.rx[2], (uint32_t)state | (2U << 8) | (0x90U << 16));
++	queue_push(&fake.rx[2], 13U);
++	for (i = 0U; i < payload_words; i++)
++		queue_push(&fake.rx[2], 0xabc00000U + i);
++}
++
++static void init_context(struct sunxi_a133_vendor_scp *scp)
++{
++	assert(sunxi_a133_vendor_scp_init(scp, TEST_BASE) ==
++	       SUNXI_VENDOR_SCP_OK);
++}
++
++static void test_exact_startup(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++	uint32_t nonce = 0x596c1f23U;
++	unsigned int i;
++
++	reset_fake();
++	add_startup(0x5aU, 13U);
++	init_context(&scp);
++	assert(sunxi_a133_vendor_scp_startup(&scp, nonce, 500U) ==
++	       SUNXI_VENDOR_SCP_OK);
++	assert(scp.owners_validated && !scp.ownership_fault);
++	assert(fake.control_reads == 2U);
++	assert(fake.control_writes == 0U);
++	assert(fake.bad_accesses == 0U);
++	assert(queue_count(&fake.rx[2]) == 0U);
++	assert(fake.tx[3].write == 3U);
++	assert(fake.tx[3].words[0] == 0x0090025aU);
++	assert(fake.tx[3].words[1] == 1U);
++	assert(fake.tx[3].words[2] == 0U);
++	assert(fake.tx[4].write == 3U);
++	assert(fake.tx[4].words[0] == 0x00610202U);
++	assert(fake.tx[4].words[1] == 1U);
++	assert(fake.tx[4].words[2] == nonce);
++	for (i = 0U; i < 13U; i++)
++		assert(scp.transport.startup_payload[i] == 0xabc00000U + i);
++	assert(sunxi_vendor_scp_capabilities(&scp.transport) ==
++	       (SUNXI_VENDOR_SCP_CAP_CPU_OP |
++		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY));
++}
++
++static void test_owner_mismatch_fails_before_data(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++
++	reset_fake();
++	fake.owner1 ^= 0x100U;
++	add_startup(2U, 13U);
++	init_context(&scp);
++	assert(sunxi_a133_vendor_scp_startup(&scp, 1U, 20U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.ownership_fault && scp.transport.poisoned);
++	assert(fake.rx[2].read == 0U);
++	assert(fake.tx[3].write == 0U);
++	assert(fake.tx[4].write == 0U);
++	assert(fake.control_writes == 0U);
++}
++
++static void test_no_startup_is_retryable_and_does_not_touch_owners(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++
++	reset_fake();
++	init_context(&scp);
++	assert(sunxi_a133_vendor_scp_startup(&scp, 1U, 10U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(!scp.transport.poisoned);
++	assert(fake.control_reads == 0U);
++	assert(fake.control_writes == 0U);
++}
++
++static void test_partial_startup_poisons(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++
++	reset_fake();
++	add_startup(2U, 1U);
++	init_context(&scp);
++	assert(sunxi_a133_vendor_scp_startup(&scp, 1U, 50U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.transport.poisoned);
++	assert(fake.control_writes == 0U);
++}
++
++static void test_feedback_backpressure_poisons(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++
++	reset_fake();
++	add_startup(2U, 13U);
++	fake.force_full[3] = true;
++	init_context(&scp);
++	assert(sunxi_a133_vendor_scp_startup(&scp, 1U, 100U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.transport.poisoned);
++	assert(fake.tx[3].write == 0U);
++	assert(fake.control_writes == 0U);
++}
++
++static void test_invalid_init(void)
++{
++	struct sunxi_a133_vendor_scp scp;
++
++	assert(sunxi_a133_vendor_scp_init(NULL, TEST_BASE) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(sunxi_a133_vendor_scp_init(&scp, 0U) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(sunxi_a133_vendor_scp_init(&scp, TEST_BASE + 1U) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++}
++
++int main(void)
++{
++	test_invalid_init();
++	test_exact_startup();
++	test_owner_mismatch_fails_before_data();
++	test_no_startup_is_retryable_and_does_not_touch_owners();
++	test_partial_startup_poisons();
++	test_feedback_backpressure_poisons();
++	puts("sunxi_a133_vendor_scp tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/common/tests/test_sunxi_vendor_scp.c b/plat/allwinner/common/tests/test_sunxi_vendor_scp.c
+new file mode 100644
+index 0000000..f1306fb
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_vendor_scp.c
+@@ -0,0 +1,304 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_vendor_scp.h>
++
++#define CHANNELS 6U
++#define WORDS 32U
++#define TEST_NONCE 0xa5a55a5aU
++
++struct fake_io {
++	uint32_t tx[CHANNELS][WORDS];
++	unsigned int tx_count[CHANNELS];
++	int tx_block_after[CHANNELS];
++	uint32_t rx[CHANNELS][WORDS];
++	unsigned int rx_count[CHANNELS];
++	unsigned int rx_pos[CHANNELS];
++	uint64_t now;
++};
++
++uint64_t sunxi_vendor_scp_test_time_now(void *cookie)
++{
++	struct fake_io *io = cookie;
++
++	return io->now++;
++}
++
++static bool fake_tx_ready(void *cookie, unsigned int channel)
++{
++	struct fake_io *io = cookie;
++
++	return io->tx_block_after[channel] < 0 ||
++	       io->tx_count[channel] < (unsigned int)io->tx_block_after[channel];
++}
++
++static void fake_tx_write(void *cookie, unsigned int channel, uint32_t value)
++{
++	struct fake_io *io = cookie;
++
++	assert(io->tx_count[channel] < WORDS);
++	io->tx[channel][io->tx_count[channel]++] = value;
++}
++
++static bool fake_rx_ready(void *cookie, unsigned int channel)
++{
++	struct fake_io *io = cookie;
++
++	return io->rx_pos[channel] < io->rx_count[channel];
++}
++
++static uint32_t fake_rx_read(void *cookie, unsigned int channel)
++{
++	struct fake_io *io = cookie;
++
++	assert(fake_rx_ready(cookie, channel));
++	return io->rx[channel][io->rx_pos[channel]++];
++}
++
++static void setup(struct sunxi_vendor_scp *scp, struct fake_io *fake)
++{
++	struct sunxi_vendor_scp_io io;
++	unsigned int i;
++
++	memset(fake, 0, sizeof(*fake));
++	for (i = 0U; i < CHANNELS; i++)
++		fake->tx_block_after[i] = -1;
++	io.cookie = fake;
++	io.tx_ready = fake_tx_ready;
++	io.tx_write = fake_tx_write;
++	io.rx_ready = fake_rx_ready;
++	io.rx_read = fake_rx_read;
++	assert(sunxi_vendor_scp_init(scp, &io) == SUNXI_VENDOR_SCP_OK);
++}
++
++static void queue_startup(struct fake_io *io, uint32_t header,
++			  unsigned int count)
++{
++	unsigned int i;
++
++	io->rx[2][0] = header;
++	io->rx[2][1] = count;
++	for (i = 0U; i < count; i++)
++		io->rx[2][i + 2U] = 0x53435000U + i;
++	io->rx_count[2] = count + 2U;
++}
++
++static void queue_valid_startup(struct fake_io *io, uint8_t opaque_state)
++{
++	queue_startup(io, 0x00900200U | opaque_state, 13U);
++}
++
++static void queue_loopback(struct fake_io *io, uint32_t header, uint32_t nonce)
++{
++	io->rx[5][0] = header;
++	io->rx[5][1] = 1U;
++	io->rx[5][2] = nonce;
++	io->rx_count[5] = 3U;
++}
++
++static void queue_valid_loopback(struct fake_io *io, uint32_t nonce)
++{
++	queue_loopback(io, 0x00610202U, nonce);
++}
++
++static void establish_transport(struct sunxi_vendor_scp *scp,
++				struct fake_io *io)
++{
++	queue_valid_startup(io, 0xa7U);
++	queue_valid_loopback(io, TEST_NONCE);
++	assert(sunxi_vendor_scp_startup(scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_OK);
++}
++
++static void test_exact_startup_loopback_and_cpu_op(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	const uint32_t expected_cpu[] = {
++		0x00220002U, 5U, 0x80000000U, 0x40000100U, 3U, 3U, 3U
++	};
++	unsigned int i;
++
++	setup(&scp, &io);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++	assert(sunxi_vendor_scp_cpu_op(&scp, 0U, 0U, 0U, 0U, 0U, 1U) ==
++	       SUNXI_VENDOR_SCP_ENOTREADY);
++	establish_transport(&scp, &io);
++
++	/* Opaque startup state is captured and echoed; payload is retained. */
++	assert(scp.startup_state == 0xa7U);
++	for (i = 0U; i < 13U; i++)
++		assert(scp.startup_payload[i] == 0x53435000U + i);
++	assert(io.tx_count[3] == 3U);
++	assert(io.tx[3][0] == 0x009002a7U);
++	assert(io.tx[3][1] == 1U);
++	assert(io.tx[3][2] == 0U);
++
++	assert(io.tx_count[4] == 3U);
++	assert(io.tx[4][0] == 0x00610202U);
++	assert(io.tx[4][1] == 1U);
++	assert(io.tx[4][2] == TEST_NONCE);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 3U);
++	assert(sunxi_vendor_scp_cpu_op(&scp, 0x80000000U, 0x40000100U,
++				       3U, 3U, 3U, 100U) == SUNXI_VENDOR_SCP_OK);
++	assert(io.tx_count[1] == 7U);
++	assert(memcmp(io.tx[1], expected_cpu, sizeof(expected_cpu)) == 0);
++}
++
++static void test_startup_requires_exact_q2_signature(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++
++	setup(&scp, &io);
++	/* The former async q0 shortcut must neither be consumed nor accepted. */
++	io.rx[0][0] = 0x00900002U;
++	io.rx[0][1] = 0U;
++	io.rx_count[0] = 2U;
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(io.rx_pos[0] == 0U);
++	assert(!scp.poisoned);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++
++	setup(&scp, &io);
++	queue_startup(&io, 0x01900244U, 13U); /* result must be zero */
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.poisoned);
++
++	setup(&scp, &io);
++	queue_startup(&io, 0x00900044U, 13U); /* attr must be hard-sync */
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.poisoned);
++
++	setup(&scp, &io);
++	queue_startup(&io, 0x00900244U, 12U); /* exact count is 13 */
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.poisoned);
++}
++
++static void test_partial_startup_and_feedback_are_fail_stop(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++
++	setup(&scp, &io);
++	io.rx[2][0] = 0x00900255U;
++	io.rx_count[2] = 1U;
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++
++	/* A single deadline covers the complete frame, even while data is ready. */
++	setup(&scp, &io);
++	queue_valid_startup(&io, 0x55U);
++	queue_valid_loopback(&io, TEST_NONCE);
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 5U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(io.rx_pos[2] > 0U && io.rx_pos[2] < io.rx_count[2]);
++	assert(scp.poisoned);
++
++	setup(&scp, &io);
++	queue_valid_startup(&io, 0x55U);
++	queue_valid_loopback(&io, TEST_NONCE);
++	io.tx_block_after[3] = 1;
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++}
++
++static void test_loopback_is_mandatory_and_exact(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++
++	setup(&scp, &io);
++	queue_valid_startup(&io, 0U);
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++
++	setup(&scp, &io);
++	queue_valid_startup(&io, 0U);
++	queue_valid_loopback(&io, TEST_NONCE ^ 1U);
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.poisoned);
++
++	setup(&scp, &io);
++	queue_valid_startup(&io, 0U);
++	queue_loopback(&io, 0x00610002U, TEST_NONCE); /* attr must be 2 */
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, 100U) ==
++	       SUNXI_VENDOR_SCP_EPROTO);
++	assert(scp.poisoned);
++}
++
++static void test_restore_notify(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint32_t wake = 0U;
++
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	io.rx[5][3] = 0x00110202U;
++	io.rx[5][4] = 1U;
++	io.rx[5][5] = 0x20U;
++	io.rx_count[5] = 6U;
++	assert(sunxi_vendor_scp_restore_notify(&scp, &wake, 100U) ==
++	       SUNXI_VENDOR_SCP_OK);
++	assert(io.tx_count[4] == 5U);
++	assert(io.tx[4][3] == 0x00110202U);
++	assert(io.tx[4][4] == 0U);
++	assert(wake == 0x20U);
++}
++
++static void test_partial_runtime_frame_is_fail_stop(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	io.tx_block_after[1] = 2;
++	assert(sunxi_vendor_scp_cpu_op(&scp, 0U, 1U, 3U, 3U, 3U, 3U) ==
++	       SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++	assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++	assert(sunxi_vendor_scp_cpu_op(&scp, 0U, 1U, 3U, 3U, 3U, 100U) ==
++	       SUNXI_VENDOR_SCP_EPOISONED);
++}
++
++static void test_timeout_range_is_bounded(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++
++	setup(&scp, &io);
++	assert(sunxi_vendor_scp_startup(&scp, TEST_NONCE, UINT64_MAX) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(!scp.poisoned);
++}
++
++int main(void)
++{
++	test_exact_startup_loopback_and_cpu_op();
++	test_startup_requires_exact_q2_signature();
++	test_partial_startup_and_feedback_are_fail_stop();
++	test_loopback_is_mandatory_and_exact();
++	test_restore_notify();
++	test_partial_runtime_frame_is_fail_stop();
++	test_timeout_range_is_bounded();
++	puts("sunxi vendor SCP transport tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+index 8af4d49..3040765 100644
+--- a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
++++ b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+@@ -23,6 +23,25 @@
+ #define SUNXI_DRAM_BASE			0x40000000
+ #define SUNXI_DRAM_VIRT_BASE		SUNXI_DRAM_BASE
+ 
++#ifdef SUNXI_A133_STANDBY_SCRATCH
++/* Stock reserves this DRAM window for the SCP standby context. */
++#define SUNXI_STANDBY_SCRATCH_BASE	0x40020000
++#define SUNXI_STANDBY_SCRATCH_SIZE	0x00000800
++
++/* Keep BL31 below the scratch while reserving the full firmware window. */
++#define SUNXI_BL31_LIMIT		SUNXI_STANDBY_SCRATCH_BASE
++#define SUNXI_BL31_RESERVED_LIMIT	(SUNXI_DRAM_BASE + 0x40000)
++
++#if (SUNXI_STANDBY_SCRATCH_BASE & 0xfff) != 0
++#error "A133 standby scratch must start on a BL31 page boundary"
++#endif
++#if (SUNXI_STANDBY_SCRATCH_BASE < SUNXI_DRAM_BASE) || \
++	(SUNXI_STANDBY_SCRATCH_BASE + SUNXI_STANDBY_SCRATCH_SIZE > \
++	 SUNXI_BL31_RESERVED_LIMIT)
++#error "A133 standby scratch lies outside the reserved firmware window"
++#endif
++#endif
++
+ /* Memory-mapped devices */
+ #define SUNXI_SYSCON_BASE		0x03000000
+ #define SUNXI_CCU_BASE			0x03001000
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index 8dfb450..5016057 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -10,9 +10,49 @@ SUNXI_BL31_IN_DRAM	:=	1
+ SUNXI_PSCI_USE_SCPI	:=	0
+ SUNXI_PSCI_USE_NATIVE	:=	1
+ 
++# Build only the dormant vendor SCP protocol core. This does not load or start
++# an SCP and does not advertise SYSTEM_SUSPEND.
++SUNXI_VENDOR_SCP_TRANSPORT	?=	0
++$(call assert_boolean,SUNXI_VENDOR_SCP_TRANSPORT)
++
++# Use the exact A133 old-mailbox queues to complete startup and nonce loopback.
++# The SCP owns the mailbox clock, reset and queue-control initialization.
++SUNXI_A133_VENDOR_SCP_STARTUP	?=	0
++$(call assert_boolean,SUNXI_A133_VENDOR_SCP_STARTUP)
++ifeq (${SUNXI_A133_VENDOR_SCP_STARTUP},1)
++ifneq (${SUNXI_VENDOR_SCP_TRANSPORT},1)
++$(error SUNXI_A133_VENDOR_SCP_STARTUP requires SUNXI_VENDOR_SCP_TRANSPORT=1)
++endif
++$(eval $(call add_define,SUNXI_A133_VENDOR_SCP_STARTUP))
++endif
++
++# Cap BL31 at the start of stock's standby scratch. The common DT fixup still
++# reserves the complete 0x40000000..0x40040000 firmware window from Linux.
++SUNXI_A133_STANDBY_SCRATCH	?=	0
++$(call assert_boolean,SUNXI_A133_STANDBY_SCRATCH)
++ifeq (${SUNXI_A133_STANDBY_SCRATCH},1)
++$(eval $(call add_define,SUNXI_A133_STANDBY_SCRATCH))
++endif
++
++# The scratch conflict is only one suspend gate. Keep SYSTEM_SUSPEND blocked
++# until the complete SCP loading, wake and DRAM restore paths are qualified.
++SUNXI_VENDOR_SCP_SYSTEM_SUSPEND	?=	0
++$(call assert_boolean,SUNXI_VENDOR_SCP_SYSTEM_SUSPEND)
++ifeq (${SUNXI_VENDOR_SCP_SYSTEM_SUSPEND},1)
++$(error A133 vendor SCP system suspend is not device-qualified)
++endif
++
+ # The differences between the platform are covered by the include files.
+ include plat/allwinner/common/allwinner-common.mk
+ include plat/allwinner/common/allwinner-common-a53.mk
+ 
+ BL31_SOURCES		+=	common/fdt_wrappers.c		\
+ 				drivers/mentor/i2c/mi2cv.c
++
++ifeq (${SUNXI_VENDOR_SCP_TRANSPORT},1)
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_vendor_scp.c
++endif
++
++ifeq (${SUNXI_A133_VENDOR_SCP_STARTUP},1)
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_vendor_scp.c
++endif

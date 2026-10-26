@@ -1,0 +1,681 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] sunxi: start the Brick A133 system-control firmware
+
+Load the exact external SCP and service tree after native DRAM training,
+export the trained Brick DRAM parameters in the stock ABI, reserve all
+firmware-owned memory, and release reset immediately before BL31.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+diff --git a/Makefile b/Makefile
+index 6303a0cca6a..4d55a446d03 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1707,6 +1707,7 @@ cmd_binman = $(srctree)/tools/binman/binman $(if $(BINMAN_DEBUG),-D) \
+ 		-a opensbi-path=${OPENSBI} \
+ 		-a default-dt=$(default_dt) \
+ 		-a scp-path=$(SCP) \
++		-a scp-fdt-path=$(SCP_FDT) \
+ 		-a rockchip-tpl-path=$(ROCKCHIP_TPL) \
+ 		-a spl-bss-pad=$(if $(CONFIG_SPL_SEPARATE_BSS),,1) \
+ 		-a tpl-bss-pad=$(if $(CONFIG_TPL_SEPARATE_BSS),,1) \
+diff --git a/arch/arm/dts/sunxi-u-boot.dtsi b/arch/arm/dts/sunxi-u-boot.dtsi
+index e1a9a7f5d4c..08ca27cb4ea 100644
+--- a/arch/arm/dts/sunxi-u-boot.dtsi
++++ b/arch/arm/dts/sunxi-u-boot.dtsi
+@@ -85,12 +85,34 @@
+ 					type = "firmware";
+ 					arch = "or1k";
+ 					compression = "none";
++#if CONFIG_SUNXI_A133_VENDOR_SCP
++					/* Validate in DRAM before the stock-sized copy. */
++					load = <0x48fe0000>;
++#else
+ 					load = <CONFIG_SUNXI_SCP_BASE>;
++#endif
+ 
+ 					scp {
+ 						filename = "scp.bin";
+ 						missing-msg = "scp-sunxi";
++#if !CONFIG_SUNXI_A133_VENDOR_SCP
+ 						optional;
++#endif
++					};
++				};
++#endif
++
++#if CONFIG_SUNXI_A133_VENDOR_SCP
++				scp-service-dtb {
++					description = "A133 SCP service device tree";
++					type = "firmware";
++					arch = ARCH;
++					compression = "none";
++					/* Validate in DRAM before the final copy. */
++					load = <0x48fb0000>;
++
++					scp-fdt {
++						missing-msg = "scp-fdt-a133";
+ 					};
+ 				};
+ #endif
+@@ -113,7 +135,11 @@
+ 					firmware = "uboot";
+ #endif
+ #if CONFIG_SUNXI_SCP_BASE
++#if CONFIG_SUNXI_A133_VENDOR_SCP
++					loadables = "scp", "scp-service-dtb", "uboot";
++#else
+ 					loadables = "scp", "uboot";
++#endif
+ #else
+ 					loadables = "uboot";
+ #endif
+diff --git a/arch/arm/include/asm/arch-sunxi/a133_vendor_scp.h b/arch/arm/include/asm/arch-sunxi/a133_vendor_scp.h
+new file mode 100644
+index 00000000000..9881aed2f9f
+--- /dev/null
++++ b/arch/arm/include/asm/arch-sunxi/a133_vendor_scp.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++#ifndef _SUNXI_A133_VENDOR_SCP_H
++#define _SUNXI_A133_VENDOR_SCP_H
++
++#include <linux/types.h>
++
++struct bd_info;
++
++#ifdef CONFIG_SUNXI_A133_VENDOR_SCP
++int sunxi_a133_vendor_scp_reserve_fdt(void *fdt, struct bd_info *bd);
++int sunxi_a133_vendor_scp_set_dram_handoff(const u32 *words, unsigned int count);
++#else
++static inline int sunxi_a133_vendor_scp_reserve_fdt(void *fdt,
++						    struct bd_info *bd)
++{
++	(void)fdt;
++	(void)bd;
++
++	return 0;
++}
++
++static inline int sunxi_a133_vendor_scp_set_dram_handoff(const u32 *words,
++							 unsigned int count)
++{
++	(void)words;
++	(void)count;
++
++	return 0;
++}
++#endif
++
++#endif
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 318bbd97275..a7f2d88b6fe 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -7,6 +7,20 @@ config TRIMUI_BRICK_SD_DIAGNOSTIC
+ 	  Restrict the diagnostic SPL to an SD boot source, and enable the
+ 	  Brick-specific PMIC rail table. This does not change power-key timing.
+ 
++config SUNXI_A133_VENDOR_SCP
++	bool "Experimental A133 vendor SCP boot boundary"
++	depends on TRIMUI_BRICK_SD_DIAGNOSTIC && SPL_LOAD_FIT && OF_BOARD_SETUP
++	select SPL_SHA256
++	help
++	  Load the exact Brick vendor SCP and its service device tree, export the
++	  parameters actually used by the native A133 DRAM initialization into the
++	  stock 32-word handoff, and release the SCP from reset. The feature is
++	  disabled by default and does not add a PSCI system-suspend implementation.
++
++	  SCP and SCP_FDT must name the two external build artifacts. The exporter
++	  accepts only the Brick's 672 MHz LPDDR3, 1 GiB, one-rank, 32-bit geometry;
++	  an unexpected native initialization result fails closed.
++
+ config IDENT_STRING
+ 	default " Allwinner Technology"
+ 
+@@ -285,6 +299,7 @@ config SUNXI_SCP_BASE
+ 	hex
+ 	default 0x00050000 if MACH_SUN50I || MACH_SUN50I_H5
+ 	default 0x00114000 if MACH_SUN50I_H6
++	default 0x00100000 if SUNXI_A133_VENDOR_SCP
+ 	default 0x0
+ 	help
+ 	  Address where SCP firmware is loaded, or zero if it is not used.
+diff --git a/arch/arm/mach-sunxi/Makefile b/arch/arm/mach-sunxi/Makefile
+index ff475d8fff5..912e7aec1f8 100644
+--- a/arch/arm/mach-sunxi/Makefile
++++ b/arch/arm/mach-sunxi/Makefile
+@@ -11,6 +11,7 @@ obj-y	+= cpu_info.o
+ obj-y	+= dram_helpers.o
+ obj-$(CONFIG_SUN6I_PRCM)	+= prcm.o
+ obj-$(CONFIG_SUNXI_SYSCON)	+= syscon.o
++obj-$(CONFIG_SUNXI_A133_VENDOR_SCP) += a133_vendor_scp.o
+ obj-$(CONFIG_AXP_PMIC_BUS)	+= pmic_bus.o
+ obj-$(CONFIG_MACH_SUNIV)	+= clock_sun6i.o
+ obj-$(CONFIG_MACH_SUN4I)	+= clock_sun4i.o
+diff --git a/arch/arm/mach-sunxi/a133_vendor_scp.c b/arch/arm/mach-sunxi/a133_vendor_scp.c
+new file mode 100644
+index 00000000000..e0a21b6d55e
+--- /dev/null
++++ b/arch/arm/mach-sunxi/a133_vendor_scp.c
+@@ -0,0 +1,279 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Fail-closed boot boundary for the exact A133 vendor SCP used by the Brick.
++ *
++ * Stock boot0 validates its package, holds the SCP in reset, loads 0x14000
++ * bytes at 0x00100000, copies a post-training 128-byte DRAM block to 0x00104008
++ * and releases reset. It separately loads the SCP service FDT at 0x48100000.
++ * Keep that hardware contract while allowing stronger size/hash/error checks.
++ */
++
++#include <cpu_func.h>
++#include <fdt_support.h>
++#include <hang.h>
++#include <mapmem.h>
++#include <spl.h>
++#include <u-boot/sha256.h>
++#include <asm/arch/a133_vendor_scp.h>
++#include <asm/arch/cpu.h>
++#include <asm/barriers.h>
++#include <asm/cache.h>
++#include <asm/io.h>
++#include <linux/errno.h>
++#include <linux/kernel.h>
++#include <linux/libfdt.h>
++#include <linux/string.h>
++
++#define A133_SCP_RUNTIME_BASE		0x00100000UL
++#define A133_SCP_LOAD_SIZE		0x00014000UL
++#define A133_SCP_FILE_SIZE		0x00014008UL
++#define A133_SCP_DRAM_OFFSET		0x00004008UL
++#define A133_SCP_DRAM_SIZE		0x00000080UL
++
++#define A133_SCP_FDT_BASE		0x48100000UL
++#define A133_SCP_FDT_SIZE		0x00025600UL
++#define A133_SCP_FDT_MAX_SIZE		0x00040000UL
++
++#define A133_SCP_FDT_STAGING_BASE	0x48fb0000UL
++#define A133_SCP_STAGING_BASE		0x48fe0000UL
++#define A133_TFA_BASE			0x40000000ULL
++#define A133_TFA_RESERVE_SIZE		0x00040000ULL
++#define A133_VENDOR_RESERVE_BASE	0x48000000ULL
++#define A133_VENDOR_RESERVE_SIZE	0x01000000ULL
++
++#define A133_SCP_RESET_REG		SUNXI_R_CPUCFG_BASE
++#define A133_SCP_RESET_BIT		BIT(0)
++#define A133_SCP_RESET_POLLS		1000
++
++#define A133_SCP_HAVE_IMAGE		BIT(0)
++#define A133_SCP_HAVE_FDT		BIT(1)
++#define A133_SCP_HAVE_DRAM		BIT(2)
++#define A133_SCP_HAVE_ALL		(A133_SCP_HAVE_IMAGE | \
++					 A133_SCP_HAVE_FDT | \
++					 A133_SCP_HAVE_DRAM)
++
++#if defined(CONFIG_XPL_BUILD)
++static const u8 a133_scp_sha256[SHA256_SUM_LEN] = {
++	0xb2, 0x5e, 0xac, 0xb0, 0x50, 0xbc, 0x5c, 0x19,
++	0x24, 0x5b, 0xb3, 0xb0, 0x32, 0xf8, 0x85, 0x1f,
++	0x83, 0xbc, 0xd4, 0xe6, 0x34, 0xbb, 0x71, 0x11,
++	0xae, 0xe8, 0x11, 0xbd, 0x5b, 0xa8, 0xbb, 0xe8,
++};
++
++static const u8 a133_scp_fdt_sha256[SHA256_SUM_LEN] = {
++	0x06, 0xc8, 0x20, 0xc4, 0xfe, 0x4d, 0xf1, 0xef,
++	0xb4, 0x54, 0xfb, 0x57, 0x94, 0xe7, 0xe8, 0xa1,
++	0x85, 0x95, 0xcb, 0x66, 0x0a, 0xd3, 0x37, 0x11,
++	0xc3, 0x65, 0xaf, 0x66, 0xa5, 0xcf, 0x7d, 0x8c,
++};
++
++static u8 a133_scp_loaded;
++static u32 a133_scp_dram_handoff[A133_SCP_DRAM_SIZE / sizeof(u32)];
++static bool a133_scp_dram_valid;
++
++static int a133_scp_set_reset(bool asserted);
++
++int sunxi_a133_vendor_scp_set_dram_handoff(const u32 *words,
++					   unsigned int count)
++{
++	if (!words || count != ARRAY_SIZE(a133_scp_dram_handoff))
++		return -EINVAL;
++
++	memcpy(a133_scp_dram_handoff, words, sizeof(a133_scp_dram_handoff));
++	a133_scp_dram_valid = true;
++
++	return 0;
++}
++
++static int a133_scp_check_image(const struct spl_image_info *image,
++				ulong address, ulong size,
++				const u8 expected[SHA256_SUM_LEN])
++{
++	u8 digest[SHA256_SUM_LEN];
++	const void *data;
++
++	if (image->load_addr != address || image->size != size)
++		return -EMSGSIZE;
++
++	data = map_sysmem(address, size);
++	sha256_csum_wd(data, size, digest, CHUNKSZ_SHA256);
++	unmap_sysmem(data);
++
++	if (memcmp(digest, expected, sizeof(digest)))
++		return -EBADMSG;
++
++	return 0;
++}
++
++int board_spl_fit_prepare_loadables(void)
++{
++	a133_scp_loaded = a133_scp_dram_valid ? A133_SCP_HAVE_DRAM : 0;
++
++	return a133_scp_set_reset(true);
++}
++
++int board_spl_fit_loadable_post_load(const char *name,
++				     const struct spl_image_info *image)
++{
++	int ret;
++
++	if (!strcmp(name, "scp")) {
++		ret = a133_scp_check_image(image, A133_SCP_STAGING_BASE,
++					   A133_SCP_FILE_SIZE, a133_scp_sha256);
++		if (!ret)
++			a133_scp_loaded |= A133_SCP_HAVE_IMAGE;
++		return ret;
++	}
++
++	if (!strcmp(name, "scp-service-dtb")) {
++		if (image->size > A133_SCP_FDT_MAX_SIZE)
++			return -E2BIG;
++		ret = a133_scp_check_image(image, A133_SCP_FDT_STAGING_BASE,
++					   A133_SCP_FDT_SIZE,
++					   a133_scp_fdt_sha256);
++		if (!ret)
++			a133_scp_loaded |= A133_SCP_HAVE_FDT;
++		return ret;
++	}
++
++	return 0;
++}
++
++static int a133_scp_set_reset(bool asserted)
++{
++	void __iomem *reg = (void __iomem *)A133_SCP_RESET_REG;
++	u32 expected = asserted ? 0 : A133_SCP_RESET_BIT;
++	u32 value;
++	int i;
++
++	value = readl(reg);
++	if (asserted)
++		value &= ~A133_SCP_RESET_BIT;
++	else
++		value |= A133_SCP_RESET_BIT;
++	writel(value, reg);
++
++	for (i = 0; i < A133_SCP_RESET_POLLS; i++) {
++		if ((readl(reg) & A133_SCP_RESET_BIT) == expected)
++			return 0;
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int a133_scp_start(void)
++{
++	void *dram_dst, *fdt_dst, *fdt_src, *scp_dst, *scp_src;
++	int ret;
++
++	BUILD_BUG_ON(A133_SCP_RUNTIME_BASE % ARCH_DMA_MINALIGN);
++	BUILD_BUG_ON(A133_SCP_LOAD_SIZE % ARCH_DMA_MINALIGN);
++	BUILD_BUG_ON(A133_SCP_FDT_BASE % ARCH_DMA_MINALIGN);
++	BUILD_BUG_ON(A133_SCP_FDT_SIZE % ARCH_DMA_MINALIGN);
++
++	if (a133_scp_loaded != A133_SCP_HAVE_ALL)
++		return -ENODATA;
++
++	ret = a133_scp_set_reset(true);
++	if (ret)
++		return ret;
++
++	scp_src = map_sysmem(A133_SCP_STAGING_BASE, A133_SCP_LOAD_SIZE);
++	scp_dst = map_sysmem(A133_SCP_RUNTIME_BASE, A133_SCP_LOAD_SIZE);
++	memcpy(scp_dst, scp_src, A133_SCP_LOAD_SIZE);
++	if (memcmp(scp_dst, scp_src, A133_SCP_LOAD_SIZE)) {
++		ret = -EIO;
++		goto out_unmap_scp;
++	}
++
++	fdt_src = map_sysmem(A133_SCP_FDT_STAGING_BASE, A133_SCP_FDT_SIZE);
++	fdt_dst = map_sysmem(A133_SCP_FDT_BASE, A133_SCP_FDT_SIZE);
++	memcpy(fdt_dst, fdt_src, A133_SCP_FDT_SIZE);
++	if (memcmp(fdt_dst, fdt_src, A133_SCP_FDT_SIZE)) {
++		ret = -EIO;
++		goto out_unmap_fdt;
++	}
++
++	dram_dst = map_sysmem(A133_SCP_RUNTIME_BASE + A133_SCP_DRAM_OFFSET,
++			      A133_SCP_DRAM_SIZE);
++	memcpy(dram_dst, a133_scp_dram_handoff, A133_SCP_DRAM_SIZE);
++	if (memcmp(dram_dst, a133_scp_dram_handoff, A133_SCP_DRAM_SIZE)) {
++		ret = -EIO;
++		goto out_unmap_dram;
++	}
++
++	flush_dcache_range(A133_SCP_RUNTIME_BASE,
++			   A133_SCP_RUNTIME_BASE + A133_SCP_LOAD_SIZE);
++	flush_dcache_range(A133_SCP_FDT_BASE,
++			   A133_SCP_FDT_BASE + A133_SCP_FDT_SIZE);
++	dsb();
++	ret = a133_scp_set_reset(false);
++
++out_unmap_dram:
++	unmap_sysmem(dram_dst);
++out_unmap_fdt:
++	unmap_sysmem(fdt_dst);
++	unmap_sysmem(fdt_src);
++out_unmap_scp:
++	unmap_sysmem(scp_dst);
++	unmap_sysmem(scp_src);
++
++	return ret;
++}
++
++void spl_board_prepare_for_boot(void)
++{
++	int ret = a133_scp_start();
++
++	if (ret) {
++		a133_scp_set_reset(true);
++		panic("A133 vendor SCP start failed: %d\n", ret);
++	}
++}
++#endif
++
++static int a133_scp_add_reservation(void *fdt, u64 start, u64 size)
++{
++	bool conflict = false;
++	u64 address, length;
++	int count, i;
++
++	count = fdt_num_mem_rsv(fdt);
++	if (count < 0)
++		return count;
++
++	for (i = 0; i < count; i++) {
++		if (fdt_get_mem_rsv(fdt, i, &address, &length))
++			return -FDT_ERR_BADOFFSET;
++		if (address <= start && length >= size &&
++		    start - address <= length - size)
++			return 0;
++		if ((address <= start && start - address < length) ||
++		    (start < address && address - start < size))
++			conflict = true;
++	}
++	if (conflict)
++		return -FDT_ERR_BADVALUE;
++
++	return fdt_add_mem_rsv(fdt, start, size);
++}
++
++int sunxi_a133_vendor_scp_reserve_fdt(void *fdt, struct bd_info *bd)
++{
++	int ret;
++
++	(void)bd;
++
++	ret = a133_scp_add_reservation(fdt, A133_SCP_RUNTIME_BASE,
++				       A133_SCP_LOAD_SIZE);
++	if (ret)
++		return ret;
++
++	ret = a133_scp_add_reservation(fdt, A133_TFA_BASE,
++				       A133_TFA_RESERVE_SIZE);
++	if (ret)
++		return ret;
++
++	return a133_scp_add_reservation(fdt, A133_VENDOR_RESERVE_BASE,
++					A133_VENDOR_RESERVE_SIZE);
++}
+diff --git a/arch/arm/mach-sunxi/dram_sun50i_a133.c b/arch/arm/mach-sunxi/dram_sun50i_a133.c
+index 261a342bb90..468490ae49f 100644
+--- a/arch/arm/mach-sunxi/dram_sun50i_a133.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_a133.c
+@@ -18,6 +18,7 @@
+ //#define DEBUG
+ 
+ #include <asm/arch/clock.h>
++#include <asm/arch/a133_vendor_scp.h>
+ #include <asm/arch/cpu.h>
+ #include <asm/arch/dram.h>
+ #include <asm/arch/prcm.h>
+@@ -25,6 +26,7 @@
+ #include <init.h>
+ #include <linux/bitops.h>
+ #include <linux/delay.h>
++#include <linux/errno.h>
+ #include <log.h>
+ 
+ #ifdef CONFIG_DRAM_SUNXI_PHY_ADDR_MAP_1
+@@ -1203,9 +1205,92 @@ static const struct dram_para para = {
+ 	.tpr14 = CONFIG_DRAM_SUNXI_TPR14,
+ };
+ 
++enum a133_stock_dram_word {
++	A133_DRAM_CLK,
++	A133_DRAM_TYPE,
++	A133_DRAM_DX_ODT,
++	A133_DRAM_DX_DRI,
++	A133_DRAM_CA_DRI,
++	A133_DRAM_PARA0,
++	A133_DRAM_PARA1,
++	A133_DRAM_PARA2,
++	A133_DRAM_MR0,
++	A133_DRAM_MR1,
++	A133_DRAM_MR2,
++	A133_DRAM_MR3,
++	A133_DRAM_MR4,
++	A133_DRAM_MR5,
++	A133_DRAM_MR6,
++	A133_DRAM_MR11,
++	A133_DRAM_MR12,
++	A133_DRAM_MR13,
++	A133_DRAM_MR14,
++	A133_DRAM_MR16,
++	A133_DRAM_MR17,
++	A133_DRAM_MR22,
++	A133_DRAM_TPR0,
++	A133_DRAM_TPR1,
++	A133_DRAM_TPR2,
++	A133_DRAM_TPR3,
++	A133_DRAM_TPR6,
++	A133_DRAM_TPR10,
++	A133_DRAM_TPR11,
++	A133_DRAM_TPR12,
++	A133_DRAM_TPR13,
++	A133_DRAM_TPR14,
++	A133_DRAM_WORDS,
++};
++
++static int a133_export_stock_dram_handoff(const struct dram_para *dram,
++					  const struct dram_config *config,
++					  unsigned long size)
++{
++	u32 words[A133_DRAM_WORDS] = {
++		[A133_DRAM_CLK] = dram->clk,
++		[A133_DRAM_TYPE] = dram->type,
++		[A133_DRAM_DX_ODT] = dram->dx_odt,
++		[A133_DRAM_DX_DRI] = dram->dx_dri,
++		[A133_DRAM_CA_DRI] = dram->ca_dri,
++		[A133_DRAM_PARA0] = dram->para0,
++		[A133_DRAM_MR1] = 0x83,
++		[A133_DRAM_MR2] = 0x1c,
++		[A133_DRAM_MR3] = 0x2,
++		[A133_DRAM_MR11] = dram->mr11,
++		[A133_DRAM_MR12] = dram->mr12,
++		[A133_DRAM_MR13] = dram->mr13,
++		[A133_DRAM_MR14] = dram->mr14,
++		[A133_DRAM_MR22] = dram->mr22,
++		[A133_DRAM_TPR0] = dram->tpr0,
++		[A133_DRAM_TPR1] = dram->tpr1,
++		[A133_DRAM_TPR2] = dram->tpr2,
++		[A133_DRAM_TPR3] = dram->tpr3,
++		[A133_DRAM_TPR6] = dram->tpr6,
++		[A133_DRAM_TPR10] = dram->tpr10,
++		[A133_DRAM_TPR11] = dram->tpr11,
++		[A133_DRAM_TPR12] = dram->tpr12,
++		[A133_DRAM_TPR13] = dram->tpr13,
++		[A133_DRAM_TPR14] = dram->tpr14,
++	};
++
++	/* The external SCP and service DT are exact Brick artifacts. */
++	if (dram->clk != 672 || dram->type != SUNXI_DRAM_TYPE_LPDDR3 ||
++	    size != 1024UL * 1024 * 1024 || config->cols != 10 ||
++	    config->rows != 15 || config->ranks != 0 || config->banks != 3 ||
++	    config->bankgrps != 0 || !config->bus_full_width)
++		return -EINVAL;
++
++	/* Stock A133 encoding: columns, rows, banks, then cached size in MiB. */
++	words[A133_DRAM_PARA1] = config->cols | config->rows << 4 |
++				 config->banks << 12;
++	words[A133_DRAM_PARA2] = (size >> 20) << 16;
++
++	return sunxi_a133_vendor_scp_set_dram_handoff(words, ARRAY_SIZE(words));
++}
++
+ unsigned long sunxi_dram_init(void)
+ {
+ 	struct dram_config config;
++	unsigned long size;
+ 
+ 	/* Writing to undocumented SYS_CFG area, according to user manual. */
+ 	setbits_le32(0x03000160, BIT(8));
+@@ -1222,5 +1307,10 @@ unsigned long sunxi_dram_init(void)
+ 	      1U << config.bankgrps, 1U << config.ranks,
+ 	      16U << config.bus_full_width);
+ 
+-	return calculate_dram_size(&config);
++	size = calculate_dram_size(&config);
++	if (IS_ENABLED(CONFIG_SUNXI_A133_VENDOR_SCP) &&
++	    a133_export_stock_dram_handoff(&para, &config, size))
++		return 0;
++
++	return size;
+ }
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index 73a4ee4ddee..91de4fd86d1 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -24,6 +24,7 @@
+ #include <generic-phy.h>
+ #include <phy-sun4i-usb.h>
+ #include <asm/arch/clock.h>
++#include <asm/arch/a133_vendor_scp.h>
+ #include <asm/arch/cpu.h>
+ #include <asm/arch/display.h>
+ #include <asm/arch/dram.h>
+@@ -1034,6 +1035,7 @@ record:
+ int ft_board_setup(void *blob, struct bd_info *bd)
+ {
+ 	int __maybe_unused r;
++	int ret;
+ 
+ 	/*
+ 	 * Call setup_environment and fdt_fixup_ethernet again
+@@ -1047,6 +1049,12 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+ 	board_dt_fixup(blob);
+ 	brick_pmic_snapshot(blob);
+ 
++	if (IS_ENABLED(CONFIG_SUNXI_A133_VENDOR_SCP)) {
++		ret = sunxi_a133_vendor_scp_reserve_fdt(blob, bd);
++		if (ret)
++			return ret;
++	}
++
+ #ifdef CONFIG_VIDEO_DT_SIMPLEFB
+ 	r = sunxi_simplefb_setup(blob);
+ 	if (r)
+diff --git a/common/spl/spl_fit.c b/common/spl/spl_fit.c
+index 64e5f95546f..db9405006b2 100644
+--- a/common/spl/spl_fit.c
++++ b/common/spl/spl_fit.c
+@@ -967,6 +967,12 @@ int spl_load_simple_fit(struct spl_image_info *spl_image,
+ 	}
+ 
+ 	firmware_node = node;
++	if (IS_ENABLED(CONFIG_SUNXI_A133_VENDOR_SCP)) {
++		ret = board_spl_fit_prepare_loadables();
++		if (ret)
++			return ret;
++	}
++
+ 	/* Now check if there are more images for us to load */
+ 	for (; ; index++) {
+ 		uint8_t os_type = IH_OS_INVALID;
+@@ -998,6 +1004,19 @@ int spl_load_simple_fit(struct spl_image_info *spl_image,
+ 		if (!spl_fit_image_get_os(ctx.fit, node, &os_type))
+ 			debug("Loadable is %s\n", genimg_get_os_name(os_type));
+ 
++		if (IS_ENABLED(CONFIG_SUNXI_A133_VENDOR_SCP)) {
++			const char *name;
++
++			ret = spl_fit_get_image_name(&ctx, FIT_LOADABLE_PROP,
++						     index, &name);
++			if (ret < 0)
++				return ret;
++
++			ret = board_spl_fit_loadable_post_load(name, &image_info);
++			if (ret)
++				return ret;
++		}
++
+ 		if (os_takes_devicetree(os_type)) {
+ 			spl_fit_append_fdt(&image_info, info, offset, &ctx);
+ 			spl_image->fdt_addr = image_info.fdt_addr;
+diff --git a/include/spl.h b/include/spl.h
+index 390d18fd9d5..59ba57d832f 100644
+--- a/include/spl.h
++++ b/include/spl.h
+@@ -1197,6 +1197,23 @@ struct legacy_img_hdr *spl_get_load_buffer(ssize_t offset, size_t size);
+  */
+ int board_spl_fit_append_fdt_skip(const char *name);
+ 
++/**
++ * board_spl_fit_prepare_loadables() - prepare hardware for FIT loadables
++ *
++ * Return: 0 to continue, or a negative error to stop loading
++ */
++int board_spl_fit_prepare_loadables(void);
++
++/**
++ * board_spl_fit_loadable_post_load() - inspect a loaded FIT loadable
++ *
++ * @name: FIT image name
++ * @image: loaded image address, size and metadata
++ * Return: 0 to continue, or a negative error to stop loading
++ */
++int board_spl_fit_loadable_post_load(const char *name,
++				     const struct spl_image_info *image);
++
+ void board_boot_order(u32 *spl_boot_list);
+ void spl_save_restore_data(void);
+ 
+diff --git a/tools/binman/etype/scp_fdt.py b/tools/binman/etype/scp_fdt.py
+new file mode 100644
+index 00000000000..764d25acea5
+--- /dev/null
++++ b/tools/binman/etype/scp_fdt.py
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: GPL-2.0+
++"""Binman entry for the vendor SCP service device tree."""
++
++from binman.etype.blob_named_by_arg import Entry_blob_named_by_arg
++
++
++class Entry_scp_fdt(Entry_blob_named_by_arg):
++    """External service FDT supplied with ``SCP_FDT``."""
++
++    def __init__(self, section, etype, node):
++        super().__init__(section, etype, node, 'scp-fdt')
++        self.external = True

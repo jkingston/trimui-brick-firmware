@@ -10,6 +10,8 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('uboot', type=Path)
 p.add_argument('bl31', type=Path)
 p.add_argument('fdtget', type=Path)
+p.add_argument('--scp', type=Path)
+p.add_argument('--scp-fdt', type=Path)
 a = p.parse_args()
 
 def require(condition, message):
@@ -18,6 +20,10 @@ def require(condition, message):
 
 config = dict(line.split('=', 1) for line in (a.uboot / '.config').read_text().splitlines()
               if line.startswith('CONFIG_') and '=' in line)
+scp_enabled = config.get('CONFIG_SUNXI_A133_VENDOR_SCP') == 'y'
+require((a.scp is not None) == scp_enabled and
+        (a.scp_fdt is not None) == scp_enabled,
+        'SCP artifacts do not match the selected startup profile')
 for name in ('ENV_IS_IN_FAT', 'ENV_IS_IN_MMC', 'SPL_MMC_WRITE', 'CMD_SAVEENV',
              'BOOTSTD', 'DISTRO_DEFAULTS'):
     require(config.get('CONFIG_' + name) != 'y', f'Unexpected storage writer: {name}')
@@ -68,6 +74,18 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
     require(binary_prop(f, '/images/atf', 'data') == a.bl31.read_bytes(), 'Embedded TF-A mismatch')
     require(prop(f, '/images/atf', 'load', 'x') == '40000000', 'Unexpected TF-A load address')
     require(prop(f, '/images/uboot', 'load', 'x') == '4a000000', 'Unexpected U-Boot load address')
+    if scp_enabled:
+        require(binary_prop(f, '/images/scp', 'data') == a.scp.read_bytes(),
+                'Embedded SCP mismatch')
+        require(binary_prop(f, '/images/scp-service-dtb', 'data') == a.scp_fdt.read_bytes(),
+                'Embedded SCP service DT mismatch')
+        require(prop(f, '/images/scp', 'load', 'x') == '48fe0000',
+                'Unexpected SCP staging address')
+        require(prop(f, '/images/scp-service-dtb', 'load', 'x') == '48fb0000',
+                'Unexpected SCP service DT staging address')
+        loadables = prop(f, '/configurations/config-1', 'loadables', 's').split()
+        require(loadables == ['scp', 'scp-service-dtb', 'uboot'],
+                'Unexpected SCP FIT load order')
     board = Path(directory) / 'board.dtb'
     board.write_bytes(binary_prop(f, '/images/fdt-1', 'data'))
     require(board.read_bytes() == (a.uboot / 'u-boot.dtb').read_bytes(), 'Embedded board DT mismatch')
