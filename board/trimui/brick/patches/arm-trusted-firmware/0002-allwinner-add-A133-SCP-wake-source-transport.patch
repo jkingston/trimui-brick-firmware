@@ -1,0 +1,385 @@
+From d54edf535a550e87d599b268231d8dbe3d65e2b2 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 09:46:30 +0000
+Subject: [PATCH] feat(allwinner): add A133 SCP wake-source transport
+
+Implement the exact hard-synchronous A133 vendor wake requests. Keep
+transport failures separate from the SCP result byte, validate the complete
+feedback frame, and poison ambiguous partial sessions.
+
+Publish wake-source capability only after the existing startup and loopback
+contract succeeds. This does not add a secure monitor service or advertise
+PSCI system suspend.
+
+Assisted-by: LLM
+---
+ .../common/include/sunxi_vendor_scp.h         |  13 ++
+ plat/allwinner/common/sunxi_vendor_scp.c      |  73 ++++++-
+ .../common/tests/test_sunxi_a133_vendor_scp.c |   3 +-
+ .../common/tests/test_sunxi_vendor_scp.c      | 195 +++++++++++++++++-
+ 4 files changed, 281 insertions(+), 3 deletions(-)
+
+diff --git a/plat/allwinner/common/include/sunxi_vendor_scp.h b/plat/allwinner/common/include/sunxi_vendor_scp.h
+index 75f5398..3cf7f96 100644
+--- a/plat/allwinner/common/include/sunxi_vendor_scp.h
++++ b/plat/allwinner/common/include/sunxi_vendor_scp.h
+@@ -12,6 +12,7 @@
+ 
+ #define SUNXI_VENDOR_SCP_CAP_CPU_OP		(1U << 0)
+ #define SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY	(1U << 1)
++#define SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE		(1U << 2)
+ 
+ enum sunxi_vendor_scp_status {
+ 	SUNXI_VENDOR_SCP_OK = 0,
+@@ -68,4 +69,16 @@ int sunxi_vendor_scp_restore_notify(struct sunxi_vendor_scp *scp,
+ 				    uint32_t *wake_source,
+ 				    uint64_t timeout_ticks);
+ 
++/*
++ * Send the stock hard-synchronous wake-source request. The transport status is
++ * returned separately from the SCP's result byte. The source is the exact
++ * 32-bit vendor value; interpretation belongs to the caller.
++ */
++int sunxi_vendor_scp_set_wake_source(struct sunxi_vendor_scp *scp,
++				     uint32_t wake_source, uint8_t *scp_result,
++				     uint64_t timeout_ticks);
++int sunxi_vendor_scp_clear_wake_source(struct sunxi_vendor_scp *scp,
++				       uint32_t wake_source, uint8_t *scp_result,
++				       uint64_t timeout_ticks);
++
+ #endif /* SUNXI_VENDOR_SCP_H */
+diff --git a/plat/allwinner/common/sunxi_vendor_scp.c b/plat/allwinner/common/sunxi_vendor_scp.c
+index 15a194b..de2c10b 100644
+--- a/plat/allwinner/common/sunxi_vendor_scp.c
++++ b/plat/allwinner/common/sunxi_vendor_scp.c
+@@ -22,6 +22,8 @@
+ #define SCP_ATTR_HARDSYNC	2U
+ #define SCP_TYPE_RESTORE_NOTIFY	0x11U
+ #define SCP_TYPE_CPU_OP		0x22U
++#define SCP_TYPE_CLEAR_WAKE_SOURCE	0x25U
++#define SCP_TYPE_SET_WAKE_SOURCE	0x26U
+ #define SCP_TYPE_LOOPBACK	0x61U
+ #define SCP_TYPE_STARTUP_NOTIFY	0x90U
+ #define SCP_MAX_WORDS		16U
+@@ -298,7 +300,76 @@ uint32_t sunxi_vendor_scp_capabilities(const struct sunxi_vendor_scp *scp)
+ 	}
+ 
+ 	return SUNXI_VENDOR_SCP_CAP_CPU_OP |
+-	       SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY;
++	       SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY |
++	       SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE;
++}
++
++static int wake_source_op(struct sunxi_vendor_scp *scp,
++			  uint32_t wake_source, uint8_t *scp_result,
++			  uint8_t type, uint64_t timeout_ticks)
++{
++	struct scp_frame request;
++	struct scp_frame reply;
++	uint64_t deadline;
++	int ret;
++
++	if ((scp == NULL) || (scp_result == NULL)) {
++		return SUNXI_VENDOR_SCP_EINVAL;
++	}
++	if (scp->poisoned) {
++		return SUNXI_VENDOR_SCP_EPOISONED;
++	}
++	if (!scp->ready) {
++		return SUNXI_VENDOR_SCP_ENOTREADY;
++	}
++
++	memset(&request, 0, sizeof(request));
++	request.state = SCP_STATE_ALLOCATED;
++	request.attr = SCP_ATTR_HARDSYNC;
++	request.type = type;
++	request.count = 1U;
++	request.payload[0] = wake_source;
++
++	ret = deadline_init(scp, timeout_ticks, &deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++	ret = send_frame(scp, SCP_CH_HARD_TX, &request, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		return ret;
++	}
++
++	memset(&reply, 0, sizeof(reply));
++	ret = receive_frame(scp, SCP_CH_HARD_RX, &reply, deadline);
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		scp->poisoned = true;
++		return ret;
++	}
++	if ((reply.state != SCP_STATE_ALLOCATED) ||
++	    (reply.attr != SCP_ATTR_HARDSYNC) || (reply.type != type) ||
++	    (reply.count != 1U) || (reply.payload[0] != wake_source)) {
++		scp->poisoned = true;
++		return SUNXI_VENDOR_SCP_EPROTO;
++	}
++
++	*scp_result = reply.result;
++	return SUNXI_VENDOR_SCP_OK;
++}
++
++int sunxi_vendor_scp_set_wake_source(struct sunxi_vendor_scp *scp,
++				     uint32_t wake_source, uint8_t *scp_result,
++				     uint64_t timeout_ticks)
++{
++	return wake_source_op(scp, wake_source, scp_result,
++			      SCP_TYPE_SET_WAKE_SOURCE, timeout_ticks);
++}
++
++int sunxi_vendor_scp_clear_wake_source(struct sunxi_vendor_scp *scp,
++				       uint32_t wake_source, uint8_t *scp_result,
++				       uint64_t timeout_ticks)
++{
++	return wake_source_op(scp, wake_source, scp_result,
++			      SCP_TYPE_CLEAR_WAKE_SOURCE, timeout_ticks);
+ }
+ 
+ int sunxi_vendor_scp_cpu_op(struct sunxi_vendor_scp *scp, uint32_t mpidr,
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+index 18fd233..7210574 100644
+--- a/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+@@ -175,7 +175,8 @@ static void test_exact_startup(void)
+ 		assert(scp.transport.startup_payload[i] == 0xabc00000U + i);
+ 	assert(sunxi_vendor_scp_capabilities(&scp.transport) ==
+ 	       (SUNXI_VENDOR_SCP_CAP_CPU_OP |
+-		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY));
++		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY |
++		SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE));
+ }
+ 
+ static void test_owner_mismatch_fails_before_data(void)
+diff --git a/plat/allwinner/common/tests/test_sunxi_vendor_scp.c b/plat/allwinner/common/tests/test_sunxi_vendor_scp.c
+index f1306fb..77bf9fd 100644
+--- a/plat/allwinner/common/tests/test_sunxi_vendor_scp.c
++++ b/plat/allwinner/common/tests/test_sunxi_vendor_scp.c
+@@ -106,6 +106,29 @@ static void queue_valid_loopback(struct fake_io *io, uint32_t nonce)
+ 	queue_loopback(io, 0x00610202U, nonce);
+ }
+ 
++static void queue_wake_reply(struct fake_io *io, uint8_t state, uint8_t attr,
++			     uint8_t type, uint8_t result, unsigned int count,
++			     uint32_t wake_source)
++{
++	unsigned int pos = io->rx_count[5];
++	unsigned int i;
++
++	assert(pos + count + 2U <= WORDS);
++	io->rx[5][pos++] = (uint32_t)state | ((uint32_t)attr << 8) |
++			     ((uint32_t)type << 16) |
++			     ((uint32_t)result << 24);
++	io->rx[5][pos++] = count;
++	for (i = 0U; i < count; i++)
++		io->rx[5][pos++] = wake_source + i;
++	io->rx_count[5] = pos;
++}
++
++static void queue_valid_wake_reply(struct fake_io *io, uint8_t type,
++				   uint8_t result, uint32_t wake_source)
++{
++	queue_wake_reply(io, 2U, 2U, type, result, 1U, wake_source);
++}
++
+ static void establish_transport(struct sunxi_vendor_scp *scp,
+ 				struct fake_io *io)
+ {
+@@ -143,7 +166,10 @@ static void test_exact_startup_loopback_and_cpu_op(void)
+ 	assert(io.tx[4][0] == 0x00610202U);
+ 	assert(io.tx[4][1] == 1U);
+ 	assert(io.tx[4][2] == TEST_NONCE);
+-	assert(sunxi_vendor_scp_capabilities(&scp) == 3U);
++	assert(sunxi_vendor_scp_capabilities(&scp) ==
++	       (SUNXI_VENDOR_SCP_CAP_CPU_OP |
++		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY |
++		SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE));
+ 	assert(sunxi_vendor_scp_cpu_op(&scp, 0x80000000U, 0x40000100U,
+ 				       3U, 3U, 3U, 100U) == SUNXI_VENDOR_SCP_OK);
+ 	assert(io.tx_count[1] == 7U);
+@@ -263,6 +289,168 @@ static void test_restore_notify(void)
+ 	assert(wake == 0x20U);
+ }
+ 
++static void test_exact_wake_set_and_clear(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint8_t result = 0xa5U;
++	const uint32_t wake_source = 0x67U;
++	const uint32_t expected_set[] = {
++		0x00260202U, 1U, wake_source
++	};
++	const uint32_t expected_clear[] = {
++		0x00250202U, 1U, wake_source
++	};
++
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	queue_valid_wake_reply(&io, 0x26U, 0U, wake_source);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       100U) == SUNXI_VENDOR_SCP_OK);
++	assert(result == 0U);
++	assert(io.tx_count[4] == 6U);
++	assert(memcmp(&io.tx[4][3], expected_set, sizeof(expected_set)) == 0);
++
++	queue_valid_wake_reply(&io, 0x25U, 0U, wake_source);
++	assert(sunxi_vendor_scp_clear_wake_source(&scp, wake_source, &result,
++						 100U) == SUNXI_VENDOR_SCP_OK);
++	assert(result == 0U);
++	assert(io.tx_count[4] == 9U);
++	assert(memcmp(&io.tx[4][6], expected_clear,
++		      sizeof(expected_clear)) == 0);
++}
++
++static void test_wake_result_is_separate_from_transport_status(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint8_t result = 0U;
++	const uint32_t wake_source = 0x3ffU;
++
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	queue_valid_wake_reply(&io, 0x26U, 0xffU, wake_source);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       100U) == SUNXI_VENDOR_SCP_OK);
++	assert(result == 0xffU);
++	assert(!scp.poisoned);
++	assert(sunxi_vendor_scp_capabilities(&scp) ==
++	       (SUNXI_VENDOR_SCP_CAP_CPU_OP |
++		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY |
++		SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE));
++}
++
++static void test_wake_requires_ready_context_and_valid_arguments(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint8_t result = 0x5aU;
++
++	setup(&scp, &io);
++	assert(sunxi_vendor_scp_set_wake_source(NULL, 1U, &result, 1U) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, 1U, NULL, 1U) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, 1U, &result, 1U) ==
++	       SUNXI_VENDOR_SCP_ENOTREADY);
++	assert(result == 0x5aU);
++
++	scp.poisoned = true;
++	assert(sunxi_vendor_scp_clear_wake_source(&scp, 1U, &result, 1U) ==
++	       SUNXI_VENDOR_SCP_EPOISONED);
++	assert(result == 0x5aU);
++}
++
++static void test_bad_wake_reply_poisons(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint8_t result;
++	unsigned int variant;
++	const uint32_t wake_source = 0x67U;
++
++	for (variant = 0U; variant < 5U; variant++) {
++		uint8_t state = variant == 0U ? 1U : 2U;
++		uint8_t attr = variant == 1U ? 0U : 2U;
++		uint8_t type = variant == 2U ? 0x25U : 0x26U;
++		unsigned int count = variant == 3U ? 2U : 1U;
++		uint32_t payload = variant == 4U ? wake_source + 1U :
++				   wake_source;
++
++		setup(&scp, &io);
++		establish_transport(&scp, &io);
++		queue_wake_reply(&io, state, attr, type, 0U, count, payload);
++		assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source,
++						       &result, 100U) ==
++		       SUNXI_VENDOR_SCP_EPROTO);
++		assert(scp.poisoned);
++		assert(sunxi_vendor_scp_capabilities(&scp) == 0U);
++	}
++}
++
++static void test_wake_deadline_and_partial_io(void)
++{
++	struct sunxi_vendor_scp scp;
++	struct fake_io io;
++	uint8_t result = 0x5aU;
++	const uint32_t wake_source = 0x67U;
++	unsigned int before;
++
++	/* No request word was written: retry remains safe. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	before = io.tx_count[4];
++	io.tx_block_after[4] = before;
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       5U) == SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(io.tx_count[4] == before);
++	assert(!scp.poisoned);
++	assert(result == 0x5aU);
++
++	/* A partial request leaves the shared queue ambiguous and poisons it. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	before = io.tx_count[4];
++	io.tx_block_after[4] = before + 1U;
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       100U) == SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(io.tx_count[4] == before + 1U);
++	assert(scp.poisoned);
++
++	/* A complete request without feedback may have changed SCP state. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       100U) == SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++
++	/* Ready queues cannot extend the one deadline across send and reply. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	queue_valid_wake_reply(&io, 0x26U, 0U, wake_source);
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       4U) == SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++
++	/* Consuming only the reply header is also fail-stop. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	io.rx[5][io.rx_count[5]++] = 0x00260202U;
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       100U) == SUNXI_VENDOR_SCP_ETIMEOUT);
++	assert(scp.poisoned);
++
++	/* Invalid deadline range is rejected before touching the queue. */
++	setup(&scp, &io);
++	establish_transport(&scp, &io);
++	before = io.tx_count[4];
++	assert(sunxi_vendor_scp_set_wake_source(&scp, wake_source, &result,
++					       UINT64_MAX) ==
++	       SUNXI_VENDOR_SCP_EINVAL);
++	assert(io.tx_count[4] == before);
++	assert(!scp.poisoned);
++}
++
+ static void test_partial_runtime_frame_is_fail_stop(void)
+ {
+ 	struct sunxi_vendor_scp scp;
+@@ -297,6 +485,11 @@ int main(void)
+ 	test_partial_startup_and_feedback_are_fail_stop();
+ 	test_loopback_is_mandatory_and_exact();
+ 	test_restore_notify();
++	test_exact_wake_set_and_clear();
++	test_wake_result_is_separate_from_transport_status();
++	test_wake_requires_ready_context_and_valid_arguments();
++	test_bad_wake_reply_poisons();
++	test_wake_deadline_and_partial_io();
+ 	test_partial_runtime_frame_is_fail_stop();
+ 	test_timeout_range_is_bounded();
+ 	puts("sunxi vendor SCP transport tests: PASS");
+-- 
+2.55.0
+
