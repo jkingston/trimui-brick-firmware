@@ -43,6 +43,12 @@ endif
 
 LINUX_DEPENDENCIES += host-python3 host-dtc
 
+define BRICK_SCP_KERNEL_PROFILE
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/scp_profile.py verify-kernel \
+		$(BR2_CONFIG) $(LINUX_DIR)
+endef
+LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_SCP_KERNEL_PROFILE
+
 # Validate the selected controller role before normalizing the boot payload name.
 define BRICK_USB_PROFILE
 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/usb_profile.py install \

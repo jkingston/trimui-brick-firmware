@@ -12,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import usb_profile
+import scp_profile
 import deploy
 
 
@@ -46,7 +47,8 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             usb_profile.profile(self.config)
 
-    def compile_dtb(self, role, gadget_status=None):
+    def compile_dtb(self, role, gadget_status=None, wake_profile='disabled',
+                    broken_timer=False):
         dtc, fdtget = shutil.which('dtc'), shutil.which('fdtget')
         if not dtc or not fdtget:
             self.skipTest('dtc and fdtget are required for real DT payload tests')
@@ -56,17 +58,38 @@ class ProfileTests(unittest.TestCase):
  compatible = "trimui,brick-usb-role-switch";
  peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
 };'''
+        wake = ''
+        if wake_profile == 'startup':
+            timer_parent = '&wakeupgen' if broken_timer else '&gic'
+            wake = f'''
+ interrupt-parent = <&wakeupgen>;
+ wakeupgen: interrupt-controller {{
+  compatible = "allwinner,sun50i-a133-native-wakeupgen";
+  interrupt-controller; interrupt-parent = <&gic>; #interrupt-cells = <3>;
+ }};
+ timer {{ compatible = "arm,armv8-timer"; interrupt-parent = <{timer_parent}>;
+  interrupts = <1 13 0xf08>, <1 14 0xf08>, <1 11 0xf08>, <1 10 0xf08>;
+ }};
+'''
         source = f'''/dts-v1/;
-/ {{ #address-cells = <1>; #size-cells = <1>;
+/ {{ #address-cells = <1>; #size-cells = <1>; {wake}
  {coordinator}
  soc {{ #address-cells = <1>; #size-cells = <1>; ranges;
+ gic: interrupt-controller@3021000 {{ reg = <0x3021000 0x1000>;
+  interrupt-controller; #interrupt-cells = <3>; interrupt-parent = <&gic>;
+  interrupts = <1 9 0xf04>;
+ }};
+ nmi: interrupt-controller@7010320 {{ reg = <0x7010320 0xc>;
+  interrupt-controller; #interrupt-cells = <2>; interrupt-parent = <&gic>;
+  interrupts = <0 103 4>;
+ }};
  musb: usb@5100000 {{ reg = <0x5100000 0x400>; status = "{gadget}"; dr_mode = "peripheral"; }};
  ehci: usb@5101000 {{ reg = <0x5101000 0x100>; status = "{host}"; dr_mode = "host"; }};
  ohci: usb@5101400 {{ reg = <0x5101400 0x100>; status = "{host}"; dr_mode = "host"; }};
  }};
 }};
 '''
-        output = self.root / (usb_profile.DTBS[role] + '.dtb')
+        output = self.root / (usb_profile.expected_dtb(role, wake_profile) + '.dtb')
         subprocess.run([dtc, '-I', 'dts', '-O', 'dtb', '-o', str(output)],
                        input=source, text=True, check=True, capture_output=True)
         return output, fdtget
@@ -86,8 +109,12 @@ class ProfileTests(unittest.TestCase):
                         str(self.root), str(self.config), 'test-revision'], check=True)
         manifest = json.loads((self.root / 'payload-manifest.json').read_text())
         self.assertEqual(manifest['usb_role'], 'host')
+        self.assertNotIn('scp_profile', manifest)
         self.assertEqual(manifest['files'][canonical.name]['sha256'], hashlib.sha256(expected).hexdigest())
         (self.root / 'manifest.json').write_text(json.dumps(manifest))
+        with (self.root / 'sdcard.img').open('wb') as card:
+            card.seek(deploy.BOOTLOADER_OFFSET)
+            card.write((self.root / deploy.BOOTLOADER).read_bytes())
         stage = self.root / 'stage'
         stage.mkdir()
         archive, _ = deploy.package(self.root, stage)
@@ -101,6 +128,27 @@ class ProfileTests(unittest.TestCase):
         before = source.read_bytes()
         usb_profile.install(self.root, self.config, fdtget)
         self.assertEqual(source.read_bytes(), before)
+
+    def test_startup_profile_selects_and_admits_native_wake_hierarchy(self):
+        scp_profile.configure(self.config, 'startup')
+        usb_profile.configure(self.config, 'peripheral', 'startup')
+        source, fdtget = self.compile_dtb('peripheral', wake_profile='startup')
+        expected = source.read_bytes()
+        usb_profile.install(self.root, self.config, fdtget)
+        canonical = self.root / (usb_profile.DTBS['peripheral'] + '.dtb')
+        self.assertEqual(canonical.read_bytes(), expected)
+
+    def test_startup_profile_rejects_non_gic_timer_parent(self):
+        scp_profile.configure(self.config, 'startup')
+        usb_profile.configure(self.config, 'peripheral', 'startup')
+        _, fdtget = self.compile_dtb('peripheral', wake_profile='startup',
+                                     broken_timer=True)
+        with self.assertRaisesRegex(ValueError, 'direct-GIC'):
+            usb_profile.install(self.root, self.config, fdtget)
+
+    def test_startup_profile_rejects_host_usb_role(self):
+        with self.assertRaisesRegex(ValueError, 'peripheral'):
+            usb_profile.configure(self.config, 'host', 'startup')
 
     def test_host_profile_rejects_enabled_gadget_before_overwriting_payload(self):
         usb_profile.configure(self.config, 'host')

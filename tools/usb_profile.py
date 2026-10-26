@@ -5,28 +5,48 @@ from pathlib import Path
 import re
 import subprocess
 
+from scp_profile import profile as scp_profile
+
 DTBS = {'peripheral': 'sun50i-a133-trimui-brick',
         'host': 'sun50i-a133-trimui-brick-host',
         'auto': 'sun50i-a133-trimui-brick-auto-usb'}
+NATIVE_WAKE_DTB = 'sun50i-a133-trimui-brick-native-wake'
 KEY = 'BR2_LINUX_KERNEL_INTREE_DTS_NAME'
 
 
+def expected_dtb(role, wake_profile):
+    if wake_profile == 'startup':
+        if role != 'peripheral':
+            raise ValueError('SCP startup requires the USB peripheral profile')
+        return NATIVE_WAKE_DTB
+    return DTBS[role]
+
+
+def selected_dtb(config):
+    matches = re.findall(r'^' + KEY + r'="allwinner/([^"]+)"$',
+                         config.read_text(), re.M)
+    allowed = set(DTBS.values()) | {NATIVE_WAKE_DTB}
+    if len(matches) != 1 or matches[0] not in allowed:
+        raise ValueError('Expected exactly one supported Brick kernel DTB')
+    return matches[0]
+
+
 def profile(config):
-    matches = re.findall(r'^' + KEY + r'="([^"]+)"$', config.read_text(), re.M)
+    selected = selected_dtb(config)
     for role, name in DTBS.items():
-        if matches == ['allwinner/' + name]:
+        if selected == name or (role == 'peripheral' and selected == NATIVE_WAKE_DTB):
             return role
     raise ValueError('Expected exactly one supported Brick USB profile DTB')
 
 
-def check_output(config, role):
-    if config.exists() and profile(config) != role:
-        raise ValueError('Use a fresh output directory when changing USB role')
+def check_output(config, role, wake_profile='disabled'):
+    if config.exists() and selected_dtb(config) != expected_dtb(role, wake_profile):
+        raise ValueError('Use a fresh output directory when changing USB or SCP profile')
 
 
-def configure(config, role):
+def configure(config, role, wake_profile='disabled'):
     text, count = re.subn(r'^' + KEY + r'="[^"]*"$',
-                         KEY + '="allwinner/' + DTBS[role] + '"',
+                         KEY + '="allwinner/' + expected_dtb(role, wake_profile) + '"',
                          config.read_text(), flags=re.M)
     if count != 1:
         raise ValueError('Missing or duplicate kernel DTB configuration')
@@ -35,7 +55,11 @@ def configure(config, role):
 
 def install(images, config, fdtget):
     role = profile(config)
-    source = images / (DTBS[role] + '.dtb')
+    wake_profile = scp_profile(config)
+    selected = selected_dtb(config)
+    if selected != expected_dtb(role, wake_profile):
+        raise ValueError('Kernel DTB does not match the combined USB and SCP profile')
+    source = images / (selected + '.dtb')
     if not source.is_file():
         raise FileNotFoundError(f'Selected kernel does not provide {source.name}')
 
@@ -45,6 +69,35 @@ def install(images, config, fdtget):
         if default is not None:
             args += ['-d', default]
         return subprocess.check_output(args + [str(source), path, prop], text=True).strip()
+
+    def properties(node):
+        path = node if node.startswith('/') else '/soc/' + node
+        return set(subprocess.check_output(
+            [str(fdtget), '-p', str(source), path], text=True).split())
+
+    if wake_profile == 'startup':
+        wakeupgen = '/interrupt-controller'
+        gic = '/soc/interrupt-controller@3021000'
+        direct = (gic, '/timer', '/soc/interrupt-controller@7010320')
+        gic_phandle = get(gic, 'phandle', 'x')
+        wake_phandle = get(wakeupgen, 'phandle', 'x')
+        if (get('/', 'interrupt-parent', 'x') != wake_phandle or
+                get(wakeupgen, 'compatible') !=
+                'allwinner,sun50i-a133-native-wakeupgen' or
+                'interrupt-controller' not in properties(wakeupgen) or
+                get(wakeupgen, '#interrupt-cells', 'u') != '3' or
+                get(wakeupgen, 'interrupt-parent', 'x') != gic_phandle):
+            raise ValueError('Native wake profile has an invalid root interrupt hierarchy')
+        if any(get(node, 'interrupt-parent', 'x') != gic_phandle
+               for node in direct):
+            raise ValueError('Native wake profile does not preserve direct-GIC exceptions')
+        if get(gic, 'interrupts', 'x').split()[0] != '1':
+            raise ValueError('GIC maintenance interrupt is not a PPI')
+        timer = get('/timer', 'interrupts', 'x').split()
+        if len(timer) != 12 or timer[0::3] != ['1'] * 4:
+            raise ValueError('Architectural timer interrupts are not direct GIC PPIs')
+        if get('/soc/interrupt-controller@7010320', 'interrupts', 'x').split()[0] != '0':
+            raise ValueError('NMI cascade input is not a GIC SPI')
 
     for node, enabled in [('usb@5100000', role == 'peripheral'),
                           ('usb@5101000', role == 'host'),
@@ -76,17 +129,19 @@ if __name__ == '__main__':
     guard = commands.add_parser('check-output')
     guard.add_argument('config', type=Path)
     guard.add_argument('role', choices=DTBS)
+    guard.add_argument('wake_profile', choices=('disabled', 'startup'), nargs='?', default='disabled')
     setup = commands.add_parser('configure')
     setup.add_argument('config', type=Path)
     setup.add_argument('role', choices=DTBS)
+    setup.add_argument('wake_profile', choices=('disabled', 'startup'), nargs='?', default='disabled')
     build = commands.add_parser('install')
     build.add_argument('images', type=Path)
     build.add_argument('config', type=Path)
     build.add_argument('fdtget', type=Path)
     args = parser.parse_args()
     if args.command == 'check-output':
-        check_output(args.config, args.role)
+        check_output(args.config, args.role, args.wake_profile)
     elif args.command == 'configure':
-        configure(args.config, args.role)
+        configure(args.config, args.role, args.wake_profile)
     else:
         install(args.images, args.config, args.fdtget)

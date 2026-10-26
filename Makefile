@@ -13,6 +13,11 @@ endif
 ifeq ($(filter $(SCP_PROFILE),disabled startup),)
 $(error SCP_PROFILE must be disabled or startup)
 endif
+ifeq ($(SCP_PROFILE),startup)
+ifneq ($(USB_ROLE),peripheral)
+$(error SCP_PROFILE=startup requires USB_ROLE=peripheral)
+endif
+endif
 ifeq ($(filter $(EMMC_RECOVERY),0 1),)
 $(error EMMC_RECOVERY must be 0 or 1)
 endif
@@ -35,14 +40,15 @@ $(BUILDROOT)/.brick-extracted: $(ARCHIVE)
 	touch $@
 
 configure: $(BUILDROOT)/.brick-extracted
-	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE)
+	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
-	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE)
+	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py configure $(O)/.config $(EMMC_RECOVERY)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
+	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 

@@ -154,6 +154,8 @@ def verify_boot_manifest(actual, expected):
         raise ProtocolError('Boot USB role does not match expected image')
     if actual.get('emmc_recovery', False) != expected.get('emmc_recovery', False):
         raise ProtocolError('Boot eMMC recovery profile does not match expected image')
+    if actual.get('scp_profile', 'disabled') != expected.get('scp_profile', 'disabled'):
+        raise ProtocolError('Boot SCP profile does not match expected image')
     for field in ('firmware', 'kernel', 'config_sha256'):
         if actual[field] != expected[field]:
             raise ProtocolError(f'Running rootfs has different {field} metadata')
