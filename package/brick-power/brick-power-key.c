@@ -14,6 +14,7 @@
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -22,6 +23,7 @@
 #include "battery-policy.h"
 #include "display-state.h"
 #include "idle-policy.h"
+#include "suspend-policy.h"
 struct key_state {
 	bool down, dropped, fired;
 	int64_t deadline;
@@ -128,6 +130,43 @@ static int request_poweroff(const char *reason)
 	return 1;
 }
 
+static int request_suspend(void)
+{
+	const struct timespec pause = { .tv_nsec = 100000000 };
+	int status;
+	bool signaled = false;
+	pid_t child = fork();
+
+	if (child < 0)
+		return -1;
+	if (!child) {
+		struct sigaction terminate = { .sa_handler = SIG_DFL };
+
+		sigemptyset(&terminate.sa_mask);
+		if (sigaction(SIGINT, &terminate, NULL) ||
+		    sigaction(SIGTERM, &terminate, NULL) ||
+		    sigaction(SIGHUP, &terminate, NULL) || stopped)
+			_exit(125);
+		execl("/usr/sbin/brick-suspend", "brick-suspend",
+		      "--disconnect-bluetooth", (char *)NULL);
+		_exit(127);
+	}
+	for (;;) {
+		pid_t waited = waitpid(child, &status, WNOHANG);
+
+		if (waited == child)
+			break;
+		if (waited < 0 && errno != EINTR)
+			return -1;
+		if (stopped && !signaled) {
+			(void)kill(child, SIGTERM);
+			signaled = true;
+		}
+		(void)nanosleep(&pause, NULL);
+	}
+	return WIFEXITED(status) && !WEXITSTATUS(status) ? 0 : -1;
+}
+
 static int discover(void)
 {
 	glob_t paths = { 0 };
@@ -166,6 +205,7 @@ int main(int argc, char **argv)
 	int fd = -1, inputs[3] = { -1, -1, -1 }, lock, result = 0;
 	struct idle_policy extra[2] = { 0 };
 	int dim_seconds = 300;
+	int suspend_seconds = 0;
 	uint32_t previous_generation = UINT32_MAX;
 	bool resume_resync = false;
 	int64_t gamepad_scan = 0, display_scan = 0, resume_upper = INT64_MAX;
@@ -175,6 +215,13 @@ int main(int argc, char **argv)
 		long value = strtol(setting, &end, 10);
 		if (errno || !*setting || *end || value < 0 || value > 86400) return 2;
 		dim_seconds = value;
+	}
+	setting = getenv("BRICK_SUSPEND_SECONDS");
+	if (setting) {
+		char *end; errno = 0;
+		long value = strtol(setting, &end, 10);
+		if (errno || !*setting || *end || value < 0 || value > 86400) return 2;
+		suspend_seconds = value;
 	}
 	int64_t scan = 0, battery_scan = monotonic_ms() + 1000;
 	(void)argv;
@@ -199,6 +246,7 @@ int main(int argc, char **argv)
 	idle = (struct idle_policy){ .pending = DISPLAY_QUERY, .last = monotonic_ms(),
 		.last_wake = monotonic_ms() };
 	while (!stopped) {
+		bool suspend_due = false;
 		int64_t now = monotonic_ms();
 		if (now < 0) { result = 1; break; }
 		if (now >= battery_scan) {
@@ -312,7 +360,27 @@ int main(int argc, char **argv)
 					operation = idle_timeout(&idle, now, dim_seconds, !access("/tmp/stay_awake", F_OK));
 				if (operation != DISPLAY_QUERY && !display_change_if(operation, 0, &display, &display))
 					idle_applied(&idle, display.mode, monotonic_ms());
+				else if (operation == DISPLAY_QUERY)
+					suspend_due = idle_suspend_due(&idle, now, suspend_seconds,
+						!access("/tmp/stay_alive", F_OK),
+						gamepad_drained && !key.dropped && !resume_resync);
 			}
+		}
+		if (suspend_due) {
+			int suspended = request_suspend();
+			now = monotonic_ms();
+			if (now < 0) { result = 1; break; }
+			idle_suspend_finished(&idle, now);
+			if (!suspended) {
+				resume_resync = true;
+				idle_power_sync(&idle, key.down, now);
+				idle.pending = DISPLAY_AWAKE;
+			}
+			if (!display_change(DISPLAY_AWAKE, 0, &display))
+				idle_applied(&idle, display.mode, now);
+			else
+				fprintf(stderr, "brick-power-key: display restoration failed after suspend attempt\n");
+			continue;
 		}
 		if (stopped || !drained || !hold_due(&key, now)) continue;
 		/* A release can arrive after the drain; confirm the current input state. */

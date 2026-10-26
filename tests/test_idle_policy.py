@@ -134,6 +134,20 @@ int main(int argc, char **argv)
     idle_activity(&p, 330000); assert(p.pending == DISPLAY_AWAKE);
     idle_applied(&p, DISPLAY_OFF, 360002);
     assert(idle_timeout(&p, 99999999, 300, false) == DISPLAY_QUERY); /* no autosuspend */
+    p.last = 360002; p.pending = DISPLAY_QUERY; p.gamepad_ready = true;
+    assert(!idle_suspend_due(&p, 370002, 10, false, true));
+    assert(idle_suspend_due(&p, 370003, 10, false, true));
+    assert(!idle_suspend_due(&p, 999999, 0, false, true)); /* disabled by default */
+    assert(!idle_suspend_due(&p, 999999, 10, true, true)); /* stay_alive */
+    assert(!idle_suspend_due(&p, 999999, 10, false, false));
+    p.power_held = true;
+    assert(!idle_suspend_due(&p, 999999, 10, false, true));
+    p.power_held = false; p.pending = DISPLAY_TOGGLE;
+    assert(!idle_suspend_due(&p, 999999, 10, false, true));
+    p.pending = DISPLAY_QUERY;
+    idle_suspend_finished(&p, 380000);
+    assert(p.pending == DISPLAY_AWAKE && p.last == 380000);
+    p.pending = DISPLAY_QUERY;
     idle_power_event(&p, 1, 370000); idle_power_event(&p, 0, 370010);
     assert(idle_resolve(&p, 370010, true) == DISPLAY_AWAKE); idle_applied(&p, DISPLAY_AWAKE, 370010);
     idle_power_event(&p, 1, 370020); idle_power_event(&p, 0, 370030);

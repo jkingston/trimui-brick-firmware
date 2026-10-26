@@ -13,6 +13,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "led-policy.h"
+
 #define ADAPTER "/org/bluez/hci0"
 #define TIMEOUT_MS 10000
 #define AUDIO_POLICY_LOCK "/run/brick-audio-policy.lock"
@@ -387,6 +389,7 @@ static bool supports_freeze(void)
 static int transaction(void)
 {
 	struct audio_state audio = { .lock = -1 };
+	struct led_policy_state leds = { .lock = -1 };
 	bool was_on, restored;
 	bool attempted_off = false;
 	int result = -1;
@@ -399,10 +402,14 @@ static int transaction(void)
 		fprintf(stderr, "Audio quiesce failed; suspend aborted.\n");
 		goto restore_audio;
 	}
+	if (led_policy_quiesce(&leds) < 0) {
+		fprintf(stderr, "Mood LED quiesce failed; suspend aborted.\n");
+		goto restore_leds;
+	}
 	if (get_power(&was_on))
-		goto restore_audio;
+		goto restore_leds;
 	if (interrupted())
-		goto restore_audio;
+		goto restore_leds;
 	if (was_on) {
 		/* A timeout can still mean the daemon applied our request. */
 		attempted_off = true;
@@ -426,10 +433,17 @@ restore:
 		 */
 		if (!same_owner() || set_power(true) || get_power(&restored) || !restored) {
 			fprintf(stderr, "Bluetooth power restoration failed; check bluetoothctl show\n");
-			return -1;
+			result = -1;
 		}
 	}
+	if (led_policy_restore(&leds)) {
+		fprintf(stderr, "Mood LED restoration failed; check LED class state.\n");
+		result = -1;
+	}
 	return result;
+restore_leds:
+	if (led_policy_restore(&leds))
+		fprintf(stderr, "Mood LED restoration failed; check LED class state.\n");
 restore_audio:
 	if (audio_restore(&audio))
 		fprintf(stderr, "Audio restoration failed; check codec mixer state.\n");
@@ -445,9 +459,10 @@ int main(int argc, char **argv)
 	if (argc != 2 || strcmp(argv[1], "--disconnect-bluetooth")) {
 		fprintf(stderr, "Usage: brick-suspend --disconnect-bluetooth\n"
 			"Mutes and restores the internal codec around s2idle.\n"
+			"Turns off and restores the 23 standard mood LED devices.\n"
 			"Disconnects Bluetooth for s2idle; restores adapter power, not connections.\n"
 			"Wi-Fi disconnects and reloads on resume.\n"
-			"Do not change audio or Bluetooth power concurrently.\n");
+			"Do not change audio, mood LEDs or Bluetooth power concurrently.\n");
 		return EXIT_FAILURE;
 	}
 	if (geteuid()) {
