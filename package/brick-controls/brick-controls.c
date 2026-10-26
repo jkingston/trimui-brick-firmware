@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 struct input { int fd; bool dropped; dev_t device; };
+#define AUDIO_POLICY_LOCK "/run/brick-audio-policy.lock"
 static volatile sig_atomic_t stopped;
 static void stop(int signal) { (void)signal; stopped = 1; }
 static double now(void)
@@ -101,6 +102,18 @@ static int apply_volume(snd_ctl_t *ctl, int volume, bool mute)
 	return control(ctl, "DAC Digital Playback Volume", gain, 2, true);
 }
 
+static int apply_volume_locked(int lock, snd_ctl_t *ctl, int volume, bool mute)
+{
+	int err;
+
+	if (flock(lock, LOCK_EX))
+		return -errno;
+	err = apply_volume(ctl, volume, mute);
+	if (flock(lock, LOCK_UN) && err >= 0)
+		err = -errno;
+	return err;
+}
+
 #include "settings.h"
 
 static int fn_state(int fd)
@@ -179,7 +192,7 @@ int main(int argc, char **argv)
 	struct input inputs[2] = { { .fd = -1 }, { .fd = -1 } };
 	bool mute = false, changed = false, dirty = false, fn_mute;
 	double scan = 0, save = 0;
-	int volume, err, lock;
+	int volume, err, lock, audio_lock;
 	long level, gains[2];
 	if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "--fn-mute"))) {
 		fprintf(stderr, "Usage: brick-controls STATEFILE [--fn-mute]\n");
@@ -190,13 +203,27 @@ int main(int argc, char **argv)
 	mute = changed = fn_mute;
 	lock = open("/run/brick-controls.lock", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
 	if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB)) return 1;
+	audio_lock = open(AUDIO_POLICY_LOCK,
+			  O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (audio_lock < 0) {
+		close(lock);
+		return 1;
+	}
 	signal(SIGINT, stop); signal(SIGTERM, stop);
+	if (flock(audio_lock, LOCK_EX)) {
+		close(audio_lock); close(lock);
+		return 1;
+	}
 	if ((err = open_codec(&ctl)) < 0 ||
 	    (err = control(ctl, "DAC Playback Volume", &level, 1, false)) < 0 ||
 	    (err = control(ctl, "DAC Digital Playback Volume", gains, 2, false)) < 0) {
 		fprintf(stderr, "brick-controls: codec unavailable: %s\n", snd_strerror(err));
 		if (ctl) snd_ctl_close(ctl);
-		close(lock);
+		close(audio_lock); close(lock);
+		return 1;
+	}
+	if (flock(audio_lock, LOCK_UN)) {
+		snd_ctl_close(ctl); close(audio_lock); close(lock);
 		return 1;
 	}
 	volume = read_state(argv[1], 20);
@@ -209,12 +236,12 @@ int main(int argc, char **argv)
 	}
 	else {
 		fprintf(stderr, "brick-controls: invalid saved settings; leaving them unchanged\n");
-		snd_ctl_close(ctl); close(lock); return 1;
+		snd_ctl_close(ctl); close(audio_lock); close(lock); return 1;
 	}
 	while (!stopped) {
 		if (now() >= scan) { discover(inputs, &mute, &changed, fn_mute); scan = now() + 1; }
 		if (changed) {
-			err = apply_volume(ctl, volume, mute);
+			err = apply_volume_locked(audio_lock, ctl, volume, mute);
 			if (err < 0) { fprintf(stderr, "brick-controls: mixer: %s\n", snd_strerror(err)); break; }
 			changed = false;
 		}
@@ -240,6 +267,6 @@ int main(int argc, char **argv)
 	}
 	if (dirty && save_state(argv[1], volume)) perror("brick-controls: final save");
 	for (int i = 0; i < 2; i++) if (inputs[i].fd >= 0) close(inputs[i].fd);
-	snd_ctl_close(ctl); close(lock);
+	snd_ctl_close(ctl); close(audio_lock); close(lock);
 	return stopped ? 0 : 1;
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define _GNU_SOURCE
+#include <alsa/asoundlib.h>
 #include <dbus/dbus.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,9 +15,175 @@
 
 #define ADAPTER "/org/bluez/hci0"
 #define TIMEOUT_MS 10000
+#define AUDIO_POLICY_LOCK "/run/brick-audio-policy.lock"
 static DBusConnection *bus;
 static char *owner;
 static sigset_t blocked;
+
+struct audio_state {
+	snd_ctl_t *ctl;
+	long gains[2];
+	bool speaker;
+	int lock;
+	bool restore;
+};
+
+static int audio_integer_control(snd_ctl_t *ctl, const char *name,
+				 long *values, unsigned int count, bool write)
+{
+	snd_ctl_elem_id_t *id;
+	snd_ctl_elem_info_t *info;
+	snd_ctl_elem_value_t *value;
+	int err;
+
+	snd_ctl_elem_id_alloca(&id);
+	snd_ctl_elem_info_alloca(&info);
+	snd_ctl_elem_value_alloca(&value);
+	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
+	snd_ctl_elem_id_set_name(id, name);
+	snd_ctl_elem_info_set_id(info, id);
+	if ((err = snd_ctl_elem_info(ctl, info)) < 0)
+		return err;
+	if (snd_ctl_elem_info_get_type(info) != SND_CTL_ELEM_TYPE_INTEGER ||
+	    snd_ctl_elem_info_get_count(info) != count)
+		return -EINVAL;
+	snd_ctl_elem_value_set_id(value, id);
+	if (!write) {
+		if ((err = snd_ctl_elem_read(ctl, value)) < 0)
+			return err;
+		for (unsigned int i = 0; i < count; i++)
+			values[i] = snd_ctl_elem_value_get_integer(value, i);
+		return 0;
+	}
+	for (unsigned int i = 0; i < count; i++) {
+		if (values[i] < snd_ctl_elem_info_get_min(info) ||
+		    values[i] > snd_ctl_elem_info_get_max(info))
+			return -ERANGE;
+		snd_ctl_elem_value_set_integer(value, i, values[i]);
+	}
+	return snd_ctl_elem_write(ctl, value);
+}
+
+static int audio_switch_control(snd_ctl_t *ctl, const char *name,
+				bool *enabled, bool write)
+{
+	snd_ctl_elem_id_t *id;
+	snd_ctl_elem_info_t *info;
+	snd_ctl_elem_value_t *value;
+	int err;
+
+	snd_ctl_elem_id_alloca(&id);
+	snd_ctl_elem_info_alloca(&info);
+	snd_ctl_elem_value_alloca(&value);
+	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
+	snd_ctl_elem_id_set_name(id, name);
+	snd_ctl_elem_info_set_id(info, id);
+	if ((err = snd_ctl_elem_info(ctl, info)) < 0)
+		return err;
+	if (snd_ctl_elem_info_get_type(info) != SND_CTL_ELEM_TYPE_BOOLEAN ||
+	    snd_ctl_elem_info_get_count(info) != 1)
+		return -EINVAL;
+	snd_ctl_elem_value_set_id(value, id);
+	if (!write) {
+		if ((err = snd_ctl_elem_read(ctl, value)) < 0)
+			return err;
+		*enabled = !!snd_ctl_elem_value_get_boolean(value, 0);
+		return 0;
+	}
+	snd_ctl_elem_value_set_boolean(value, 0, *enabled);
+	return snd_ctl_elem_write(ctl, value);
+}
+
+static int audio_open(snd_ctl_t **ctl)
+{
+	snd_ctl_card_info_t *info;
+	int card = -1, err;
+
+	snd_ctl_card_info_alloca(&info);
+	while ((err = snd_card_next(&card)) >= 0 && card >= 0) {
+		char name[32];
+
+		snprintf(name, sizeof(name), "hw:%d", card);
+		if (snd_ctl_open(ctl, name, 0) < 0)
+			continue;
+		if (snd_ctl_card_info(*ctl, info) >= 0 &&
+		    !strcmp(snd_ctl_card_info_get_name(info), "A133 Audio Codec"))
+			return 0;
+		snd_ctl_close(*ctl);
+		*ctl = NULL;
+	}
+	return err < 0 ? err : -ENODEV;
+}
+
+static int audio_quiesce(struct audio_state *state)
+{
+	long muted[2] = { 0, 0 }, readback[2];
+	bool off = false, speaker_readback;
+	int err;
+
+	state->lock = open(AUDIO_POLICY_LOCK,
+			   O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (state->lock < 0)
+		return -errno;
+	if (flock(state->lock, LOCK_EX | LOCK_NB))
+		return -errno;
+	if ((err = audio_open(&state->ctl)) < 0 ||
+	    (err = audio_integer_control(state->ctl,
+					 "DAC Digital Playback Volume",
+					 state->gains, 2, false)) < 0 ||
+	    (err = audio_switch_control(state->ctl, "Speaker Switch",
+					&state->speaker, false)) < 0)
+		return err;
+	/* A failed control write may still have reached the codec. */
+	state->restore = true;
+	if ((err = audio_integer_control(state->ctl,
+					 "DAC Digital Playback Volume",
+					 muted, 2, true)) < 0 ||
+	    (err = audio_integer_control(state->ctl,
+					 "DAC Digital Playback Volume",
+					 readback, 2, false)) < 0)
+		return err;
+	if (readback[0] || readback[1])
+		return -EIO;
+	if ((err = audio_switch_control(state->ctl, "Speaker Switch", &off, true)) < 0 ||
+	    (err = audio_switch_control(state->ctl, "Speaker Switch",
+					&speaker_readback, false)) < 0)
+		return err;
+	if (speaker_readback)
+		return -EIO;
+	return 0;
+}
+
+static int audio_restore(struct audio_state *state)
+{
+	long readback[2];
+	bool speaker_readback;
+	int result = 0;
+
+	if (state->restore) {
+		if (audio_integer_control(state->ctl, "DAC Digital Playback Volume",
+					  state->gains, 2, true) < 0 ||
+		    audio_integer_control(state->ctl, "DAC Digital Playback Volume",
+					  readback, 2, false) < 0 ||
+		    readback[0] != state->gains[0] || readback[1] != state->gains[1])
+			result = -1;
+		/* Restore the amplifier route only after the requested gain. */
+		if (audio_switch_control(state->ctl, "Speaker Switch",
+					 &state->speaker, true) < 0 ||
+		    audio_switch_control(state->ctl, "Speaker Switch",
+					 &speaker_readback, false) < 0 ||
+		    speaker_readback != state->speaker)
+			result = -1;
+	}
+	if (state->ctl)
+		snd_ctl_close(state->ctl);
+	if (state->lock >= 0) {
+		if (flock(state->lock, LOCK_UN))
+			result = -1;
+		close(state->lock);
+	}
+	return result;
+}
 
 static DBusMessage *call(DBusMessage *request)
 {
@@ -219,6 +386,7 @@ static bool supports_freeze(void)
 
 static int transaction(void)
 {
+	struct audio_state audio = { .lock = -1 };
 	bool was_on, restored;
 	bool attempted_off = false;
 	int result = -1;
@@ -227,10 +395,14 @@ static int transaction(void)
 		fprintf(stderr, "Kernel does not offer s2idle (freeze).\n");
 		return -1;
 	}
+	if (audio_quiesce(&audio) < 0) {
+		fprintf(stderr, "Audio quiesce failed; suspend aborted.\n");
+		goto restore_audio;
+	}
 	if (get_power(&was_on))
-		return -1;
+		goto restore_audio;
 	if (interrupted())
-		return -1;
+		goto restore_audio;
 	if (was_on) {
 		/* A timeout can still mean the daemon applied our request. */
 		attempted_off = true;
@@ -243,6 +415,10 @@ static int transaction(void)
 	if (result)
 		fprintf(stderr, "Suspend not completed: %s\n", strerror(errno));
 restore:
+	if (audio_restore(&audio)) {
+		fprintf(stderr, "Audio restoration failed; check codec mixer state.\n");
+		result = -1;
+	}
 	if (was_on && attempted_off) {
 		/* Never send restoration to a replacement daemon/controller owner.
 		 * Always issue Set, even if a timed-out off request still reports
@@ -254,6 +430,10 @@ restore:
 		}
 	}
 	return result;
+restore_audio:
+	if (audio_restore(&audio))
+		fprintf(stderr, "Audio restoration failed; check codec mixer state.\n");
+	return -1;
 }
 
 int main(int argc, char **argv)
@@ -264,9 +444,10 @@ int main(int argc, char **argv)
 	struct sigaction action = { .sa_handler = alarm_handler };
 	if (argc != 2 || strcmp(argv[1], "--disconnect-bluetooth")) {
 		fprintf(stderr, "Usage: brick-suspend --disconnect-bluetooth\n"
+			"Mutes and restores the internal codec around s2idle.\n"
 			"Disconnects Bluetooth for s2idle; restores adapter power, not connections.\n"
 			"Wi-Fi disconnects and reloads on resume.\n"
-			"Do not change Bluetooth power concurrently.\n");
+			"Do not change audio or Bluetooth power concurrently.\n");
 		return EXIT_FAILURE;
 	}
 	if (geteuid()) {

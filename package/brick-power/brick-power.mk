@@ -2,13 +2,14 @@ BRICK_POWER_VERSION = 1
 BRICK_POWER_SITE = $(BR2_EXTERNAL_BRICK_PATH)/package/brick-power
 BRICK_POWER_SITE_METHOD = local
 BRICK_POWER_LICENSE = GPL-2.0-only
-BRICK_POWER_DEPENDENCIES = dbus host-pkgconf
+BRICK_POWER_DEPENDENCIES = alsa-lib dbus host-pkgconf
 
 define BRICK_POWER_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
 		$(@D)/brick-power-key.c -o $(@D)/brick-power-key
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
-		$(@D)/brick-suspend.c `$(PKG_CONFIG_HOST_BINARY) --cflags --libs dbus-1` \
+		$(@D)/brick-suspend.c \
+		`$(PKG_CONFIG_HOST_BINARY) --cflags --libs alsa dbus-1` \
 		-o $(@D)/brick-suspend
 endef
 

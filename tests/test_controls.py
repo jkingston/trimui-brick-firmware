@@ -76,7 +76,8 @@ int main(void)
     def test_mute_failure_order_and_persistent_state(self):
         source = (ROOT / 'package/brick-controls/brick-controls.c').read_text()
         functions = source[source.index('static int attenuation('):source.index('static int control(')]
-        functions += source[source.index('static int apply_volume('):source.index('static int fn_state(')]
+        functions += source[source.index('static int apply_volume('):source.index('static int apply_volume_locked(')]
+        functions += '#include "settings.h"\n'
         harness = r'''
 #define _GNU_SOURCE
 #include <assert.h>
@@ -154,3 +155,54 @@ int main(void)
             subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
                             str(directory / 'test.c'), '-o', str(directory / 'test')], check=True)
             subprocess.run([str(directory / 'test')], cwd=directory, check=True)
+
+    def test_suspend_audio_lock_serializes_control_updates(self):
+        source = (ROOT / 'package/brick-controls/brick-controls.c').read_text()
+        function = source[source.index('static int apply_volume_locked('):
+                          source.index('#include "settings.h"')]
+        harness = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <sys/file.h>
+typedef void snd_ctl_t;
+static int scenario, locks, unlocks, applies;
+static int fake_flock(int fd, int operation)
+{
+    assert(fd == 17);
+    if (operation & LOCK_UN) { unlocks++; return scenario == 2 ? -1 : 0; }
+    locks++;
+    return scenario == 1 ? -1 : 0;
+}
+static int apply_volume(snd_ctl_t *ctl, int volume, bool mute)
+{
+    (void)ctl;
+    assert(volume == 8 && mute);
+    applies++;
+    return scenario == 3 ? -EIO : 0;
+}
+#define flock fake_flock
+'''
+        harness += function
+        harness += r'''
+#undef flock
+int main(void)
+{
+    for (scenario = 0; scenario < 4; scenario++) {
+        locks = unlocks = applies = 0;
+        errno = EBUSY;
+        int result = apply_volume_locked(17, NULL, 8, true);
+        assert((result == 0) == (scenario == 0));
+        assert(locks == 1);
+        assert(applies == (scenario != 1));
+        assert(unlocks == (scenario != 1));
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / 'test.c').write_text(harness)
+            subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
+                            str(directory / 'test.c'), '-o', str(directory / 'test')], check=True)
+            subprocess.run([str(directory / 'test')], check=True)
