@@ -1,0 +1,915 @@
+From 382ecdbe86d0ae24f07bae98fa79257349d9e04f Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 10:26:53 +0000
+Subject: [PATCH 4/5] feat(allwinner): add dormant A133 suspend orchestrator
+
+Add the stock-matched CPU_OP 3/3/3 and RESTORE_NOTIFY transaction as a
+serialized, default-off state machine. Keep PSCI SYSTEM_SUSPEND
+disconnected and fail closed across ambiguous transport outcomes.
+
+Assisted-by: LLM
+---
+ .../common/include/sunxi_a133_suspend.h       |  78 ++++
+ .../include/sunxi_a133_vendor_scp_runtime.h   |  15 +
+ plat/allwinner/common/sunxi_a133_suspend.c    | 206 ++++++++++
+ .../common/sunxi_a133_vendor_scp_runtime.c    | 104 +++++
+ plat/allwinner/common/tests/Makefile          |   9 +-
+ .../common/tests/test_sunxi_a133_suspend.c    | 364 ++++++++++++++++++
+ plat/allwinner/sun50i_a133/platform.mk        |  15 +
+ 7 files changed, 789 insertions(+), 2 deletions(-)
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_suspend.h
+ create mode 100644 plat/allwinner/common/sunxi_a133_suspend.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_suspend.c
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_suspend.h b/plat/allwinner/common/include/sunxi_a133_suspend.h
+new file mode 100644
+index 0000000..2f75158
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_suspend.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_SUSPEND_H
++#define SUNXI_A133_SUSPEND_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifndef SUNXI_A133_SUSPEND_HOST_TEST
++#include <lib/psci/psci.h>
++#else
++#define PLAT_MAX_PWR_LVL	2U
++#define PLAT_MAX_OFF_STATE	3U
++struct psci_power_state {
++	uint8_t pwr_domain_state[PLAT_MAX_PWR_LVL + 1U];
++};
++#define psci_power_state_t struct psci_power_state
++#endif
++
++#include <sunxi_vendor_scp.h>
++
++#define SUNXI_A133_SUSPEND_REQUIRED_CAPS	\
++	(SUNXI_VENDOR_SCP_CAP_CPU_OP | SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY | \
++	 SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE)
++
++enum sunxi_a133_suspend_status {
++	SUNXI_A133_SUSPEND_OK = 0,
++	SUNXI_A133_SUSPEND_EINVAL = -1,
++	SUNXI_A133_SUSPEND_ENOTREADY = -2,
++	SUNXI_A133_SUSPEND_ESTATE = -3,
++	SUNXI_A133_SUSPEND_ERETRY = -4,
++	SUNXI_A133_SUSPEND_EFAILSTOP = -5,
++};
++
++enum sunxi_a133_suspend_phase {
++	SUNXI_A133_SUSPEND_IDLE,
++	SUNXI_A133_SUSPEND_PREPARED,
++	SUNXI_A133_SUSPEND_COMMITTED,
++	SUNXI_A133_SUSPEND_FAILED,
++};
++
++struct sunxi_a133_suspend_backend {
++	void *cookie;
++	uint32_t (*capabilities)(void *cookie);
++	int (*cpu_op)(void *cookie, uint32_t mpidr, uint32_t resume_entry,
++		      uint32_t cpu_state, uint32_t cluster_state,
++		      uint32_t system_state);
++	int (*restore_notify)(void *cookie, uint32_t *wake_source);
++};
++
++struct sunxi_a133_suspend {
++	struct sunxi_a133_suspend_backend backend;
++	enum sunxi_a133_suspend_phase phase;
++	uint32_t mpidr;
++	uint32_t resume_entry;
++	uint32_t wake_source;
++	int last_transport_status;
++	bool wake_source_valid;
++};
++
++/* The caller must serialize all operations on one context. */
++int sunxi_a133_suspend_init(
++	struct sunxi_a133_suspend *suspend,
++	const struct sunxi_a133_suspend_backend *backend);
++void sunxi_a133_suspend_system_state(psci_power_state_t *target_state);
++bool sunxi_a133_suspend_state_is_valid(
++	const psci_power_state_t *target_state);
++int sunxi_a133_suspend_prepare(
++	struct sunxi_a133_suspend *suspend,
++	const psci_power_state_t *target_state, uint64_t mpidr,
++	uint64_t resume_entry);
++int sunxi_a133_suspend_abort(struct sunxi_a133_suspend *suspend);
++int sunxi_a133_suspend_commit(struct sunxi_a133_suspend *suspend);
++int sunxi_a133_suspend_finish(struct sunxi_a133_suspend *suspend,
++			     uint32_t *wake_source);
++
++#endif /* SUNXI_A133_SUSPEND_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+index f1099ec..aaffda9 100644
+--- a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
++++ b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+@@ -6,6 +6,10 @@
+ 
+ #include <stdint.h>
+ 
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++#include <sunxi_a133_suspend.h>
++#endif
++
+ void sunxi_a133_vendor_scp_runtime_setup(void);
+ uint32_t sunxi_a133_vendor_scp_runtime_capabilities(void);
+ int sunxi_a133_vendor_scp_runtime_set_wake_source(uint32_t wake_source,
+@@ -13,4 +17,15 @@ int sunxi_a133_vendor_scp_runtime_set_wake_source(uint32_t wake_source,
+ int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
+ 						   uint8_t *scp_result);
+ 
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++void sunxi_a133_vendor_scp_runtime_suspend_state(
++	psci_power_state_t *target_state);
++int sunxi_a133_vendor_scp_runtime_suspend_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr,
++	uint64_t resume_entry);
++int sunxi_a133_vendor_scp_runtime_suspend_abort(void);
++int sunxi_a133_vendor_scp_runtime_suspend_commit(void);
++int sunxi_a133_vendor_scp_runtime_suspend_finish(uint32_t *wake_source);
++#endif
++
+ #endif /* SUNXI_A133_VENDOR_SCP_RUNTIME_H */
+diff --git a/plat/allwinner/common/sunxi_a133_suspend.c b/plat/allwinner/common/sunxi_a133_suspend.c
+new file mode 100644
+index 0000000..8c5c5e6
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_suspend.c
+@@ -0,0 +1,206 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include <sunxi_a133_suspend.h>
++
++#define STOCK_SUSPEND_LOCAL_STATE	3U
++
++#ifndef SUNXI_A133_SUSPEND_HOST_TEST
++CASSERT(PLAT_MAX_PWR_LVL == 2U, assert_a133_has_three_power_levels);
++CASSERT(PLAT_MAX_OFF_STATE == STOCK_SUSPEND_LOCAL_STATE,
++	assert_a133_off_state_matches_stock);
++#endif
++
++static bool backend_complete(
++	const struct sunxi_a133_suspend_backend *backend)
++{
++	return (backend != NULL) && (backend->capabilities != NULL) &&
++	       (backend->cpu_op != NULL) &&
++	       (backend->restore_notify != NULL);
++}
++
++static bool backend_ready(struct sunxi_a133_suspend *suspend)
++{
++	uint32_t capabilities;
++
++	capabilities = suspend->backend.capabilities(
++		suspend->backend.cookie);
++	return (capabilities & SUNXI_A133_SUSPEND_REQUIRED_CAPS) ==
++	       SUNXI_A133_SUSPEND_REQUIRED_CAPS;
++}
++
++static void clear_request(struct sunxi_a133_suspend *suspend)
++{
++	suspend->mpidr = 0U;
++	suspend->resume_entry = 0U;
++}
++
++int sunxi_a133_suspend_init(
++	struct sunxi_a133_suspend *suspend,
++	const struct sunxi_a133_suspend_backend *backend)
++{
++	if ((suspend == NULL) || !backend_complete(backend)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++
++	memset(suspend, 0, sizeof(*suspend));
++	suspend->backend = *backend;
++	suspend->phase = SUNXI_A133_SUSPEND_IDLE;
++	return SUNXI_A133_SUSPEND_OK;
++}
++
++void sunxi_a133_suspend_system_state(psci_power_state_t *target_state)
++{
++	unsigned int level;
++
++	assert(target_state != NULL);
++
++	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
++		target_state->pwr_domain_state[level] = PLAT_MAX_OFF_STATE;
++	}
++}
++
++bool sunxi_a133_suspend_state_is_valid(
++	const psci_power_state_t *target_state)
++{
++	unsigned int level;
++
++	if (target_state == NULL) {
++		return false;
++	}
++	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
++		if (target_state->pwr_domain_state[level] !=
++		    STOCK_SUSPEND_LOCAL_STATE) {
++			return false;
++		}
++	}
++
++	return true;
++}
++
++int sunxi_a133_suspend_prepare(
++	struct sunxi_a133_suspend *suspend,
++	const psci_power_state_t *target_state, uint64_t mpidr,
++	uint64_t resume_entry)
++{
++	if ((suspend == NULL) || !sunxi_a133_suspend_state_is_valid(
++						   target_state) ||
++	    (mpidr > UINT32_MAX) || (resume_entry == 0U) ||
++	    (resume_entry > UINT32_MAX) || ((resume_entry & 3U) != 0U)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (suspend->phase == SUNXI_A133_SUSPEND_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (suspend->phase != SUNXI_A133_SUSPEND_IDLE) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++	if (!backend_ready(suspend)) {
++		return SUNXI_A133_SUSPEND_ENOTREADY;
++	}
++
++	suspend->mpidr = (uint32_t)mpidr;
++	suspend->resume_entry = (uint32_t)resume_entry;
++	suspend->last_transport_status = SUNXI_VENDOR_SCP_OK;
++	suspend->wake_source = 0U;
++	suspend->wake_source_valid = false;
++	suspend->phase = SUNXI_A133_SUSPEND_PREPARED;
++	return SUNXI_A133_SUSPEND_OK;
++}
++
++int sunxi_a133_suspend_abort(struct sunxi_a133_suspend *suspend)
++{
++	if (suspend == NULL) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (suspend->phase == SUNXI_A133_SUSPEND_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (suspend->phase != SUNXI_A133_SUSPEND_PREPARED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++
++	clear_request(suspend);
++	suspend->phase = SUNXI_A133_SUSPEND_IDLE;
++	return SUNXI_A133_SUSPEND_OK;
++}
++
++int sunxi_a133_suspend_commit(struct sunxi_a133_suspend *suspend)
++{
++	int ret;
++
++	if (suspend == NULL) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (suspend->phase == SUNXI_A133_SUSPEND_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (suspend->phase != SUNXI_A133_SUSPEND_PREPARED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++	if (!backend_ready(suspend)) {
++		return SUNXI_A133_SUSPEND_ENOTREADY;
++	}
++
++	ret = suspend->backend.cpu_op(suspend->backend.cookie,
++				      suspend->mpidr, suspend->resume_entry,
++				      STOCK_SUSPEND_LOCAL_STATE,
++				      STOCK_SUSPEND_LOCAL_STATE,
++				      STOCK_SUSPEND_LOCAL_STATE);
++	suspend->last_transport_status = ret;
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++		suspend->phase = SUNXI_A133_SUSPEND_COMMITTED;
++		return SUNXI_A133_SUSPEND_OK;
++	}
++	/* Only a zero-word deadline failure is safe to retry. */
++	if ((ret == SUNXI_VENDOR_SCP_ETIMEOUT) && backend_ready(suspend)) {
++		return SUNXI_A133_SUSPEND_ERETRY;
++	}
++
++	suspend->phase = SUNXI_A133_SUSPEND_FAILED;
++	return SUNXI_A133_SUSPEND_EFAILSTOP;
++}
++
++int sunxi_a133_suspend_finish(struct sunxi_a133_suspend *suspend,
++			     uint32_t *wake_source)
++{
++	uint32_t wake;
++	int ret;
++
++	if ((suspend == NULL) || (wake_source == NULL)) {
++		return SUNXI_A133_SUSPEND_EINVAL;
++	}
++	if (suspend->phase == SUNXI_A133_SUSPEND_FAILED) {
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++	if (suspend->phase != SUNXI_A133_SUSPEND_COMMITTED) {
++		return SUNXI_A133_SUSPEND_ESTATE;
++	}
++	if (!backend_ready(suspend)) {
++		suspend->phase = SUNXI_A133_SUSPEND_FAILED;
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++
++	ret = suspend->backend.restore_notify(suspend->backend.cookie, &wake);
++	suspend->last_transport_status = ret;
++	if (ret != SUNXI_VENDOR_SCP_OK) {
++		/* Only a zero-word deadline failure is safe to retry. */
++		if ((ret == SUNXI_VENDOR_SCP_ETIMEOUT) && backend_ready(suspend)) {
++			return SUNXI_A133_SUSPEND_ERETRY;
++		}
++		suspend->phase = SUNXI_A133_SUSPEND_FAILED;
++		return SUNXI_A133_SUSPEND_EFAILSTOP;
++	}
++
++	suspend->wake_source = wake;
++	suspend->wake_source_valid = true;
++	*wake_source = wake;
++	clear_request(suspend);
++	suspend->phase = SUNXI_A133_SUSPEND_IDLE;
++	return SUNXI_A133_SUSPEND_OK;
++}
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+index 93f8936..c421e87 100644
+--- a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+@@ -15,11 +15,44 @@
+ static struct sunxi_a133_vendor_scp a133_vendor_scp;
+ static spinlock_t a133_vendor_scp_lock;
+ 
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++static struct sunxi_a133_suspend a133_suspend;
++static bool a133_suspend_ready;
++#endif
++
+ static uint64_t runtime_timeout_ticks(void)
+ {
+ 	return plat_get_syscnt_freq2() / 2U;
+ }
+ 
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++static uint32_t suspend_capabilities(void *cookie)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	return sunxi_vendor_scp_capabilities(&scp->transport);
++}
++
++static int suspend_cpu_op(void *cookie, uint32_t mpidr,
++			  uint32_t resume_entry, uint32_t cpu_state,
++			  uint32_t cluster_state, uint32_t system_state)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	return sunxi_vendor_scp_cpu_op(&scp->transport, mpidr, resume_entry,
++				       cpu_state, cluster_state, system_state,
++				       runtime_timeout_ticks());
++}
++
++static int suspend_restore_notify(void *cookie, uint32_t *wake_source)
++{
++	struct sunxi_a133_vendor_scp *scp = cookie;
++
++	return sunxi_vendor_scp_restore_notify(&scp->transport, wake_source,
++					       runtime_timeout_ticks());
++}
++#endif
++
+ void sunxi_a133_vendor_scp_runtime_setup(void)
+ {
+ 	uint64_t now = read_cntpct_el0();
+@@ -33,6 +66,20 @@ void sunxi_a133_vendor_scp_runtime_setup(void)
+ 						   runtime_timeout_ticks());
+ 	}
+ 
++	if (ret == SUNXI_VENDOR_SCP_OK) {
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++		const struct sunxi_a133_suspend_backend backend = {
++			.cookie = &a133_vendor_scp,
++			.capabilities = suspend_capabilities,
++			.cpu_op = suspend_cpu_op,
++			.restore_notify = suspend_restore_notify,
++		};
++
++		ret = sunxi_a133_suspend_init(&a133_suspend, &backend);
++		a133_suspend_ready = ret == SUNXI_A133_SUSPEND_OK;
++#endif
++	}
++
+ 	if (ret == SUNXI_VENDOR_SCP_OK) {
+ 		NOTICE("BL31: A133 vendor SCP transport ready\n");
+ 	} else {
+@@ -83,3 +130,60 @@ int sunxi_a133_vendor_scp_runtime_clear_wake_source(uint32_t wake_source,
+ {
+ 	return runtime_wake_source(false, wake_source, scp_result);
+ }
++
++#if defined(SUNXI_A133_SUSPEND_ORCHESTRATOR)
++void sunxi_a133_vendor_scp_runtime_suspend_state(
++	psci_power_state_t *target_state)
++{
++	sunxi_a133_suspend_system_state(target_state);
++}
++
++int sunxi_a133_vendor_scp_runtime_suspend_prepare(
++	const psci_power_state_t *target_state, uint64_t mpidr,
++	uint64_t resume_entry)
++{
++	int ret;
++
++	spin_lock(&a133_vendor_scp_lock);
++	ret = a133_suspend_ready ?
++		sunxi_a133_suspend_prepare(&a133_suspend, target_state, mpidr,
++					   resume_entry) :
++		SUNXI_A133_SUSPEND_ENOTREADY;
++	spin_unlock(&a133_vendor_scp_lock);
++	return ret;
++}
++
++int sunxi_a133_vendor_scp_runtime_suspend_abort(void)
++{
++	int ret;
++
++	spin_lock(&a133_vendor_scp_lock);
++	ret = a133_suspend_ready ? sunxi_a133_suspend_abort(&a133_suspend) :
++		SUNXI_A133_SUSPEND_ENOTREADY;
++	spin_unlock(&a133_vendor_scp_lock);
++	return ret;
++}
++
++int sunxi_a133_vendor_scp_runtime_suspend_commit(void)
++{
++	int ret;
++
++	spin_lock(&a133_vendor_scp_lock);
++	ret = a133_suspend_ready ? sunxi_a133_suspend_commit(&a133_suspend) :
++		SUNXI_A133_SUSPEND_ENOTREADY;
++	spin_unlock(&a133_vendor_scp_lock);
++	return ret;
++}
++
++int sunxi_a133_vendor_scp_runtime_suspend_finish(uint32_t *wake_source)
++{
++	int ret;
++
++	spin_lock(&a133_vendor_scp_lock);
++	ret = a133_suspend_ready ?
++		sunxi_a133_suspend_finish(&a133_suspend, wake_source) :
++		SUNXI_A133_SUSPEND_ENOTREADY;
++	spin_unlock(&a133_vendor_scp_lock);
++	return ret;
++}
++#endif
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+index 701ab68..201177f 100644
+--- a/plat/allwinner/common/tests/Makefile
++++ b/plat/allwinner/common/tests/Makefile
+@@ -9,7 +9,7 @@ ROOT := ../../../../..
+ .PHONY: all clean test
+ 
+ all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+-	test_sunxi_a133_native_svc
++	test_sunxi_a133_native_svc test_sunxi_a133_suspend
+ 
+ test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+@@ -23,11 +23,16 @@ test_sunxi_a133_native_svc: test_sunxi_a133_native_svc.c \
+ 	$(CC) $(CFLAGS) -DSUNXI_A133_NATIVE_SVC_HOST_TEST \
+ 		-I../include $^ -o $@
+ 
++test_sunxi_a133_suspend: test_sunxi_a133_suspend.c ../sunxi_a133_suspend.c
++	$(CC) $(CFLAGS) -DSUNXI_A133_SUSPEND_HOST_TEST \
++		-I../include $^ -o $@
++
+ test: all
+ 	./test_sunxi_vendor_scp
+ 	./test_sunxi_a133_vendor_scp
+ 	./test_sunxi_a133_native_svc
++	./test_sunxi_a133_suspend
+ 
+ clean:
+ 	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+-		test_sunxi_a133_native_svc
++		test_sunxi_a133_native_svc test_sunxi_a133_suspend
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_suspend.c b/plat/allwinner/common/tests/test_sunxi_a133_suspend.c
+new file mode 100644
+index 0000000..e0150a7
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_suspend.c
+@@ -0,0 +1,364 @@
++// SPDX-License-Identifier: BSD-3-Clause
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_suspend.h>
++
++#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
++
++struct fake_backend {
++	uint32_t capabilities;
++	uint32_t mpidr;
++	uint32_t resume_entry;
++	uint32_t cpu_state;
++	uint32_t cluster_state;
++	uint32_t system_state;
++	uint32_t wake_source;
++	unsigned int capability_calls;
++	unsigned int cpu_op_calls;
++	unsigned int restore_calls;
++	int cpu_op_status;
++	int restore_status;
++	bool clear_caps_after_cpu_op;
++	bool clear_caps_after_restore;
++};
++
++static uint32_t fake_capabilities(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->capability_calls++;
++	return fake->capabilities;
++}
++
++static int fake_cpu_op(void *cookie, uint32_t mpidr, uint32_t resume_entry,
++		       uint32_t cpu_state, uint32_t cluster_state,
++		       uint32_t system_state)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->cpu_op_calls++;
++	fake->mpidr = mpidr;
++	fake->resume_entry = resume_entry;
++	fake->cpu_state = cpu_state;
++	fake->cluster_state = cluster_state;
++	fake->system_state = system_state;
++	if (fake->clear_caps_after_cpu_op) {
++		fake->capabilities = 0U;
++	}
++	return fake->cpu_op_status;
++}
++
++static int fake_restore(void *cookie, uint32_t *wake_source)
++{
++	struct fake_backend *fake = cookie;
++
++	fake->restore_calls++;
++	*wake_source = fake->wake_source;
++	if (fake->clear_caps_after_restore) {
++		fake->capabilities = 0U;
++	}
++	return fake->restore_status;
++}
++
++static void setup(struct sunxi_a133_suspend *suspend,
++		  struct fake_backend *fake)
++{
++	const struct sunxi_a133_suspend_backend backend = {
++		.cookie = fake,
++		.capabilities = fake_capabilities,
++		.cpu_op = fake_cpu_op,
++		.restore_notify = fake_restore,
++	};
++
++	memset(fake, 0, sizeof(*fake));
++	fake->capabilities = SUNXI_A133_SUSPEND_REQUIRED_CAPS;
++	fake->wake_source = 0x67U;
++	assert(sunxi_a133_suspend_init(suspend, &backend) ==
++	       SUNXI_A133_SUSPEND_OK);
++}
++
++static psci_power_state_t stock_state(void)
++{
++	psci_power_state_t state = { { 0U } };
++
++	sunxi_a133_suspend_system_state(&state);
++	return state;
++}
++
++static void test_exact_state_and_arguments(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake = 0U;
++	unsigned int level;
++
++	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
++		assert(state.pwr_domain_state[level] == 3U);
++	}
++	assert(sunxi_a133_suspend_state_is_valid(&state));
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0x80000000U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_PREPARED);
++	assert(fake.cpu_op_calls == 0U);
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_COMMITTED);
++	assert(fake.cpu_op_calls == 1U);
++	assert(fake.mpidr == 0x80000000U);
++	assert(fake.resume_entry == 0x40000100U);
++	assert(fake.cpu_state == 3U && fake.cluster_state == 3U &&
++	       fake.system_state == 3U);
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(fake.restore_calls == 1U && wake == 0x67U);
++	assert(suspend.wake_source_valid && suspend.wake_source == wake);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++}
++
++static void test_validation_is_precommit(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	unsigned int level;
++
++	setup(&suspend, &fake);
++	assert(!sunxi_a133_suspend_state_is_valid(NULL));
++	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
++		state = stock_state();
++		state.pwr_domain_state[level] = 2U;
++		assert(!sunxi_a133_suspend_state_is_valid(&state));
++		assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++						  0x40000100U) ==
++		       SUNXI_A133_SUSPEND_EINVAL);
++	}
++	state = stock_state();
++	assert(sunxi_a133_suspend_prepare(&suspend, &state,
++					  UINT64_C(0x100000000),
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U, 0U) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  UINT64_C(0x100000000)) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000102U) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(fake.cpu_op_calls == 0U && fake.restore_calls == 0U);
++}
++
++static void test_capabilities_are_all_required(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	const uint32_t capability[] = {
++		SUNXI_VENDOR_SCP_CAP_CPU_OP,
++		SUNXI_VENDOR_SCP_CAP_RESTORE_NOTIFY,
++		SUNXI_VENDOR_SCP_CAP_WAKE_SOURCE,
++	};
++	unsigned int i;
++
++	for (i = 0U; i < ARRAY_SIZE(capability); i++) {
++		setup(&suspend, &fake);
++		fake.capabilities &= ~capability[i];
++		assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++						  0x40000100U) ==
++		       SUNXI_A133_SUSPEND_ENOTREADY);
++		assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++		assert(fake.cpu_op_calls == 0U);
++	}
++}
++
++static void test_precommit_abort(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake;
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 1U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_abort(&suspend) == SUNXI_A133_SUSPEND_OK);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++	assert(suspend.mpidr == 0U && suspend.resume_entry == 0U);
++	assert(fake.cpu_op_calls == 0U && fake.restore_calls == 0U);
++	assert(sunxi_a133_suspend_abort(&suspend) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++}
++
++static void test_retry_only_before_commit_boundary(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake;
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	fake.cpu_op_status = SUNXI_VENDOR_SCP_ETIMEOUT;
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_ERETRY);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_PREPARED);
++	assert(suspend.last_transport_status == SUNXI_VENDOR_SCP_ETIMEOUT);
++	fake.cpu_op_status = SUNXI_VENDOR_SCP_OK;
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	fake.restore_status = SUNXI_VENDOR_SCP_ETIMEOUT;
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_ERETRY);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_COMMITTED);
++	fake.restore_status = SUNXI_VENDOR_SCP_OK;
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_OK);
++}
++
++static void test_partial_transport_is_fail_stop(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake;
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	fake.cpu_op_status = SUNXI_VENDOR_SCP_ETIMEOUT;
++	fake.clear_caps_after_cpu_op = true;
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_FAILED);
++	assert(sunxi_a133_suspend_abort(&suspend) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	fake.restore_status = SUNXI_VENDOR_SCP_EPROTO;
++	fake.clear_caps_after_restore = true;
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_FAILED);
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	fake.cpu_op_status = SUNXI_VENDOR_SCP_EPROTO;
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_FAILED);
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	fake.restore_status = SUNXI_VENDOR_SCP_EPROTO;
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_FAILED);
++}
++
++static void test_capability_loss_respects_commit_boundary(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake;
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	fake.capabilities = 0U;
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_ENOTREADY);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_PREPARED);
++	assert(fake.cpu_op_calls == 0U);
++	assert(sunxi_a133_suspend_abort(&suspend) == SUNXI_A133_SUSPEND_OK);
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	fake.capabilities = 0U;
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_EFAILSTOP);
++	assert(suspend.phase == SUNXI_A133_SUSPEND_FAILED);
++	assert(fake.restore_calls == 0U);
++}
++
++static void test_state_machine_rejects_reordering(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	uint32_t wake;
++
++	setup(&suspend, &fake);
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0U,
++					  0x40000100U) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
++	assert(sunxi_a133_suspend_abort(&suspend) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++	assert(sunxi_a133_suspend_commit(&suspend) ==
++	       SUNXI_A133_SUSPEND_ESTATE);
++}
++
++static void test_init_rejects_incomplete_backends(void)
++{
++	struct sunxi_a133_suspend suspend;
++	struct sunxi_a133_suspend_backend backend = { 0 };
++
++	assert(sunxi_a133_suspend_init(NULL, &backend) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(sunxi_a133_suspend_init(&suspend, NULL) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++	assert(sunxi_a133_suspend_init(&suspend, &backend) ==
++	       SUNXI_A133_SUSPEND_EINVAL);
++}
++
++int main(void)
++{
++	test_exact_state_and_arguments();
++	test_validation_is_precommit();
++	test_capabilities_are_all_required();
++	test_precommit_abort();
++	test_retry_only_before_commit_boundary();
++	test_partial_transport_is_fail_stop();
++	test_capability_loss_respects_commit_boundary();
++	test_state_machine_rejects_reordering();
++	test_init_rejects_incomplete_backends();
++	puts("sunxi_a133_suspend orchestration tests: PASS");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index f429b9f..adb270f 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -37,6 +37,17 @@ endif
+ $(eval $(call add_define,SUNXI_A133_NATIVE_WAKE_ABI))
+ endif
+ 
++# Build the validated A133 SCP suspend transaction state machine. It remains
++# disconnected from PSCI SYSTEM_SUSPEND and cannot remove CPU or DRAM power.
++SUNXI_A133_SUSPEND_ORCHESTRATOR	?=	0
++$(call assert_boolean,SUNXI_A133_SUSPEND_ORCHESTRATOR)
++ifeq (${SUNXI_A133_SUSPEND_ORCHESTRATOR},1)
++ifneq (${SUNXI_A133_NATIVE_WAKE_ABI},1)
++$(error SUNXI_A133_SUSPEND_ORCHESTRATOR requires SUNXI_A133_NATIVE_WAKE_ABI=1)
++endif
++$(eval $(call add_define,SUNXI_A133_SUSPEND_ORCHESTRATOR))
++endif
++
+ # Cap BL31 at the start of stock's standby scratch. The common DT fixup still
+ # reserves the complete 0x40000000..0x40040000 firmware window from Linux.
+ SUNXI_A133_STANDBY_SCRATCH	?=	0
+@@ -72,3 +83,7 @@ ifeq (${SUNXI_A133_NATIVE_WAKE_ABI},1)
+ BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_native_svc.c \
+ 				${AW_PLAT}/common/sunxi_a133_vendor_scp_runtime.c
+ endif
++
++ifeq (${SUNXI_A133_SUSPEND_ORCHESTRATOR},1)
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_suspend.c
++endif
+-- 
+2.55.0
+

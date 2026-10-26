@@ -1,0 +1,407 @@
+From 9dc5985f7ba37e637ee0093afb70dc68ffff1933 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 10:41:37 +0000
+Subject: [PATCH 5/5] fix(allwinner): match A133 suspend CPU affinity
+
+Match the stock monitor's CPU_OP word zero by validating the A133
+single-cluster, four-core topology and passing only MPIDR AFF0. Normalize
+architectural MPIDR metadata while rejecting unavailable cores, higher
+affinities and reserved bits.
+
+Assisted-by: LLM
+---
+ .../common/include/sunxi_a133_suspend.h       |  12 +-
+ .../include/sunxi_a133_vendor_scp_runtime.h   |   2 +-
+ plat/allwinner/common/sunxi_a133_suspend.c    |  52 ++++++--
+ .../common/sunxi_a133_vendor_scp_runtime.c    |  11 +-
+ .../common/tests/test_sunxi_a133_suspend.c    | 122 ++++++++++++++----
+ 5 files changed, 157 insertions(+), 42 deletions(-)
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_suspend.h b/plat/allwinner/common/include/sunxi_a133_suspend.h
+index 2f75158..5a00cb2 100644
+--- a/plat/allwinner/common/include/sunxi_a133_suspend.h
++++ b/plat/allwinner/common/include/sunxi_a133_suspend.h
+@@ -12,6 +12,8 @@
+ #else
+ #define PLAT_MAX_PWR_LVL	2U
+ #define PLAT_MAX_OFF_STATE	3U
++#define PLATFORM_CLUSTER_COUNT	1U
++#define PLATFORM_MAX_CPUS_PER_CLUSTER	4U
+ struct psci_power_state {
+ 	uint8_t pwr_domain_state[PLAT_MAX_PWR_LVL + 1U];
+ };
+@@ -43,7 +45,8 @@ enum sunxi_a133_suspend_phase {
+ struct sunxi_a133_suspend_backend {
+ 	void *cookie;
+ 	uint32_t (*capabilities)(void *cookie);
+-	int (*cpu_op)(void *cookie, uint32_t mpidr, uint32_t resume_entry,
++	int (*cpu_op)(void *cookie, uint32_t cpu_affinity,
++		      uint32_t secure_resume_entry,
+ 		      uint32_t cpu_state, uint32_t cluster_state,
+ 		      uint32_t system_state);
+ 	int (*restore_notify)(void *cookie, uint32_t *wake_source);
+@@ -52,8 +55,8 @@ struct sunxi_a133_suspend_backend {
+ struct sunxi_a133_suspend {
+ 	struct sunxi_a133_suspend_backend backend;
+ 	enum sunxi_a133_suspend_phase phase;
+-	uint32_t mpidr;
+-	uint32_t resume_entry;
++	uint32_t cpu_affinity;
++	uint32_t secure_resume_entry;
+ 	uint32_t wake_source;
+ 	int last_transport_status;
+ 	bool wake_source_valid;
+@@ -66,10 +69,11 @@ int sunxi_a133_suspend_init(
+ void sunxi_a133_suspend_system_state(psci_power_state_t *target_state);
+ bool sunxi_a133_suspend_state_is_valid(
+ 	const psci_power_state_t *target_state);
++/* secure_resume_entry must come from TF-A's trusted platform setup. */
+ int sunxi_a133_suspend_prepare(
+ 	struct sunxi_a133_suspend *suspend,
+ 	const psci_power_state_t *target_state, uint64_t mpidr,
+-	uint64_t resume_entry);
++	uint64_t secure_resume_entry);
+ int sunxi_a133_suspend_abort(struct sunxi_a133_suspend *suspend);
+ int sunxi_a133_suspend_commit(struct sunxi_a133_suspend *suspend);
+ int sunxi_a133_suspend_finish(struct sunxi_a133_suspend *suspend,
+diff --git a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+index aaffda9..b2bf967 100644
+--- a/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
++++ b/plat/allwinner/common/include/sunxi_a133_vendor_scp_runtime.h
+@@ -22,7 +22,7 @@ void sunxi_a133_vendor_scp_runtime_suspend_state(
+ 	psci_power_state_t *target_state);
+ int sunxi_a133_vendor_scp_runtime_suspend_prepare(
+ 	const psci_power_state_t *target_state, uint64_t mpidr,
+-	uint64_t resume_entry);
++	uint64_t secure_resume_entry);
+ int sunxi_a133_vendor_scp_runtime_suspend_abort(void);
+ int sunxi_a133_vendor_scp_runtime_suspend_commit(void);
+ int sunxi_a133_vendor_scp_runtime_suspend_finish(uint32_t *wake_source);
+diff --git a/plat/allwinner/common/sunxi_a133_suspend.c b/plat/allwinner/common/sunxi_a133_suspend.c
+index 8c5c5e6..a4f1859 100644
+--- a/plat/allwinner/common/sunxi_a133_suspend.c
++++ b/plat/allwinner/common/sunxi_a133_suspend.c
+@@ -10,10 +10,19 @@
+ 
+ #define STOCK_SUSPEND_LOCAL_STATE	3U
+ 
++/* MPIDR_EL1 affinity fields plus its architectural RES1, U and MT bits. */
++#define A133_MPIDR_AFF0_MASK		UINT64_C(0xff)
++#define A133_MPIDR_AFFINITY_MASK	UINT64_C(0xff00ffffff)
++#define A133_MPIDR_NON_AFFINITY_MASK	UINT64_C(0xc1000000)
++#define A133_MPIDR_ALLOWED_MASK		(A133_MPIDR_AFFINITY_MASK | \
++					 A133_MPIDR_NON_AFFINITY_MASK)
++
+ #ifndef SUNXI_A133_SUSPEND_HOST_TEST
+ CASSERT(PLAT_MAX_PWR_LVL == 2U, assert_a133_has_three_power_levels);
+ CASSERT(PLAT_MAX_OFF_STATE == STOCK_SUSPEND_LOCAL_STATE,
+ 	assert_a133_off_state_matches_stock);
++CASSERT(PLATFORM_CLUSTER_COUNT == 1U, assert_a133_has_one_cluster);
++CASSERT(PLATFORM_MAX_CPUS_PER_CLUSTER == 4U, assert_a133_has_four_cores);
+ #endif
+ 
+ static bool backend_complete(
+@@ -36,8 +45,29 @@ static bool backend_ready(struct sunxi_a133_suspend *suspend)
+ 
+ static void clear_request(struct sunxi_a133_suspend *suspend)
+ {
+-	suspend->mpidr = 0U;
+-	suspend->resume_entry = 0U;
++	suspend->cpu_affinity = 0U;
++	suspend->secure_resume_entry = 0U;
++}
++
++static bool normalize_mpidr(uint64_t mpidr, uint32_t *cpu_affinity)
++{
++	uint32_t affinity;
++
++	if ((mpidr & ~A133_MPIDR_ALLOWED_MASK) != 0U) {
++		return false;
++	}
++	if ((mpidr & (A133_MPIDR_AFFINITY_MASK &
++		      ~A133_MPIDR_AFF0_MASK)) != 0U) {
++		return false;
++	}
++
++	affinity = (uint32_t)(mpidr & A133_MPIDR_AFF0_MASK);
++	if (affinity >= PLATFORM_MAX_CPUS_PER_CLUSTER) {
++		return false;
++	}
++
++	*cpu_affinity = affinity;
++	return true;
+ }
+ 
+ int sunxi_a133_suspend_init(
+@@ -86,12 +116,16 @@ bool sunxi_a133_suspend_state_is_valid(
+ int sunxi_a133_suspend_prepare(
+ 	struct sunxi_a133_suspend *suspend,
+ 	const psci_power_state_t *target_state, uint64_t mpidr,
+-	uint64_t resume_entry)
++	uint64_t secure_resume_entry)
+ {
++	uint32_t cpu_affinity;
++
+ 	if ((suspend == NULL) || !sunxi_a133_suspend_state_is_valid(
+ 						   target_state) ||
+-	    (mpidr > UINT32_MAX) || (resume_entry == 0U) ||
+-	    (resume_entry > UINT32_MAX) || ((resume_entry & 3U) != 0U)) {
++	    !normalize_mpidr(mpidr, &cpu_affinity) ||
++	    (secure_resume_entry == 0U) ||
++	    (secure_resume_entry > UINT32_MAX) ||
++	    ((secure_resume_entry & 3U) != 0U)) {
+ 		return SUNXI_A133_SUSPEND_EINVAL;
+ 	}
+ 	if (suspend->phase == SUNXI_A133_SUSPEND_FAILED) {
+@@ -104,8 +138,9 @@ int sunxi_a133_suspend_prepare(
+ 		return SUNXI_A133_SUSPEND_ENOTREADY;
+ 	}
+ 
+-	suspend->mpidr = (uint32_t)mpidr;
+-	suspend->resume_entry = (uint32_t)resume_entry;
++	suspend->cpu_affinity = cpu_affinity;
++	/* The caller must supply TF-A's trusted secure warm-entry address. */
++	suspend->secure_resume_entry = (uint32_t)secure_resume_entry;
+ 	suspend->last_transport_status = SUNXI_VENDOR_SCP_OK;
+ 	suspend->wake_source = 0U;
+ 	suspend->wake_source_valid = false;
+@@ -148,7 +183,8 @@ int sunxi_a133_suspend_commit(struct sunxi_a133_suspend *suspend)
+ 	}
+ 
+ 	ret = suspend->backend.cpu_op(suspend->backend.cookie,
+-				      suspend->mpidr, suspend->resume_entry,
++				      suspend->cpu_affinity,
++				      suspend->secure_resume_entry,
+ 				      STOCK_SUSPEND_LOCAL_STATE,
+ 				      STOCK_SUSPEND_LOCAL_STATE,
+ 				      STOCK_SUSPEND_LOCAL_STATE);
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+index c421e87..e145d02 100644
+--- a/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp_runtime.c
+@@ -33,13 +33,14 @@ static uint32_t suspend_capabilities(void *cookie)
+ 	return sunxi_vendor_scp_capabilities(&scp->transport);
+ }
+ 
+-static int suspend_cpu_op(void *cookie, uint32_t mpidr,
+-			  uint32_t resume_entry, uint32_t cpu_state,
++static int suspend_cpu_op(void *cookie, uint32_t cpu_affinity,
++			  uint32_t secure_resume_entry, uint32_t cpu_state,
+ 			  uint32_t cluster_state, uint32_t system_state)
+ {
+ 	struct sunxi_a133_vendor_scp *scp = cookie;
+ 
+-	return sunxi_vendor_scp_cpu_op(&scp->transport, mpidr, resume_entry,
++	return sunxi_vendor_scp_cpu_op(&scp->transport, cpu_affinity,
++				       secure_resume_entry,
+ 				       cpu_state, cluster_state, system_state,
+ 				       runtime_timeout_ticks());
+ }
+@@ -140,14 +141,14 @@ void sunxi_a133_vendor_scp_runtime_suspend_state(
+ 
+ int sunxi_a133_vendor_scp_runtime_suspend_prepare(
+ 	const psci_power_state_t *target_state, uint64_t mpidr,
+-	uint64_t resume_entry)
++	uint64_t secure_resume_entry)
+ {
+ 	int ret;
+ 
+ 	spin_lock(&a133_vendor_scp_lock);
+ 	ret = a133_suspend_ready ?
+ 		sunxi_a133_suspend_prepare(&a133_suspend, target_state, mpidr,
+-					   resume_entry) :
++					   secure_resume_entry) :
+ 		SUNXI_A133_SUSPEND_ENOTREADY;
+ 	spin_unlock(&a133_vendor_scp_lock);
+ 	return ret;
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_suspend.c b/plat/allwinner/common/tests/test_sunxi_a133_suspend.c
+index e0150a7..d59fb54 100644
+--- a/plat/allwinner/common/tests/test_sunxi_a133_suspend.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_suspend.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+ #include <assert.h>
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -11,8 +12,8 @@
+ 
+ struct fake_backend {
+ 	uint32_t capabilities;
+-	uint32_t mpidr;
+-	uint32_t resume_entry;
++	uint32_t cpu_affinity;
++	uint32_t secure_resume_entry;
+ 	uint32_t cpu_state;
+ 	uint32_t cluster_state;
+ 	uint32_t system_state;
+@@ -34,15 +35,16 @@ static uint32_t fake_capabilities(void *cookie)
+ 	return fake->capabilities;
+ }
+ 
+-static int fake_cpu_op(void *cookie, uint32_t mpidr, uint32_t resume_entry,
++static int fake_cpu_op(void *cookie, uint32_t cpu_affinity,
++		       uint32_t secure_resume_entry,
+ 		       uint32_t cpu_state, uint32_t cluster_state,
+ 		       uint32_t system_state)
+ {
+ 	struct fake_backend *fake = cookie;
+ 
+ 	fake->cpu_op_calls++;
+-	fake->mpidr = mpidr;
+-	fake->resume_entry = resume_entry;
++	fake->cpu_affinity = cpu_affinity;
++	fake->secure_resume_entry = secure_resume_entry;
+ 	fake->cpu_state = cpu_state;
+ 	fake->cluster_state = cluster_state;
+ 	fake->system_state = system_state;
+@@ -95,6 +97,7 @@ static void test_exact_state_and_arguments(void)
+ 	struct fake_backend fake;
+ 	psci_power_state_t state = stock_state();
+ 	uint32_t wake = 0U;
++	unsigned int core;
+ 	unsigned int level;
+ 
+ 	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
+@@ -102,24 +105,27 @@ static void test_exact_state_and_arguments(void)
+ 	}
+ 	assert(sunxi_a133_suspend_state_is_valid(&state));
+ 
+-	setup(&suspend, &fake);
+-	assert(sunxi_a133_suspend_prepare(&suspend, &state, 0x80000000U,
+-					  0x40000100U) ==
+-	       SUNXI_A133_SUSPEND_OK);
+-	assert(suspend.phase == SUNXI_A133_SUSPEND_PREPARED);
+-	assert(fake.cpu_op_calls == 0U);
+-	assert(sunxi_a133_suspend_commit(&suspend) == SUNXI_A133_SUSPEND_OK);
+-	assert(suspend.phase == SUNXI_A133_SUSPEND_COMMITTED);
+-	assert(fake.cpu_op_calls == 1U);
+-	assert(fake.mpidr == 0x80000000U);
+-	assert(fake.resume_entry == 0x40000100U);
+-	assert(fake.cpu_state == 3U && fake.cluster_state == 3U &&
+-	       fake.system_state == 3U);
+-	assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
+-	       SUNXI_A133_SUSPEND_OK);
+-	assert(fake.restore_calls == 1U && wake == 0x67U);
+-	assert(suspend.wake_source_valid && suspend.wake_source == wake);
+-	assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++	for (core = 0U; core < PLATFORM_MAX_CPUS_PER_CLUSTER; core++) {
++		setup(&suspend, &fake);
++		assert(sunxi_a133_suspend_prepare(&suspend, &state, core,
++						  0x40000100U) ==
++		       SUNXI_A133_SUSPEND_OK);
++		assert(suspend.phase == SUNXI_A133_SUSPEND_PREPARED);
++		assert(fake.cpu_op_calls == 0U);
++		assert(sunxi_a133_suspend_commit(&suspend) ==
++		       SUNXI_A133_SUSPEND_OK);
++		assert(suspend.phase == SUNXI_A133_SUSPEND_COMMITTED);
++		assert(fake.cpu_op_calls == 1U);
++		assert(fake.cpu_affinity == core);
++		assert(fake.secure_resume_entry == 0x40000100U);
++		assert(fake.cpu_state == 3U && fake.cluster_state == 3U &&
++		       fake.system_state == 3U);
++		assert(sunxi_a133_suspend_finish(&suspend, &wake) ==
++		       SUNXI_A133_SUSPEND_OK);
++		assert(fake.restore_calls == 1U && wake == 0x67U);
++		assert(suspend.wake_source_valid && suspend.wake_source == wake);
++		assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++	}
+ }
+ 
+ static void test_validation_is_precommit(void)
+@@ -155,6 +161,72 @@ static void test_validation_is_precommit(void)
+ 	assert(fake.cpu_op_calls == 0U && fake.restore_calls == 0U);
+ }
+ 
++static void test_mpidr_admission_and_normalization(void)
++{
++	static const struct {
++		uint64_t mpidr;
++		uint32_t cpu_affinity;
++	} accepted_non_affinity[] = {
++		{ UINT64_C(0x80000000), 0U },
++		{ (UINT64_C(1) << 24) | 1U, 1U },
++		{ (UINT64_C(1) << 30) | 2U, 2U },
++		{ UINT64_C(0xc1000003), 3U },
++	};
++	struct sunxi_a133_suspend suspend;
++	struct fake_backend fake;
++	psci_power_state_t state = stock_state();
++	const uint64_t unavailable_core[] = {
++		UINT64_C(4),
++		UINT64_C(0xff),
++	};
++	const uint64_t higher_affinity[] = {
++		UINT64_C(1) << 8,
++		UINT64_C(1) << 16,
++		UINT64_C(1) << 32,
++	};
++	const uint64_t reserved_bits[] = {
++		UINT64_C(1) << 25,
++		UINT64_C(1) << 29,
++		UINT64_C(1) << 40,
++		UINT64_C(1) << 63,
++	};
++	const uint64_t *rejected[] = {
++		unavailable_core,
++		higher_affinity,
++		reserved_bits,
++	};
++	const size_t rejected_count[] = {
++		ARRAY_SIZE(unavailable_core),
++		ARRAY_SIZE(higher_affinity),
++		ARRAY_SIZE(reserved_bits),
++	};
++	unsigned int i;
++	unsigned int group;
++
++	for (i = 0U; i < ARRAY_SIZE(accepted_non_affinity); i++) {
++		setup(&suspend, &fake);
++		assert(sunxi_a133_suspend_prepare(
++			       &suspend, &state, accepted_non_affinity[i].mpidr,
++			       0x40000100U) == SUNXI_A133_SUSPEND_OK);
++		assert(sunxi_a133_suspend_commit(&suspend) ==
++		       SUNXI_A133_SUSPEND_OK);
++		assert(fake.cpu_affinity ==
++		       accepted_non_affinity[i].cpu_affinity);
++	}
++
++	for (group = 0U; group < ARRAY_SIZE(rejected); group++) {
++		for (i = 0U; i < rejected_count[group]; i++) {
++			setup(&suspend, &fake);
++			assert(sunxi_a133_suspend_prepare(
++				       &suspend, &state, rejected[group][i],
++				       0x40000100U) ==
++			       SUNXI_A133_SUSPEND_EINVAL);
++			assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
++			assert(fake.cpu_op_calls == 0U);
++		}
++	}
++}
++
+ static void test_capabilities_are_all_required(void)
+ {
+ 	struct sunxi_a133_suspend suspend;
+@@ -191,7 +263,8 @@ static void test_precommit_abort(void)
+ 	       SUNXI_A133_SUSPEND_OK);
+ 	assert(sunxi_a133_suspend_abort(&suspend) == SUNXI_A133_SUSPEND_OK);
+ 	assert(suspend.phase == SUNXI_A133_SUSPEND_IDLE);
+-	assert(suspend.mpidr == 0U && suspend.resume_entry == 0U);
++	assert(suspend.cpu_affinity == 0U &&
++	       suspend.secure_resume_entry == 0U);
+ 	assert(fake.cpu_op_calls == 0U && fake.restore_calls == 0U);
+ 	assert(sunxi_a133_suspend_abort(&suspend) ==
+ 	       SUNXI_A133_SUSPEND_ESTATE);
+@@ -352,6 +425,7 @@ int main(void)
+ {
+ 	test_exact_state_and_arguments();
+ 	test_validation_is_precommit();
++	test_mpidr_admission_and_normalization();
+ 	test_capabilities_are_all_required();
+ 	test_precommit_abort();
+ 	test_retry_only_before_commit_boundary();
+-- 
+2.55.0
+
