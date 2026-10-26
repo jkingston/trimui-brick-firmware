@@ -8,6 +8,7 @@ import subprocess
 from usb_profile import profile
 from scp_profile import profile as scp_profile
 from emmc_recovery import enabled as emmc_recovery_enabled
+from g2d_profile import enabled as g2d_qualification_enabled
 from ve_profile import enabled as ve_qualification_enabled
 
 p = argparse.ArgumentParser(description=__doc__)
@@ -34,6 +35,7 @@ kernel['release'] = (a.images / 'kernel.release').read_text().strip()
 manifest = {'firmware': source(root), 'kernel': kernel, 'buildroot': '2026.08.1',
             'usb_role': profile(a.config),
             'emmc_recovery': emmc_recovery_enabled(a.config),
+            'g2d_qualification': g2d_qualification_enabled(a.config),
             've_qualification': ve_qualification_enabled(a.config),
             'config_sha256': hashlib.sha256(a.config.read_bytes()).hexdigest(), 'files': {}}
 selected_scp_profile = scp_profile(a.config)

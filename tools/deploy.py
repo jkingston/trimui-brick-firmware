@@ -163,6 +163,8 @@ def verify_boot_manifest(actual, expected):
         raise ProtocolError('Boot USB role does not match expected image')
     if actual.get('emmc_recovery', False) != expected.get('emmc_recovery', False):
         raise ProtocolError('Boot eMMC recovery profile does not match expected image')
+    if actual.get('g2d_qualification', False) != expected.get('g2d_qualification', False):
+        raise ProtocolError('Boot G2D qualification profile does not match expected image')
     if actual.get('scp_profile', 'disabled') != expected.get('scp_profile', 'disabled'):
         raise ProtocolError('Boot SCP profile does not match expected image')
     if actual.get('ve_qualification', False) != expected.get('ve_qualification', False):
@@ -207,6 +209,8 @@ def main():
                         help='explicitly permit deploying an eMMC recovery profile')
     parser.add_argument('--ve-qualification', action='store_true',
                         help='explicitly permit deploying a video-engine qualification profile')
+    parser.add_argument('--g2d-qualification', action='store_true',
+                        help='explicitly permit deploying a G2D qualification profile')
     args = parser.parse_args()
     token = 'brick-update-' + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='brick-update-') as temporary:
@@ -216,6 +220,8 @@ def main():
             raise ValueError('Use --emmc-recovery for the dedicated recovery profile')
         if manifest.get('ve_qualification', False) and not args.ve_qualification:
             raise ValueError('Use --ve-qualification for the dedicated video-engine profile')
+        if manifest.get('g2d_qualification', False) and not args.g2d_qualification:
+            raise ValueError('Use --g2d-qualification for the dedicated G2D profile')
         script = directory / 'install.sh'
         script.write_text(install_script(token))
         with Console(args.port) as console:

@@ -321,6 +321,16 @@ class BootIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.ProtocolError, 'video-engine qualification'):
             deploy.verify_boot_manifest(actual, expected)
 
+    def test_g2d_profile_cannot_be_mistaken_for_normal_image(self):
+        expected = {'firmware': {'commit': 'firmware-a'},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a', 'g2d_qualification': True,
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        actual = dict(expected, g2d_qualification=False)
+        with self.assertRaisesRegex(deploy.ProtocolError, 'G2D qualification'):
+            deploy.verify_boot_manifest(actual, expected)
+
 
 class DeploymentLifecycleTests(unittest.TestCase):
     def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None,
@@ -408,6 +418,16 @@ class DeploymentLifecycleTests(unittest.TestCase):
              patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
              patch.object(deploy, 'Console') as console:
             with self.assertRaisesRegex(ValueError, '--ve-qualification'):
+                deploy.main()
+        console.assert_not_called()
+
+    def test_g2d_qualification_requires_explicit_deployment_flag(self):
+        args = ['deploy.py', 'images']
+        manifest = {'g2d_qualification': True}
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
+             patch.object(deploy, 'Console') as console:
+            with self.assertRaisesRegex(ValueError, '--g2d-qualification'):
                 deploy.main()
         console.assert_not_called()
 

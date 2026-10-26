@@ -1,0 +1,62 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+if [ "$#" -ne 1 ] || [ -e "$1" ]; then
+	echo "usage: $0 NEW-RESULT-DIRECTORY" >&2
+	exit 2
+fi
+marker=/sys/firmware/devicetree/base/chosen/trimui,g2d-qualification
+[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ] || {
+	echo "not a G2D qualification image" >&2
+	exit 2
+}
+mkdir "$1"
+out=$(cd "$1" && pwd)
+assets=/usr/share/brick-qualification/g2d
+tools=/usr/libexec/brick-qualification
+
+one_named()
+{
+	kind=$1
+	name=$2
+	set -- /sys/class/$kind/$kind*
+	found=
+	for path do
+		[ -e "$path" ] || continue
+		[ -f "$path/name" ] && actual=$(cat "$path/name") || actual=$(cat "$path/model")
+		[ "$actual" = "$name" ] || continue
+		[ -z "$found" ] || { echo "duplicate $name devices" >&2; exit 2; }
+		found=/dev/$(basename "$path")
+	done
+	[ -n "$found" ] || { echo "missing $name device" >&2; exit 2; }
+	printf '%s\n' "$found"
+}
+
+rotate=$(one_named video4linux sun8i-rotate)
+media=$(one_named media 'A133 G2D compositor')
+background=$(one_named video4linux g2d-background)
+foreground=$(one_named video4linux g2d-foreground)
+capture=$(one_named video4linux g2d-capture)
+
+cat /proc/interrupts > "$out/interrupts-before"
+find /sys/kernel/debug/clk -maxdepth 2 -type f \( -name clk_rate -o -name clk_parent \) \
+	-path '*g2d*' -print -exec cat '{}' \; > "$out/clocks-before" 2>&1 || true
+dmesg > "$out/dmesg-before"
+v4l2-compliance -d "$rotate" > "$out/v4l2-compliance.log" 2>&1
+
+while IFS="$(printf '\t')" read -r name inf outf iw ih ow oh rotate_angle hflip vflip enc tolerance; do
+	"$tools/brick-g2d-m2m" "$rotate" platform:sun8i-rotate \
+		"$inf" "$outf" "$iw" "$ih" "$ow" "$oh" "$rotate_angle" \
+		"$hflip" "$vflip" "$enc" "$assets/fixtures/$name.input" \
+		"$out/$name.output" > "$out/$name.log" 2>&1
+	"$tools/brick-g2d-compare" "$out/$name.output" \
+		"$assets/fixtures/$name.expected" "$assets/fixtures/$name.mask" \
+		"$tolerance" > "$out/$name.compare"
+done < "$assets/cases.tsv"
+
+timeout 45 "$tools/brick-g2d-compose" "$media" "$background" "$foreground" \
+	"$capture" > "$out/compositor.log" 2>&1
+cat /proc/interrupts > "$out/interrupts-after"
+dmesg > "$out/dmesg-after"
+printf 'PASS g2d qualification\n' | tee "$out/RESULT"

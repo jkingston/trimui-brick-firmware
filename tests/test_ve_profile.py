@@ -26,6 +26,9 @@ class VeProfileTests(unittest.TestCase):
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n'
             '# BR2_PACKAGE_BRICK_EMMC_RECOVERY is not set\n'
             '# BR2_PACKAGE_BRICK_SCP is not set\n'
+            '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
+            'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y\n'
+            '# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV is not set\n'
             '# BR2_BRICK_VE_QUALIFICATION is not set\n')
 
     def tools(self):
@@ -82,6 +85,8 @@ class VeProfileTests(unittest.TestCase):
         self.assertFalse(ve_profile.enabled(self.config))
         ve_profile.configure(self.config, 'qualification')
         self.assertTrue(ve_profile.enabled(self.config))
+        self.assertIn('BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y',
+                      self.config.read_text())
         ve_profile.configure(self.config, 'disabled')
         self.assertEqual(self.config.read_text(), before)
 
@@ -138,6 +143,11 @@ class VeProfileTests(unittest.TestCase):
         emmc_recovery.configure(self.config, '0')
         scp_profile.configure(self.config, 'startup')
         cases.append(('SCP', self.config.read_text()))
+        scp_profile.configure(self.config, 'disabled')
+        self.config.write_text(self.config.read_text().replace(
+            '# BR2_BRICK_G2D_QUALIFICATION is not set',
+            'BR2_BRICK_G2D_QUALIFICATION=y'))
+        cases.append(('G2D', self.config.read_text()))
         for message, text in cases:
             with self.subTest(message=message):
                 self.config.write_text(text)

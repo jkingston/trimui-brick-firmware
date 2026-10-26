@@ -13,6 +13,7 @@ from usb_profile import profile as usb_profile
 
 
 KEY = 'BR2_BRICK_VE_QUALIFICATION'
+G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,ve-qualification'
@@ -38,8 +39,18 @@ def enabled(config):
 
 def check_output(config, requested):
     requested = requested == 'qualification'
-    if config.exists() and enabled(config) != requested:
+    if not config.exists():
+        return
+    if enabled(config) != requested:
         raise ValueError('Use a fresh output directory when changing video-engine profile')
+    text = config.read_text()
+    expected = (
+        ('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV is not set',
+         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if requested else
+        ('BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y',
+         '# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV is not set'))
+    if any(value not in text.splitlines() for value in expected):
+        raise ValueError('Video-engine profile has the wrong device manager')
 
 
 def configure(config, requested):
@@ -49,7 +60,21 @@ def configure(config, requested):
     text, count = re.subn(old, new, config.read_text(), flags=re.M)
     if count != 1:
         raise ValueError('Missing or duplicate video-engine profile configuration')
+    settings = {
+        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not requested,
+        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': requested,
+    }
+    for key, value in settings.items():
+        pattern = r'^(?:' + key + r'=y|# ' + key + r' is not set)$'
+        replacement = key + '=y' if value else '# ' + key + ' is not set'
+        text, count = re.subn(pattern, replacement, text, flags=re.M)
+        if count != 1:
+            raise ValueError(f'Missing or duplicate {key} configuration')
     config.write_text(text)
+
+
+def _g2d_enabled(config):
+    return bool(re.search(r'^' + G2D_KEY + r'=y$', config.read_text(), re.M))
 
 
 def _get(fdtget, dtb, node, prop, kind='s', default=None):
@@ -133,6 +158,8 @@ def validate(fdtget, dtb, active, marker=False):
 def install(images, config, fdtget, fdtput):
     if not enabled(config):
         raise ValueError('video-engine installation requires the qualification configuration')
+    if _g2d_enabled(config):
+        raise ValueError('video-engine and G2D qualification must remain separate')
     if usb_profile(config) != 'peripheral':
         raise ValueError('video-engine qualification requires the USB gadget profile')
     if emmc_recovery_enabled(config):

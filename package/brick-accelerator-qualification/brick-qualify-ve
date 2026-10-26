@@ -1,0 +1,80 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+usage="usage: $0 probe NEW-RESULT-DIRECTORY | decode CASE NEW-RESULT-DIRECTORY"
+[ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
+marker=/sys/firmware/devicetree/base/chosen/trimui,ve-qualification
+[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ] || {
+	echo "not a video-engine qualification image" >&2
+	exit 2
+}
+mode=$1
+shift
+assets=/usr/share/brick-qualification/ve
+
+find_cedrus()
+{
+	found=
+	for path in /sys/class/video4linux/video*; do
+		[ -e "$path" ] || continue
+		[ "$(cat "$path/name")" = cedrus ] || continue
+		[ -z "$found" ] || { echo "duplicate Cedrus devices" >&2; exit 2; }
+		found=/dev/$(basename "$path")
+	done
+	[ -n "$found" ] || { echo "missing Cedrus device" >&2; exit 2; }
+	printf '%s\n' "$found"
+}
+
+if [ "$mode" = probe ] && [ "$#" -eq 1 ]; then
+	[ ! -e "$1" ] || { echo "$1 already exists" >&2; exit 2; }
+	mkdir "$1"
+	out=$(cd "$1" && pwd)
+	device=$(find_cedrus)
+	cat /proc/interrupts > "$out/interrupts"
+	dmesg > "$out/dmesg"
+	v4l2-ctl -d "$device" --all > "$out/v4l2-ctl.log" 2>&1
+	v4l2-compliance -d "$device" > "$out/v4l2-compliance.log" 2>&1
+	for decoder in v4l2slmpeg2dec v4l2slh264dec v4l2slh265dec; do
+		gst-inspect-1.0 "$decoder" > "$out/$decoder.log" 2>&1
+	done
+	printf 'PASS ve probe qualification\n' | tee "$out/RESULT"
+	exit 0
+fi
+
+[ "$mode" = decode ] && [ "$#" -eq 2 ] || { echo "$usage" >&2; exit 2; }
+case_name=$1
+out=$2
+[ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
+case "$case_name" in
+	mpeg2-ipb) suffix=mpeg2; parser=mpegvideoparse; decoder=v4l2slmpeg2dec;;
+	h264-ip) suffix=h264; parser=h264parse; decoder=v4l2slh264dec;;
+	hevc-ip|hevc-tiles|hevc-wpp) suffix=hevc; parser=h265parse; decoder=v4l2slh265dec;;
+	*) echo "unknown case: $case_name" >&2; exit 2;;
+esac
+input=$assets/$case_name.$suffix
+[ -f "$input" ] || exit 2
+expected_input=$(awk -v name="$case_name.$suffix" '$2 == name { print $1 }' \
+	"$assets/FIXTURE-SHA256")
+[ -n "$expected_input" ] && [ "$(sha256sum "$input" | awk '{ print $1 }')" = "$expected_input" ] || {
+	echo "fixture checksum mismatch" >&2
+	exit 2
+}
+mkdir "$out"
+out=$(cd "$out" && pwd)
+find_cedrus > "$out/device"
+dmesg > "$out/dmesg-before"
+gst-inspect-1.0 "$decoder" > "$out/decoder.log" 2>&1
+GST_DEBUG='v4l2codecs*:5' timeout 30 gst-launch-1.0 -e -v \
+	filesrc location="$input" ! "$parser" ! "$decoder" ! \
+	videoconvert ! 'video/x-raw,format=I420' ! \
+	filesink location="$out/output.yuv" >> "$out/decoder.log" 2>&1
+expected=$(awk -v name="$case_name.reference.yuv" '$2 == name { print $1 }' "$assets/REFERENCE-SHA256")
+[ -n "$expected" ] || exit 2
+actual=$(sha256sum "$out/output.yuv" | awk '{ print $1 }')
+[ "$actual" = "$expected" ] || {
+	printf 'FAIL expected=%s actual=%s\n' "$expected" "$actual" | tee "$out/RESULT"
+	exit 1
+}
+dmesg > "$out/dmesg-after"
+printf 'PASS ve decode case=%s sha256=%s\n' "$case_name" "$actual" | tee "$out/RESULT"
