@@ -30,6 +30,9 @@ BLKGETSIZE64 = 0x80081272
 FDT_MAGIC = 0xD00DFEED
 ADB_COMMAND_TIMEOUT = 30
 ADB_TRANSFER_TIMEOUT = 120
+ADB_LOCK = "/tmp/.brick-bootloader-update-lock"
+ADB_PAYLOAD_RECORD = ADB_LOCK + "/payload"
+ADB_STATE_RECORD = ADB_LOCK + "/state"
 
 
 class UpgradeError(RuntimeError):
@@ -378,6 +381,7 @@ class AdbCard:
             self.prefix += ["-s", serial]
         self.remote_files = []
         self.locked = False
+        self.uncertain_write = False
 
     def _run(self, arguments, timeout=ADB_COMMAND_TIMEOUT):
         try:
@@ -393,13 +397,21 @@ class AdbCard:
     def shell(self, command, timeout=ADB_COMMAND_TIMEOUT):
         return self._run(["shell", command], timeout=timeout).replace(b"\r\n", b"\n")
 
-    def __enter__(self):
+    def _require_root(self):
         if self.shell("id -u").strip() != b"0":
             raise UpgradeError("stock ADB shell is not root")
+
+    def __enter__(self):
+        self._require_root()
         # These are stock's established no-sleep sentinels. They do not touch SD.
         self.shell("printf '%s\\n' brick-bootloader-update > /tmp/stay_awake; "
                    "printf '%s\\n' brick-bootloader-update > /tmp/stay_alive")
-        self.shell("mkdir /tmp/.brick-bootloader-update-lock")
+        if self.shell(f"if test -e {ADB_LOCK}; then echo locked; fi").strip():
+            raise UpgradeError(
+                "ADB bootloader lock exists; if a raw write was interrupted, run "
+                "recover-adb-lock before any update or restore"
+            )
+        self.shell(f"mkdir {ADB_LOCK}")
         self.locked = True
         try:
             output = self.shell(f"test -b {self.path} || exit 1; "
@@ -413,18 +425,71 @@ class AdbCard:
             self.__exit__()
             raise
 
-    def __exit__(self, *_):
+    def __exit__(self, exception_type=None, exception=None, _traceback=None):
+        if self.uncertain_write:
+            # The lock and payload are recovery evidence. Removing either could
+            # let another raw writer overlap an operation still alive remotely.
+            return False
+        cleanup_errors = []
         for path in self.remote_files:
             try:
                 self.shell(f"rm -f {path}")
-            except UpgradeError:
-                pass
+            except UpgradeError as error:
+                cleanup_errors.append(error)
         if self.locked:
             try:
-                self.shell("rmdir /tmp/.brick-bootloader-update-lock")
-            except UpgradeError:
-                pass
+                self.shell(f"rm -f {ADB_PAYLOAD_RECORD} {ADB_STATE_RECORD}; "
+                           f"rmdir {ADB_LOCK}")
+            except UpgradeError as error:
+                cleanup_errors.append(error)
             self.locked = False
+        if cleanup_errors:
+            detail = "; ".join(str(error) for error in cleanup_errors)
+            if exception is not None and hasattr(exception, "add_note"):
+                exception.add_note(f"ADB cleanup also failed: {detail}")
+            elif exception_type is None:
+                raise UpgradeError(f"ADB cleanup failed: {detail}")
+        return False
+
+    def recover_uncertain_write(self):
+        """Clear a retained ADB lock only after proving its writer has exited."""
+        self._require_root()
+        payload = self.shell(
+            f"test -d {ADB_LOCK}; test -f {ADB_PAYLOAD_RECORD}; "
+            f"test -f {ADB_STATE_RECORD}; cat {ADB_PAYLOAD_RECORD}; "
+            f"cat {ADB_STATE_RECORD}"
+        ).decode().split()
+        if len(payload) != 2:
+            raise UpgradeError("ADB bootloader lock has incomplete recovery state")
+        payload, state = payload
+        prefix = "/tmp/.brick-bootloader-"
+        token = payload.removeprefix(prefix)
+        if (not payload.startswith(prefix) or len(token) != 32 or
+                any(character not in "0123456789abcdef" for character in token)):
+            raise UpgradeError("ADB bootloader lock has an invalid payload record")
+        if state not in ("writing", "complete"):
+            raise UpgradeError("ADB raw write was not recorded as started; lock preserved")
+        command = (
+            f"set -e; test \"$(cat {ADB_PAYLOAD_RECORD})\" = {payload}; "
+            f"state=$(cat {ADB_STATE_RECORD}); "
+            "test \"$state\" = writing -o \"$state\" = complete; "
+            "for file in /proc/[0-9]*/cmdline; do "
+            "test \"$file\" = \"/proc/$$/cmdline\" && continue; "
+            f"if /bin/busybox grep -Fq -f {ADB_PAYLOAD_RECORD} \"$file\" 2>/dev/null; "
+            "then echo writer-active; exit 7; fi; done; "
+            f"rm -f {payload} {ADB_PAYLOAD_RECORD} {ADB_STATE_RECORD}; "
+            f"rmdir {ADB_LOCK}; "
+            "echo recovered"
+        )
+        try:
+            output = self.shell(command, timeout=ADB_COMMAND_TIMEOUT)
+        except UpgradeError as error:
+            raise UpgradeError(
+                "uncertain ADB raw writer is still active or could not be disproved; "
+                "lock preserved"
+            ) from error
+        if output.strip() != b"recovered":
+            raise UpgradeError("ADB recovery did not return its exact completion marker")
 
     @property
     def identity(self):
@@ -481,20 +546,25 @@ class AdbCard:
         finally:
             os.unlink(local)
         digest = sha256(data)
+        self.shell(f"printf '%s\\n' {remote} > {ADB_PAYLOAD_RECORD}; "
+                   f"printf '%s\\n' armed > {ADB_STATE_RECORD}")
         try:
-            self.shell(f"set -e; test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
+            self.shell(f"set -e; printf '%s\\n' writing > {ADB_STATE_RECORD}; "
+                       f"test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
                        f"test \"$(/bin/busybox sha256sum {remote} | "
                        f"/bin/busybox awk '{{print $1}}')\" = {digest}; "
                        f"/bin/busybox dd if={remote} of={self.path} bs=4096 "
-                       f"seek={offset // 4096} conv=notrunc; /bin/busybox sync",
+                       f"seek={offset // 4096} conv=notrunc; /bin/busybox sync; "
+                       f"printf '%s\\n' complete > {ADB_STATE_RECORD}",
                        timeout=ADB_TRANSFER_TIMEOUT)
         except BaseException as error:
             # ADB cannot prove that a remote dd stopped after a timeout,
             # disconnect, or interruption. Starting an automatic restore could
             # overlap that writer and make recovery worse.
+            self.uncertain_write = True
             raise WriteUncertainError(
-                "ADB raw-write completion is uncertain; reconnect, verify no "
-                "writer remains, then use the saved backup with restore"
+                "ADB raw-write completion is uncertain; reconnect, run "
+                "recover-adb-lock, then use the saved backup with restore"
             ) from error
 
     def sync(self):
@@ -620,7 +690,7 @@ def upgrade(card, candidate, candidate_identity, allowed, expected_cid, backup_p
         if isinstance(update_error, WriteUncertainError):
             raise RestoreError(
                 f"upgrade write state is uncertain; no automatic restore was started; "
-                f"reconnect, verify no raw writer remains, then restore from {backup_path}"
+                f"reconnect, run recover-adb-lock, then restore from {backup_path}"
             ) from update_error
         try:
             restore_region(card, original[BOOT_START:BOOT_END], expected_cid, card_layout)
@@ -699,7 +769,20 @@ def main(argv=None):
     recovery.add_argument("--dry-run", action="store_true")
     recovery.add_argument("--adb", metavar="PATH", help="operate through root stock ADB")
     recovery.add_argument("--serial", help="ADB device serial")
+    adb_recovery = subparsers.add_parser(
+        "recover-adb-lock",
+        help="prove an interrupted remote writer exited, then clear its retained lock",
+    )
+    adb_recovery.add_argument("device", type=Path)
+    adb_recovery.add_argument("--adb", required=True, metavar="PATH")
+    adb_recovery.add_argument("--serial", help="ADB device serial")
     args = parser.parse_args(argv)
+
+    if args.action == "recover-adb-lock":
+        AdbCard(str(args.device), writable=False, adb=args.adb,
+                serial=args.serial).recover_uncertain_write()
+        print("ADB_WRITE_LOCK_RECOVERED")
+        return
 
     writable = not args.dry_run
     if args.adb:

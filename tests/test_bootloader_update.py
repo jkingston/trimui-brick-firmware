@@ -339,6 +339,11 @@ class FakeAdb:
         self.destructive_calls = 0
         self.fail_write = None
         self.corrupt_first_write = False
+        self.locked = False
+        self.payload_record = None
+        self.write_state = None
+        self.writer_active = False
+        self.fail_cleanup = False
 
     @staticmethod
     def completed(argv, stdout=b"", returncode=0, stderr=b""):
@@ -361,6 +366,42 @@ class FakeAdb:
         command = argv[index + 1]
         if command == "id -u":
             return self.completed(argv, b"0\n")
+        if command == f"if test -e {boot.ADB_LOCK}; then echo locked; fi":
+            return self.completed(argv, b"locked\n" if self.locked else b"")
+        if command == f"mkdir {boot.ADB_LOCK}":
+            if self.locked:
+                return self.completed(argv, returncode=1, stderr=b"File exists")
+            self.locked = True
+            return self.completed(argv)
+        if command.startswith("printf '%s\\n' /tmp/.brick-bootloader-"):
+            self.payload_record = command.split(" ", 2)[2].split(" >", 1)[0]
+            self.write_state = "armed"
+            return self.completed(argv)
+        if command == (f"test -d {boot.ADB_LOCK}; test -f {boot.ADB_PAYLOAD_RECORD}; "
+                       f"test -f {boot.ADB_STATE_RECORD}; cat {boot.ADB_PAYLOAD_RECORD}; "
+                       f"cat {boot.ADB_STATE_RECORD}"):
+            if not self.locked or not self.payload_record or not self.write_state:
+                return self.completed(argv, returncode=1, stderr=b"missing recovery state")
+            return self.completed(
+                argv, (self.payload_record + "\n" + self.write_state + "\n").encode())
+        if "echo recovered" in command and boot.ADB_PAYLOAD_RECORD in command:
+            if self.writer_active:
+                return self.completed(argv, returncode=7, stderr=b"writer active")
+            self.remote.pop(self.payload_record, None)
+            self.payload_record = None
+            self.write_state = None
+            self.locked = False
+            return self.completed(argv, b"recovered\n")
+        if command.startswith("rm -f /tmp/.brick-bootloader-"):
+            if self.fail_cleanup:
+                return self.completed(argv, returncode=1, stderr=b"cleanup failed")
+            path = command.split()[2].rstrip(";")
+            self.remote.pop(path, None)
+            if f"rmdir {boot.ADB_LOCK}" in command:
+                self.payload_record = None
+                self.write_state = None
+                self.locked = False
+            return self.completed(argv)
         if "device/type" in command:
             return self.completed(argv, f"SD\n{CID}\n512\n".encode())
         if command == "cat /sys/block/mmcblk1/size":
@@ -370,17 +411,27 @@ class FakeAdb:
             match = re.search(r"dd if=(/tmp/[^ ]+) of=/dev/mmcblk1 bs=4096 seek=([0-9]+)",
                               command)
             if match:
+                self.write_state = "writing"
                 payload = self.remote[match.group(1)]
                 start = int(match.group(2)) * 4096
                 self.destructive_calls += 1
                 if self.fail_write and self.destructive_calls == 1:
                     self.disk[start:start + 137] = payload[:137]
+                    self.writer_active = True
                     if self.fail_write == "timeout":
                         raise boot.subprocess.TimeoutExpired(argv, kwargs["timeout"])
                     return self.completed(argv, returncode=1, stderr=b"injected dd failure")
                 self.disk[start:start + len(payload)] = payload
                 if self.corrupt_first_write and self.destructive_calls == 1:
                     self.disk[start + len(payload) - 1] ^= 1
+                self.write_state = "complete"
+        if command == (f"rm -f {boot.ADB_PAYLOAD_RECORD} {boot.ADB_STATE_RECORD}; "
+                       f"rmdir {boot.ADB_LOCK}"):
+            if self.fail_cleanup:
+                return self.completed(argv, returncode=1, stderr=b"cleanup failed")
+            self.payload_record = None
+            self.write_state = None
+            self.locked = False
         return self.completed(argv)
 
 
@@ -451,6 +502,12 @@ class AdbBackendTests(unittest.TestCase):
                     boot.upgrade(card, candidate, identity, [("known.bin", current)],
                                  CID, backup)
             self.assertEqual(fake.destructive_calls, 1)
+            recovery = boot.AdbCard("/dev/mmcblk1", writable=False, adb="mock-adb")
+            with self.assertRaisesRegex(boot.UpgradeError, "still active"):
+                recovery.recover_uncertain_write()
+            self.assertTrue(fake.locked)
+            fake.writer_active = False
+            recovery.recover_uncertain_write()
             fake.fail_write = None
             with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
                 boot.restore(card, backup, CID)
@@ -471,6 +528,39 @@ class AdbBackendTests(unittest.TestCase):
                        if "shell" in argv and " of=/dev/mmcblk1 " in argv[-1]]
         self.assertEqual(len(destructive), 1)
         self.assertEqual(destructive[0][1]["timeout"], boot.ADB_TRANSFER_TIMEOUT)
+        self.assertTrue(fake.locked)
+        self.assertIsNotNone(fake.payload_record)
+
+    def test_uncertain_lock_blocks_second_update_and_restore_without_raw_write(self):
+        root, current, candidate, identity, _original, _disk, fake = self.fixture()
+        fake.fail_write = "timeout"
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                with self.assertRaises(boot.RestoreError):
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, backup)
+            destructive_before = fake.destructive_calls
+            with self.assertRaisesRegex(boot.UpgradeError, "lock exists"):
+                with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, root / "second-backup.bin")
+            with self.assertRaisesRegex(boot.UpgradeError, "lock exists"):
+                with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                    boot.restore(card, backup, CID)
+        self.assertEqual(fake.destructive_calls, destructive_before)
+
+    def test_recovery_cannot_clear_an_armed_prewrite_lock(self):
+        _root, _current, _candidate, _identity, _original, _disk, fake = self.fixture()
+        fake.locked = True
+        fake.payload_record = "/tmp/.brick-bootloader-" + "a" * 32
+        fake.write_state = "armed"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            recovery = boot.AdbCard("/dev/mmcblk1", writable=False, adb="mock-adb")
+            with self.assertRaisesRegex(boot.UpgradeError, "not recorded as started"):
+                recovery.recover_uncertain_write()
+        self.assertTrue(fake.locked)
+        self.assertEqual(fake.destructive_calls, 0)
 
     def test_adb_temporary_payload_and_lock_are_cleaned_up(self):
         root, current, candidate, identity, _original, _disk, fake = self.fixture()
@@ -482,8 +572,20 @@ class AdbBackendTests(unittest.TestCase):
         commands = [argv[-1] for argv, _kwargs in fake.calls if "shell" in argv]
         self.assertTrue(any(command.startswith("rm -f /tmp/.brick-bootloader-")
                             for command in commands))
-        self.assertIn("rmdir /tmp/.brick-bootloader-update-lock", commands)
+        self.assertIn(f"rm -f {boot.ADB_PAYLOAD_RECORD} {boot.ADB_STATE_RECORD}; "
+                      f"rmdir {boot.ADB_LOCK}", commands)
         self.assertTrue(all("timeout" in kwargs for _argv, kwargs in fake.calls))
+
+    def test_adb_cleanup_failure_is_reported_and_lock_is_retained(self):
+        root, current, candidate, identity, _original, _disk, fake = self.fixture()
+        backup = root / "backup.bin"
+        with patch.object(boot.subprocess, "run", side_effect=fake):
+            with self.assertRaisesRegex(boot.UpgradeError, "cleanup failed"):
+                with boot.AdbCard("/dev/mmcblk1", writable=True, adb="mock-adb") as card:
+                    boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                                 CID, backup)
+                    fake.fail_cleanup = True
+        self.assertTrue(fake.locked)
 
 
 if __name__ == "__main__":
