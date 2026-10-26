@@ -115,11 +115,20 @@ if [ -d "$previous" ]; then
 fi
 $bb mkdir "$stage"
 staged=1
-$bb cp "$work/payload/Image" "$stage/Image"
-$bb cp "$work/payload/brick-usb.dtb" "$stage/brick-usb.dtb"
-$bb cp "$work/payload/initramfs.cpio.gz" "$stage/initramfs.cpio.gz"
-$bb cp "$work/payload/SHA256SUMS" "$stage/SHA256SUMS"
-$bb cp "$work/payload/manifest.json" "$stage/manifest.json"
+# Stock mounts this FAT filesystem with `sync`. BusyBox cp uses a small copy
+# buffer, so every small write waits for the card. Keep the crash-safe mount
+# policy and reduce those waits by issuing bounded 1 MiB writes instead.
+copy_payload_file() {{
+ source=$1
+ destination=$2
+ expected_size=$($bb wc -c < "$source")
+ [ "$expected_size" -gt 0 ]
+ $bb dd if="$source" of="$destination" bs=1048576 2>/dev/null
+ [ "$($bb wc -c < "$destination")" = "$expected_size" ]
+}}
+for name in Image brick-usb.dtb initramfs.cpio.gz SHA256SUMS manifest.json; do
+ copy_payload_file "$work/payload/$name" "$stage/$name"
+done
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
 # Arm rollback before publishing. This makes a power loss during either rename
 # recoverable even when the newly staged payload never starts.

@@ -96,13 +96,7 @@ class InstallTests(unittest.TestCase):
         self.write_payload(payload, b'new')
         bootloader = b'test bootloader'
         (payload / deploy.BOOTLOADER).write_bytes(bootloader)
-        archive_lines = []
-        for file in payload.iterdir():
-            archive_lines.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.name}\n')
-        (payload / 'ARCHIVE-SHA256SUMS').write_text(''.join(archive_lines))
-        with tarfile.open(self.tmp / 'test.tar.gz', 'w:gz') as archive:
-            for file in payload.iterdir():
-                archive.add(file, arcname=file.name)
+        self.pack_source_payload(payload)
         self.raw = self.root / 'mmcblk0'
         self.raw.write_bytes(bytes(128 * 1024) + bootloader)
         self.env.update(TEST_SD=str(self.sd), REAL_BB=self.busybox)
@@ -113,7 +107,10 @@ shift
 case "$command" in
  mount) rmdir "$2" && ln -s "$TEST_SD" "$2"; exit $? ;;
  umount) rm "$1" && mkdir "$1"; exit $? ;;
- cp) if [ "${FAIL_ACTION:-}" = copy ]; then echo INJECTED-copy >&2; exit 1; fi ;;
+ dd)
+  case " $*:${FAIL_ACTION:-}" in
+   *" of="*:copy) : > "$DD_FAILURE_MARKER"; exit 1 ;;
+  esac ;;
  mv)
   case "$1:${FAIL_ACTION:-}" in
    */brick-next:publish|*/brick-next:publish-and-restore|*/brick-previous:publish-and-restore) echo INJECTED-rename >&2; exit 1 ;;
@@ -134,6 +131,17 @@ exec "$REAL_BB" "$command" "$@"
         self.script = self.root / 'install.sh'
         self.script.write_text(script)
 
+    def pack_source_payload(self, payload):
+        archive_lines = []
+        for file in payload.iterdir():
+            if file.name == 'ARCHIVE-SHA256SUMS':
+                continue
+            archive_lines.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.name}\n')
+        (payload / 'ARCHIVE-SHA256SUMS').write_text(''.join(archive_lines))
+        with tarfile.open(self.tmp / 'test.tar.gz', 'w:gz') as archive:
+            for file in payload.iterdir():
+                archive.add(file, arcname=file.name)
+
     def write_payload(self, directory, content):
         directory.mkdir()
         lines = []
@@ -145,6 +153,8 @@ exec "$REAL_BB" "$command" "$@"
 
     def run_installer(self, failure=''):
         import subprocess
+        self.dd_failure_marker = self.root / 'dd-failure'
+        self.env['DD_FAILURE_MARKER'] = str(self.dd_failure_marker)
         self.env['FAIL_ACTION'] = failure
         return subprocess.run([self.busybox, 'sh', str(self.script)], env=self.env,
                               capture_output=True, text=True, timeout=15)
@@ -211,9 +221,30 @@ exec "$REAL_BB" "$command" "$@"
     def test_copy_failure_preserves_current(self):
         result = self.run_installer('copy')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('INJECTED-copy', result.stderr)
+        self.assertTrue(self.dd_failure_marker.exists())
         self.assertEqual((self.current / 'Image').read_bytes(), b'current')
         self.assert_clean()
+
+    def test_payload_copy_uses_large_writes_without_remounting(self):
+        script = deploy.install_script('test')
+        self.assertIn('bs=1048576', script)
+        self.assertIn('wc -c < "$destination"', script)
+        self.assertNotIn('$bb cp "$work/payload/', script)
+        self.assertNotIn('remount', script)
+
+    def test_large_unaligned_payload_roundtrips_exactly(self):
+        payload = self.root / 'payload'
+        content = b'large-payload-block-' * 140000 + b'tail'
+        (payload / 'initramfs.cpio.gz').write_bytes(content)
+        lines = []
+        for name in deploy.PAYLOAD.values():
+            checksum = hashlib.sha256((payload / name).read_bytes()).hexdigest()
+            lines.append(f'{checksum}  {name}\n')
+        (payload / 'SHA256SUMS').write_text(''.join(lines))
+        self.pack_source_payload(payload)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.current / 'initramfs.cpio.gz').read_bytes(), content)
 
     def test_publish_failure_restores_current(self):
         result = self.run_installer('publish')
