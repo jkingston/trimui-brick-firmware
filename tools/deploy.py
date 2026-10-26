@@ -15,23 +15,39 @@ from serial_console import Console, DEFAULT_PORT, ProtocolError
 
 PAYLOAD = {'Image': 'Image', 'sun50i-a133-trimui-brick.dtb': 'brick-usb.dtb',
            'rootfs.cpio.gz': 'initramfs.cpio.gz'}
+BOOTLOADER = 'u-boot-sunxi-with-spl.bin'
+BOOTLOADER_OFFSET = 128 * 1024
 
 def package(images, directory):
     manifest = json.loads((images / 'manifest.json').read_text())
     checksums = []
-    for source, target in PAYLOAD.items():
+    archive_checksums = []
+    for source, target in (*PAYLOAD.items(), (BOOTLOADER, BOOTLOADER)):
         path = images / source
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         if digest != manifest['files'][source]['sha256']:
             raise ValueError(f'Artifact checksum mismatch: {source}')
+        if len(data) != manifest['files'][source]['bytes']:
+            raise ValueError(f'Artifact size mismatch: {source}')
         (directory / target).write_bytes(data)
-        checksums.append(f'{digest}  {target}\n')
+        archive_checksums.append(f'{digest}  {target}\n')
+        if source in PAYLOAD:
+            checksums.append(f'{digest}  {target}\n')
+    with (images / 'sdcard.img').open('rb') as card:
+        card.seek(BOOTLOADER_OFFSET)
+        if card.read(manifest['files'][BOOTLOADER]['bytes']) != (images / BOOTLOADER).read_bytes():
+            raise ValueError('Bootloader does not match the SD image at 128 KiB')
     (directory / 'SHA256SUMS').write_text(''.join(checksums))
     (directory / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    for name in ('SHA256SUMS', 'manifest.json'):
+        digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        archive_checksums.append(f'{digest}  {name}\n')
+    (directory / 'ARCHIVE-SHA256SUMS').write_text(''.join(archive_checksums))
     archive = directory / 'update.tar.gz'
     with tarfile.open(archive, 'w:gz') as tar:
-        for name in (*PAYLOAD.values(), 'SHA256SUMS', 'manifest.json'):
+        for name in (*PAYLOAD.values(), BOOTLOADER, 'SHA256SUMS',
+                     'manifest.json', 'ARCHIVE-SHA256SUMS'):
             tar.add(directory / name, arcname=name)
     return archive, manifest
 
@@ -63,7 +79,17 @@ $bb mkdir -p "$work/payload" "$mountpoint"
 $bb gzip -dc /tmp/{token}.tar.gz > "$work/payload.tar"
 $bb tar -xf "$work/payload.tar" -C "$work/payload"
 $bb rm "$work/payload.tar"
-(cd "$work/payload" && $bb sha256sum -c SHA256SUMS)
+(cd "$work/payload" && $bb sha256sum -c ARCHIVE-SHA256SUMS)
+# Rollback is implemented by the exact U-Boot build in this update. Refuse to
+# arm bootcount unless the raw SPL/U-Boot region already contains that build.
+bootloader="$work/payload/u-boot-sunxi-with-spl.bin"
+bootloader_size=$($bb wc -c < "$bootloader")
+[ "$bootloader_size" -gt 0 ]
+[ "$bootloader_size" -le 4063232 ]
+bootloader_sectors=$(( (bootloader_size + 511) / 512 ))
+expected_bootloader=$($bb sha256sum "$bootloader" | $bb awk '{{ print $1 }}')
+installed_bootloader=$($bb dd if=/dev/mmcblk0 bs=512 skip=256 count="$bootloader_sectors" 2>/dev/null | $bb head -c "$bootloader_size" | $bb sha256sum | $bb awk '{{ print $1 }}')
+[ "$installed_bootloader" = "$expected_bootloader" ]
 # Match the device number so mounts through UUID/label aliases also count.
 device=$($bb cat /sys/class/block/mmcblk0p1/dev)
 mounted_device=$($bb awk -v device="$device" '$3 == device {{ print $3 }}' /proc/self/mountinfo)
@@ -89,7 +115,11 @@ if [ -d "$previous" ]; then
 fi
 $bb mkdir "$stage"
 staged=1
-$bb cp "$work/payload/"* "$stage/"
+$bb cp "$work/payload/Image" "$stage/Image"
+$bb cp "$work/payload/brick-usb.dtb" "$stage/brick-usb.dtb"
+$bb cp "$work/payload/initramfs.cpio.gz" "$stage/initramfs.cpio.gz"
+$bb cp "$work/payload/SHA256SUMS" "$stage/SHA256SUMS"
+$bb cp "$work/payload/manifest.json" "$stage/manifest.json"
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
 # Arm rollback before publishing. This makes a power loss during either rename
 # recoverable even when the newly staged payload never starts.
@@ -107,6 +137,7 @@ if ! $bb mv "$stage" "$current"; then
  exit 1
 fi
 staged=0
+(cd "$current" && $bb sha256sum -c SHA256SUMS)
 $bb sync
 $bb umount "$mountpoint"
 mounted=0
@@ -173,7 +204,11 @@ def main():
         with Console(args.port) as console:
             console.upload(archive, '/tmp/' + token + '.tar.gz', raw=True, timeout=args.timeout)
             console.upload(script, '/tmp/' + token + '.sh')
-            print(console.checked('/bin/sh ' + shlex.quote('/tmp/' + token + '.sh'), timeout=args.timeout).decode(), end='')
+            output = console.checked('/bin/sh ' + shlex.quote('/tmp/' + token + '.sh'),
+                                     timeout=args.timeout).decode()
+            print(output, end='')
+            if not output.splitlines() or output.splitlines()[-1] != 'UPDATE_VERIFIED':
+                raise ProtocolError('Installer did not return its completion token')
             console.checked('/bin/busybox rm ' + shlex.quote('/tmp/' + token + '.sh'))
             if args.no_reboot:
                 return

@@ -25,19 +25,27 @@ class PackageTests(unittest.TestCase):
         self.images.mkdir()
         self.stage.mkdir()
         files = {}
-        for name in deploy.PAYLOAD:
+        for name in (*deploy.PAYLOAD, deploy.BOOTLOADER):
             data = ('test ' + name).encode()
             (self.images / name).write_bytes(data)
-            files[name] = {'sha256': hashlib.sha256(data).hexdigest()}
+            files[name] = {'sha256': hashlib.sha256(data).hexdigest(),
+                           'bytes': len(data)}
+        bootloader = (self.images / deploy.BOOTLOADER).read_bytes()
+        (self.images / 'sdcard.img').write_bytes(bytes(deploy.BOOTLOADER_OFFSET) + bootloader)
         (self.images / 'manifest.json').write_text(json.dumps({'files': files}))
 
     def test_archive_names_and_checksums_match_sd_layout(self):
         archive, _ = deploy.package(self.images, self.stage)
         with tarfile.open(archive) as contents:
             self.assertEqual(set(contents.getnames()),
-                             {*deploy.PAYLOAD.values(), 'SHA256SUMS', 'manifest.json'})
+                             {*deploy.PAYLOAD.values(), deploy.BOOTLOADER,
+                              'SHA256SUMS', 'manifest.json', 'ARCHIVE-SHA256SUMS'})
             checksums = contents.extractfile('SHA256SUMS').read().decode()
             for line in checksums.splitlines():
+                digest, name = line.split()
+                self.assertEqual(hashlib.sha256(contents.extractfile(name).read()).hexdigest(), digest)
+            archive_checksums = contents.extractfile('ARCHIVE-SHA256SUMS').read().decode()
+            for line in archive_checksums.splitlines():
                 digest, name = line.split()
                 self.assertEqual(hashlib.sha256(contents.extractfile(name).read()).hexdigest(), digest)
 
@@ -50,6 +58,12 @@ class PackageTests(unittest.TestCase):
     def test_missing_rootfs_is_rejected_before_upload(self):
         (self.images / 'rootfs.cpio.gz').unlink()
         with self.assertRaises(FileNotFoundError):
+            deploy.package(self.images, self.stage)
+        self.assertFalse((self.stage / 'update.tar.gz').exists())
+
+    def test_bootloader_at_wrong_sd_offset_is_rejected_before_upload(self):
+        (self.images / 'sdcard.img').write_bytes(b'wrong image')
+        with self.assertRaisesRegex(ValueError, '128 KiB'):
             deploy.package(self.images, self.stage)
         self.assertFalse((self.stage / 'update.tar.gz').exists())
 
@@ -80,9 +94,17 @@ class InstallTests(unittest.TestCase):
         self.write_payload(self.previous, b'previous')
         payload = self.root / 'payload'
         self.write_payload(payload, b'new')
+        bootloader = b'test bootloader'
+        (payload / deploy.BOOTLOADER).write_bytes(bootloader)
+        archive_lines = []
+        for file in payload.iterdir():
+            archive_lines.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.name}\n')
+        (payload / 'ARCHIVE-SHA256SUMS').write_text(''.join(archive_lines))
         with tarfile.open(self.tmp / 'test.tar.gz', 'w:gz') as archive:
             for file in payload.iterdir():
                 archive.add(file, arcname=file.name)
+        self.raw = self.root / 'mmcblk0'
+        self.raw.write_bytes(bytes(128 * 1024) + bootloader)
         self.env.update(TEST_SD=str(self.sd), REAL_BB=self.busybox)
         shim = self.root / 'busybox'
         shim.write_text('''#!/bin/sh
@@ -105,7 +127,8 @@ exec "$REAL_BB" "$command" "$@"
                         '/sys/class/block/mmcblk0/device/type': str(self.root / 'type'),
                         '/sys/firmware/devicetree/base/compatible': str(self.root / 'compatible'),
                         '/proc/self/mountinfo': str(self.root / 'mounts'),
-                        '/sys/class/block/mmcblk0p1/dev': str(self.root / 'device')}
+                        '/sys/class/block/mmcblk0p1/dev': str(self.root / 'device'),
+                        '/dev/mmcblk0': str(self.raw)}
         for old, new in replacements.items():
             script = script.replace(old, new)
         self.script = self.root / 'install.sh'
@@ -138,6 +161,7 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
                          bytes((0xbd, 1, 0, 1)))
+        self.assertFalse((self.current / deploy.BOOTLOADER).exists())
         self.assert_clean()
 
     def test_missing_current_manifest_preserves_existing_payloads(self):
@@ -148,6 +172,16 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.current / 'Image').read_bytes(), b'current')
         self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
         self.assertTrue((self.previous / 'manifest.json').exists())
+        self.assert_clean()
+
+    def test_incompatible_bootloader_refuses_before_sd_mutation(self):
+        self.raw.write_bytes(bytes(128 * 1024) + b'old bootloader')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('UPDATE_VERIFIED', result.stdout)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertFalse((self.sd / 'brick-bootcount').exists())
         self.assert_clean()
 
     def test_missing_previous_manifest_does_not_delete_rollback(self):
@@ -248,12 +282,13 @@ class BootIdentityTests(unittest.TestCase):
 
 
 class DeploymentLifecycleTests(unittest.TestCase):
-    def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None):
+    def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None,
+                       install_output=b'UPDATE_VERIFIED\n', token_failure=False):
         console = MagicMock()
         console.__enter__.return_value = console
         console.checked.side_effect = lambda command, **kwargs: (
             b'00000000-0000-0000-0000-000000000001\n' if 'boot_id' in command
-            else b'UPDATE_VERIFIED\n')
+            else install_output)
         if install_failure:
             console.checked.side_effect = deploy.ProtocolError('installer failed')
         args = ['deploy.py', 'images'] + (['--no-reboot'] if no_reboot else [])
@@ -262,7 +297,7 @@ class DeploymentLifecycleTests(unittest.TestCase):
              patch.object(deploy, 'package', return_value=(Path('archive'), {'build': 'new', 'usb_role': usb_role})), \
              patch.object(deploy, 'wait_for_boot') as wait, \
              patch.object(deploy.time, 'sleep'):
-            if install_failure:
+            if install_failure or token_failure:
                 with self.assertRaises(deploy.ProtocolError):
                     deploy.main()
             else:
@@ -307,6 +342,11 @@ class DeploymentLifecycleTests(unittest.TestCase):
 
     def test_install_failure_does_not_reboot_or_wait_for_boot(self):
         console, wait = self.run_deployment(install_failure=True)
+        self.assertFalse(any('reboot' in call.args[0] for call in console.checked.call_args_list))
+        wait.assert_not_called()
+
+    def test_missing_completion_token_does_not_reboot(self):
+        console, wait = self.run_deployment(install_output=b'', token_failure=True)
         self.assertFalse(any('reboot' in call.args[0] for call in console.checked.call_args_list))
         wait.assert_not_called()
 
