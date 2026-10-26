@@ -5,3 +5,11 @@ source "$BR2_EXTERNAL_BRICK_PATH/package/brick-controls/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-power/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-scp/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-emmc-recovery/Config.in"
+
+config BR2_BRICK_VE_QUALIFICATION
+	bool "Brick video-engine qualification profile"
+	help
+	  Enable the A133 IOMMU, both reviewed video SRAM selectors and the
+	  Cedrus video engine in the generated Brick DTB. This isolated profile
+	  is intended for deterministic codec and DMA-containment qualification;
+	  the ordinary image keeps every accelerator node disabled.

@@ -156,6 +156,8 @@ def verify_boot_manifest(actual, expected):
         raise ProtocolError('Boot eMMC recovery profile does not match expected image')
     if actual.get('scp_profile', 'disabled') != expected.get('scp_profile', 'disabled'):
         raise ProtocolError('Boot SCP profile does not match expected image')
+    if actual.get('ve_qualification', False) != expected.get('ve_qualification', False):
+        raise ProtocolError('Boot video-engine qualification profile does not match expected image')
     for field in ('firmware', 'kernel', 'config_sha256'):
         if actual[field] != expected[field]:
             raise ProtocolError(f'Running rootfs has different {field} metadata')
@@ -194,6 +196,8 @@ def main():
     parser.add_argument('--timeout', type=int, default=180)
     parser.add_argument('--emmc-recovery', action='store_true',
                         help='explicitly permit deploying an eMMC recovery profile')
+    parser.add_argument('--ve-qualification', action='store_true',
+                        help='explicitly permit deploying a video-engine qualification profile')
     args = parser.parse_args()
     token = 'brick-update-' + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='brick-update-') as temporary:
@@ -201,6 +205,8 @@ def main():
         archive, manifest = package(args.images, directory)
         if manifest.get('emmc_recovery', False) and not args.emmc_recovery:
             raise ValueError('Use --emmc-recovery for the dedicated recovery profile')
+        if manifest.get('ve_qualification', False) and not args.ve_qualification:
+            raise ValueError('Use --ve-qualification for the dedicated video-engine profile')
         script = directory / 'install.sh'
         script.write_text(install_script(token))
         with Console(args.port) as console:
