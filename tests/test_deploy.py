@@ -236,6 +236,16 @@ class BootIdentityTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(deploy.ProtocolError):
                 deploy.verify_boot_manifest(actual, expected)
 
+    def test_recovery_profile_cannot_be_mistaken_for_normal_image(self):
+        expected = {'firmware': {'commit': 'firmware-a'},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a', 'emmc_recovery': True,
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        actual = dict(expected, emmc_recovery=False)
+        with self.assertRaisesRegex(deploy.ProtocolError, 'eMMC recovery'):
+            deploy.verify_boot_manifest(actual, expected)
+
 
 class DeploymentLifecycleTests(unittest.TestCase):
     def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None):
@@ -299,6 +309,16 @@ class DeploymentLifecycleTests(unittest.TestCase):
         console, wait = self.run_deployment(install_failure=True)
         self.assertFalse(any('reboot' in call.args[0] for call in console.checked.call_args_list))
         wait.assert_not_called()
+
+    def test_emmc_recovery_requires_explicit_deployment_flag(self):
+        args = ['deploy.py', 'images']
+        manifest = {'emmc_recovery': True}
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
+             patch.object(deploy, 'Console') as console:
+            with self.assertRaisesRegex(ValueError, '--emmc-recovery'):
+                deploy.main()
+        console.assert_not_called()
 
 
 class BootTransitionTests(unittest.TestCase):

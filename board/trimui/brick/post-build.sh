@@ -10,6 +10,13 @@ if ! grep -q '^\$SUBSYSTEM=udc .*S30usb hotplug$' "$TARGET_DIR/etc/mdev.conf"; t
 	{ printf '%s\n' "$rules"; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
 	mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
 fi
+if grep -q '^BR2_PACKAGE_BRICK_EMMC_RECOVERY=y$' "$BR2_CONFIG" &&
+	! grep -q '^mmcblk\[0-9\]+rpmb root:root 000 !$' "$TARGET_DIR/etc/mdev.conf"; then
+	# RPMB has a character-device ioctl interface, so block it independently
+	# of the normal block-device force_ro policy.
+	{ printf '%s\n' 'mmcblk[0-9]+rpmb root:root 000 !'; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
+	mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+fi
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/usb_profile.py" install \
 	"$BINARIES_DIR" "$BR2_CONFIG" "$HOST_DIR/bin/fdtget"
 revision=$(sed -n '1p' "$BINARIES_DIR/kernel-source.txt")

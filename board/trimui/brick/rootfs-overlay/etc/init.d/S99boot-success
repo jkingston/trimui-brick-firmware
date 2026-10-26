@@ -11,6 +11,7 @@ mountpoint=/run/brick-boot
 state=$mountpoint/brick-bootcount
 temporary=$mountpoint/.brick-bootcount.good.$$
 
+[ "$(cat /sys/class/block/mmcblk0/device/type 2>/dev/null)" = SD ]
 [ -b "$device" ]
 [ -c /dev/watchdog ]
 mkdir -p "$mountpoint"

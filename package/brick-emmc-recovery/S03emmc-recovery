@@ -1,0 +1,187 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Identify the Brick's internal eMMC and make every ordinary block area RO.
+set -eu
+
+DAEMON=emmc-recovery
+sys=${BRICK_SYSFS_ROOT:-/sys}
+dev=${BRICK_DEV_ROOT:-/dev}
+run=${BRICK_RUN_ROOT:-/run}
+sleep_command=${BRICK_SLEEP:-sleep}
+marker=$sys/firmware/devicetree/base/chosen/trimui,emmc-recovery
+state=$run/brick-emmc-recovery
+controller=
+controllers=
+
+host_present() {
+	for host_path in "$1"/mmc*; do
+		[ -d "$host_path" ] && return 0
+	done
+	return 1
+}
+unbind_one() {
+	device=$1
+	driver=$device/driver
+	hosts=$device/mmc_host
+	override=$device/driver_override
+	[ -w "$override" ] || return 1
+	printf '%s\n' brick-emmc-rejected > "$override" || return 1
+	[ "$(cat "$override")" = brick-emmc-rejected ] || return 1
+	if [ -L "$driver" ]; then
+		driver_path=$(readlink -f "$driver") || return 1
+		[ "${driver_path##*/}" = sunxi-mmc ] || return 1
+		unbind_path=$sys/bus/platform/drivers/sunxi-mmc/unbind
+		[ -w "$unbind_path" ] || return 1
+		printf '%s\n' "${device##*/}" > "$unbind_path" || return 1
+	fi
+	attempt=0
+	while [ -L "$driver" ] || host_present "$hosts"; do
+		[ "$attempt" -lt 100 ] || return 1
+		$sleep_command 0.1 || return 1
+		attempt=$((attempt + 1))
+	done
+}
+unbind() {
+	[ -n "$controllers" ] || return 1
+	for device in $controllers; do
+		unbind_one "$device" || return 1
+	done
+}
+fail() {
+	reason=$1
+	if unbind; then
+		printf 'failed: %s\n' "$reason" > "$state" || :
+		echo "eMMC recovery failed safely: $reason" >&2 || :
+		exit 1
+	fi
+	printf 'unsafe: %s; controller remains bound\n' "$reason" > "$state" || :
+	echo "eMMC recovery containment failed: $reason; blocking init" >&2 || :
+	# Buildroot rcS ignores service failures.  Never return while a rejected
+	# controller may still expose writable media; the handoff watchdog can
+	# then select the verified rollback payload.
+	while :; do
+		$sleep_command 3600 || :
+	done
+}
+one() {
+	[ "$#" -eq 1 ] || return 1
+	printf '%s\n' "$1"
+}
+
+case "${1:-}" in
+start) ;;
+stop) exit 0 ;;
+*) echo "Usage: $0 {start|stop}" >&2; exit 2 ;;
+esac
+
+set -- "$sys"/bus/platform/devices/*.mmc
+for candidate in "$@"; do
+	[ -d "$candidate" ] || continue
+	node=$(readlink -f "$candidate/of_node" 2>/dev/null || true)
+	if [ "${node##*/}" = mmc@4022000 ]; then
+		controllers="${controllers}${controllers:+ }$candidate"
+	fi
+done
+set -- $controllers
+[ "$#" -eq 1 ] || fail 'ambiguous or absent controller 0x04022000'
+controller=$1
+mkdir -p "$run" || fail 'cannot create recovery state directory'
+[ -r "$marker" ] || fail 'recovery profile marker is absent'
+marker_value=$(tr -d '\000' < "$marker") || fail 'cannot read recovery profile marker'
+[ "$marker_value" = read-only ] || fail 'invalid profile marker'
+
+attempt=0
+while :; do
+	set -- "$controller"/mmc_host/mmc*
+	host=$(one "$@" 2>/dev/null || true)
+	[ -d "$host" ] && break
+	[ "$attempt" -lt 100 ] || fail 'MMC host did not appear'
+	$sleep_command 0.1 || fail 'MMC host wait failed'
+	attempt=$((attempt + 1))
+done
+
+attempt=0
+while :; do
+	set -- "$host"/mmc*:*
+	card=$(one "$@" 2>/dev/null || true)
+	[ -d "$card" ] && break
+	[ "$attempt" -lt 100 ] || fail 'eMMC card did not appear'
+	$sleep_command 0.1 || fail 'eMMC card wait failed'
+	attempt=$((attempt + 1))
+done
+
+[ "$(cat "$card/type")" = MMC ] || fail 'controller did not enumerate MMC'
+cid=$(cat "$card/cid") || fail 'cannot read eMMC CID'
+case "$cid" in
+????????????????????????????????) ;;
+*) fail 'invalid CID' ;;
+esac
+case "$cid" in *[!0-9a-fA-F]*) fail 'invalid CID' ;; esac
+product=$(cat "$card/name") || fail 'cannot read eMMC product'
+product_hex=$(printf '%s' "$product" | od -An -tx1 | tr -d ' \n')
+# The retained stock log includes the device's non-printing sixth product byte.
+[ "$product_hex" = 483847316505 ] || fail 'unexpected eMMC product'
+
+disk_path=
+for candidate in "$card"/block/mmcblk[0-9]*; do
+	[ -d "$candidate" ] || continue
+	name=${candidate##*/}
+	case "$name" in mmcblk[0-9]) ;;
+	mmcblk[0-9][0-9]) ;;
+	*) continue ;;
+	esac
+	[ -z "$disk_path" ] || fail 'ambiguous user block device'
+	disk_path=$candidate
+done
+[ -d "$disk_path" ] || fail 'ambiguous or absent user block device'
+disk=${disk_path##*/}
+case "$disk" in mmcblk[0-9]*) ;; *) fail 'invalid block-device name' ;; esac
+case "$disk" in *boot*|*rpmb*|*p[0-9]*) fail 'user block device not identified' ;; esac
+sectors=$(cat "$sys/class/block/$disk/size") || fail 'cannot read eMMC capacity'
+case "$sectors" in ''|*[!0-9]*) fail 'invalid eMMC capacity' ;; esac
+[ "$sectors" -ge 14000000 ] && [ "$sectors" -le 17000000 ] ||
+	fail 'eMMC capacity outside the 7.28 GiB device class'
+
+attempt=0
+while :; do
+	[ -e "$sys/class/block/${disk}boot0/force_ro" ] &&
+		[ -e "$sys/class/block/${disk}boot1/force_ro" ] &&
+		[ -e "$sys/bus/mmc_rpmb/devices/${disk}rpmb" ] && break
+	[ "$attempt" -lt 100 ] || fail 'boot or RPMB areas did not appear'
+	$sleep_command 0.1 || fail 'boot or RPMB wait failed'
+	attempt=$((attempt + 1))
+done
+
+for area in "$sys"/class/block/"${disk}"gp*; do
+	[ ! -e "$area" ] || fail "unexpected eMMC area ${area##*/}"
+done
+
+for area in "$disk" "${disk}boot0" "${disk}boot1"; do
+	attribute=$sys/class/block/$area/force_ro
+	[ -w "$attribute" ] || fail "$area lacks force_ro"
+	printf '1\n' > "$attribute" || fail "$area force_ro write failed"
+	[ "$(cat "$attribute")" = 1 ] || fail "$area force_ro did not latch"
+	[ "$(cat "$sys/class/block/$area/ro")" = 1 ] || fail "$area remains writable"
+	[ ! -e "$dev/$area" ] || chmod 0400 "$dev/$area" || fail "$area node permissions failed"
+done
+for partition in "$sys"/class/block/"$disk"p*; do
+	[ -e "$partition/ro" ] || continue
+	[ "$(cat "$partition/ro")" = 1 ] || fail "${partition##*/} remains writable"
+	[ ! -e "$dev/${partition##*/}" ] || chmod 0400 "$dev/${partition##*/}" ||
+		fail "${partition##*/} node permissions failed"
+done
+# RPMB bypasses the block queue and its force_ro policy.  The matching mdev
+# rule also suppresses recreation after the initial devtmpfs node is removed.
+rm -f "$dev/${disk}rpmb" || fail 'RPMB device node removal failed'
+[ ! -e "$dev/${disk}rpmb" ] || fail 'RPMB device node remains present'
+
+{
+	printf 'controller=%s\n' "${controller##*/}"
+	printf 'host=%s\n' "${host##*/}"
+	printf 'disk=%s\n' "$disk"
+	printf 'cid=%s\n' "$cid"
+	printf 'name=H8G1e\n'
+	printf 'name_hex=%s\n' "$product_hex"
+	printf 'sectors=%s\n' "$sectors"
+	printf 'mode=read-only\n'
+} > "$state" || fail 'cannot record recovery state'

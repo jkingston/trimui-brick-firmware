@@ -1,0 +1,8 @@
+config BR2_PACKAGE_BRICK_EMMC_RECOVERY
+	bool "Brick read-only eMMC recovery profile"
+	help
+	  Dedicated image enabling the measured A133 eMMC DDR52 mode.
+	  It identifies the fitted device and forces its user and boot
+	  block devices read-only before other board services start.
+	  USB gadget recovery remains available. This is disabled by
+	  default.

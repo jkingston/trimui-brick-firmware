@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 from usb_profile import profile
+from emmc_recovery import enabled as emmc_recovery_enabled
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--rootfs', type=Path)
@@ -30,6 +31,7 @@ kernel = source(a.kernel_override) if a.kernel_override else {'commit': a.kernel
 kernel['release'] = (a.images / 'kernel.release').read_text().strip()
 manifest = {'firmware': source(root), 'kernel': kernel, 'buildroot': '2026.08.1',
             'usb_role': profile(a.config),
+            'emmc_recovery': emmc_recovery_enabled(a.config),
             'config_sha256': hashlib.sha256(a.config.read_bytes()).hexdigest(), 'files': {}}
 names = ['Image', 'sun50i-a133-trimui-brick.dtb']
 if not a.rootfs:
