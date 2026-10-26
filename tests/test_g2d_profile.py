@@ -24,6 +24,7 @@ class G2dProfileTests(unittest.TestCase):
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""\n'
             '# BR2_PACKAGE_BRICK_EMMC_RECOVERY is not set\n'
             '# BR2_PACKAGE_BRICK_SCP is not set\n'
+            '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
             '# BR2_BRICK_VE_QUALIFICATION is not set\n')
 
