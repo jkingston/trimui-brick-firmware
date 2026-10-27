@@ -124,9 +124,29 @@ def install(images, config, fdtget):
             raise ValueError(f'{role} profile has inconsistent {node} dr_mode')
     if role == 'auto':
         owner = '/usb-role-switch'
+        phy = '/soc/phy@5100400'
+        pio = '/soc/pinctrl@300b000'
         if (get(owner, 'status', default='okay') != 'okay' or
                 get(owner, 'compatible') != 'trimui,brick-usb-role-switch'):
             raise ValueError('auto profile lacks its role coordinator')
+        owner_properties = properties(owner)
+        if 'id-gpios' not in owner_properties:
+            raise ValueError('auto profile does not own the stock PH8 ID input')
+        if not {'phys', 'phy-names', 'vbus-power-supply'}.issubset(owner_properties):
+            raise ValueError('auto profile lacks required PHY or VBUS ownership')
+        if (get(owner, 'phys', 'x').split() !=
+                [get(phy, 'phandle', 'x'), '0'] or
+                get(owner, 'phy-names') != 'usb'):
+            raise ValueError('auto profile has inconsistent PHY ownership')
+        if (get(owner, 'id-gpios', 'x').split() !=
+                [get(pio, 'phandle', 'x'), '7', '8', '0']):
+            raise ValueError('auto profile does not own the stock PH8 ID input')
+        if not get(owner, 'vbus-power-supply', 'x'):
+            raise ValueError('auto profile lacks VBUS supply observation')
+        phy_properties = properties(phy)
+        if ('usb-role-switch' not in phy_properties or
+                'usb0_id_det-gpios' in phy_properties):
+            raise ValueError('auto profile has conflicting PHY role ownership')
         for prop, node, mode in [('peripheral', 'usb@5100000', 'peripheral'),
                                  ('ehci', 'usb@5101000', 'host'),
                                  ('ohci', 'usb@5101400', 'host')]:

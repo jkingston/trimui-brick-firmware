@@ -56,8 +56,11 @@ class ProfileTests(unittest.TestCase):
         host = 'okay' if role == 'host' else 'disabled'
         coordinator = '' if role != 'auto' else '''usb-role-switch {
  compatible = "trimui,brick-usb-role-switch";
+ phys = <&usbphy 0>; phy-names = "usb";
+ id-gpios = <&pio 7 8 0>; vbus-power-supply = <&pmic>;
  peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
 };'''
+        phy_switch = 'usb-role-switch;' if role == 'auto' else ''
         wake = ''
         deep_context = ''
         nmi_parent = '&gic'
@@ -78,11 +81,13 @@ class ProfileTests(unittest.TestCase):
         source = f'''/dts-v1/;
 / {{ #address-cells = <1>; #size-cells = <1>; {wake}
  {coordinator}
+ pmic: power-supply {{ }};
  soc {{ #address-cells = <1>; #size-cells = <1>; ranges;
  ccu: clock@3001000 {{ reg = <0x3001000 0x1000>; {deep_context} }};
  rccu: clock@7010000 {{ reg = <0x7010000 0x400>; {deep_context} }};
  pio: pinctrl@300b000 {{ reg = <0x300b000 0x400>; {deep_context} }};
  rpio: pinctrl@7022000 {{ reg = <0x7022000 0x400>; {deep_context} }};
+ usbphy: phy@5100400 {{ reg = <0x5100400 0x100>; #phy-cells = <1>; {phy_switch} }};
  gic: interrupt-controller@3021000 {{ reg = <0x3021000 0x1000>;
   interrupt-controller; #interrupt-cells = <3>; interrupt-parent = <&gic>;
   interrupts = <1 9 0xf04>;
@@ -212,6 +217,17 @@ class ProfileTests(unittest.TestCase):
         usb_profile.configure(self.config, 'auto')
         _, fdtget = self.compile_dtb('auto', gadget_status='okay')
         with self.assertRaises(ValueError):
+            usb_profile.install(self.root, self.config, fdtget)
+
+    def test_auto_profile_rejects_missing_stock_id_input(self):
+        usb_profile.configure(self.config, 'auto')
+        source, fdtget = self.compile_dtb('auto')
+        fdtput = shutil.which('fdtput')
+        if not fdtput:
+            self.skipTest('fdtput required for mutated DT test')
+        subprocess.run([fdtput, '-d', str(source), '/usb-role-switch',
+                        'id-gpios'], check=True)
+        with self.assertRaisesRegex(ValueError, 'stock PH8'):
             usb_profile.install(self.root, self.config, fdtget)
 
     def test_auto_profile_rejects_wrong_controller_reference(self):
