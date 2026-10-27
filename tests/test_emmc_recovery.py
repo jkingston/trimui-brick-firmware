@@ -132,6 +132,17 @@ class RecoveryProfileTests(unittest.TestCase):
         self.assertIn('= SD ]', service)
         self.assertLess(service.index(identity), service.index('mount -o rw,sync'))
 
+    def test_mdev_rpmb_rule_removes_devtmpfs_node_on_add(self):
+        post_build = (ROOT / 'board/trimui/brick/post-build.sh').read_text()
+        rule = 'mmcblk[0-9]+rpmb root:root 000 ! @/bin/rm -f /dev/$MDEV'
+        old = 'mmcblk[0-9]+rpmb root:root 000 !'
+        self.assertIn("rpmb_rule='" + rule + "'", post_build)
+        self.assertIn("old_rpmb_rule='" + old + "'", post_build)
+        self.assertIn('grep -Fvx "$old_rpmb_rule"', post_build)
+        self.assertIn('grep -Fqx "$rpmb_rule"', post_build)
+        self.assertIn("printf '%s\\n' \"$rpmb_rule\"", post_build)
+        self.assertNotIn("printf '%s\\n' 'mmcblk[0-9]+rpmb root:root 000 !'", post_build)
+
 
 class RecoveryServiceTests(unittest.TestCase):
     service = ROOT / 'package/brick-emmc-recovery/S03emmc-recovery'

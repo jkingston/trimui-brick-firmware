@@ -11,12 +11,19 @@ $SUBSYSTEM=gadget root:root 660 */etc/init.d/S30usb hotplug'
 		{ printf '%s\n' "$rules"; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
 		mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
 	fi
-	if grep -q '^BR2_PACKAGE_BRICK_EMMC_RECOVERY=y$' "$BR2_CONFIG" &&
-		! grep -q '^mmcblk\[0-9\]+rpmb root:root 000 !$' "$TARGET_DIR/etc/mdev.conf"; then
+	if grep -q '^BR2_PACKAGE_BRICK_EMMC_RECOVERY=y$' "$BR2_CONFIG"; then
 		# RPMB has a character-device ioctl interface, so block it independently
-		# of the normal block-device force_ro policy.
-		{ printf '%s\n' 'mmcblk[0-9]+rpmb root:root 000 !'; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
-		mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+		# of force_ro and remove any node devtmpfs created before mdev handles add.
+		old_rpmb_rule='mmcblk[0-9]+rpmb root:root 000 !'
+		rpmb_rule='mmcblk[0-9]+rpmb root:root 000 ! @/bin/rm -f /dev/$MDEV'
+		if grep -Fqx "$old_rpmb_rule" "$TARGET_DIR/etc/mdev.conf"; then
+			{ grep -Fvx "$old_rpmb_rule" "$TARGET_DIR/etc/mdev.conf" || :; } > "$TARGET_DIR/etc/mdev.conf.tmp"
+			mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+		fi
+		if ! grep -Fqx "$rpmb_rule" "$TARGET_DIR/etc/mdev.conf"; then
+			{ printf '%s\n' "$rpmb_rule"; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
+			mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+		fi
 	fi
 else
 	install -d "$TARGET_DIR/etc/udev/rules.d"
