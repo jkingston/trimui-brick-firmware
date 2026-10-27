@@ -1,0 +1,94 @@
+#!/bin/sh
+set -eu
+
+bb=/bin/busybox
+root=/data/encoder-qualification
+boot_id=$($bb cat /proc/sys/kernel/random/boot_id)
+work=$root/.incomplete-$boot_id
+final=$root/$boot_id
+stay_awake=/tmp/stay_awake
+stay_alive=/tmp/stay_alive
+
+[ "$(tr -d '\000' </sys/firmware/devicetree/base/chosen/trimui,ve-qualification)" = isolated ]
+[ "$(tr -d '\000' </sys/firmware/devicetree/base/soc/video-codec@1c0e000/allwinner,encoder-qualification)" = bounded-320x240-h264-qp30-jpeg-q95 ]
+[ ! -e "$work" ]
+[ ! -e "$final" ]
+$bb mkdir -p "$root" "$work"
+$bb touch "$stay_awake" "$stay_alive"
+cleanup() {
+	$bb rm -f "$stay_awake" "$stay_alive"
+}
+trap cleanup EXIT INT TERM
+
+device=
+for path in /sys/class/video4linux/video*; do
+	[ -e "$path/name" ] || continue
+	if [ "$($bb cat "$path/name")" = cedrus-encoder-qualification ]; then
+		[ -z "$device" ] || { echo 'Multiple qualification encoders' >&2; exit 1; }
+		device=/dev/${path##*/}
+	fi
+done
+[ -n "$device" ]
+
+$bb dmesg >"$work/dmesg-before"
+$bb grep -E 'cedrus|iommu|video-codec' /proc/interrupts >"$work/interrupts-before" || :
+$bb cp /etc/brick-build.json "$work/brick-build.json"
+$bb uname -a >"$work/uname"
+printf 'device=%s\nboot_id=%s\n' "$device" "$boot_id" >"$work/session"
+iommu_link=/sys/bus/platform/devices/1c0e000.video-codec/iommu_group
+if [ -L "$iommu_link" ]; then
+	$bb readlink -f "$iommu_link" >"$work/iommu-state"
+	$bb ls -l "$iommu_link" >>"$work/iommu-state"
+else
+	printf 'stage=iommu_group result=fail expected=%s\n' "$iommu_link" >"$work/STATUS"
+	: >"$work/iommu-state"
+	runner_rc=124
+fi
+
+if [ "${runner_rc:-0}" -eq 0 ]; then
+	/sbin/modprobe cma_heap >"$work/cma-heap.log" 2>&1 || {
+		printf 'stage=cma_heap result=fail\n' >"$work/STATUS"
+		[ -d /dev/dma_heap ] && $bb ls -la /dev/dma_heap >>"$work/cma-heap.log" 2>&1 || :
+		runner_rc=125
+	}
+fi
+[ -e "$work/cma-heap.log" ] || : >"$work/cma-heap.log"
+if [ "${runner_rc:-0}" -eq 0 ] && [ ! -c /dev/dma_heap/default_cma_region ]; then
+	printf 'stage=dma_heap_node result=fail expected=/dev/dma_heap/default_cma_region\n' >"$work/STATUS"
+	[ -d /dev/dma_heap ] && $bb ls -la /dev/dma_heap >>"$work/cma-heap.log" 2>&1 || :
+	runner_rc=126
+fi
+if [ "${runner_rc:-0}" -eq 0 ]; then
+	set +e
+	/usr/bin/brick-qualify-encoder "$device" "$work" >"$work/runner.log" 2>&1
+	runner_rc=$?
+	set -e
+fi
+[ -e "$work/runner.log" ] || : >"$work/runner.log"
+
+$bb dmesg >"$work/dmesg-after"
+$bb grep -E 'cedrus|iommu|video-codec' /proc/interrupts >"$work/interrupts-after" || :
+before_lines=$($bb wc -l <"$work/dmesg-before")
+$bb tail -n "+$((before_lines + 1))" "$work/dmesg-after" >"$work/dmesg-delta"
+if [ ! -e "$work/STATUS" ]; then
+	if [ "$runner_rc" -eq 0 ]; then
+		printf 'stage=runner result=pass code=0\n' >"$work/STATUS"
+	else
+		printf 'stage=runner result=fail code=%s\n' "$runner_rc" >"$work/STATUS"
+	fi
+fi
+if $bb grep -Eqi 'iommu fault|frame processing timed out|oops|panic|reset failed' "$work/dmesg-delta"; then
+	printf 'kernel_fault=1\n' >>"$work/STATUS"
+else
+	printf 'kernel_fault=0\n' >>"$work/STATUS"
+fi
+(cd "$work" && for file in ./*; do
+	[ "$file" = ./SHA256SUMS ] || $bb sha256sum "$file"
+done >SHA256SUMS)
+$bb sync
+$bb mv "$work" "$final"
+$bb sync
+trap - EXIT INT TERM
+cleanup
+printf 'EVIDENCE=%s\n' "$final"
+printf 'STATUS=%s\n' "$($bb cat "$final/STATUS")"

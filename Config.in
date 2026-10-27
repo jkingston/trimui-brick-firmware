@@ -6,6 +6,7 @@ source "$BR2_EXTERNAL_BRICK_PATH/package/brick-controls/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-power/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-scp/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-emmc-recovery/Config.in"
+source "$BR2_EXTERNAL_BRICK_PATH/package/brick-encoder-qualification/Config.in"
 
 config BR2_BRICK_G2D_QUALIFICATION
 	bool "Brick G2D qualification profile"

@@ -78,6 +78,8 @@ endif
 
 ifeq ($(BR2_BRICK_VE_QUALIFICATION),y)
 define BRICK_VE_QUALIFICATION_PROFILE
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/ve_profile.py verify-kernel \
+		$(BR2_CONFIG) $(LINUX_DIR)
 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/ve_profile.py install \
 		$(BINARIES_DIR) $(BR2_CONFIG) $(HOST_DIR)/bin/fdtget $(HOST_DIR)/bin/fdtput
 endef

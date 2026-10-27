@@ -19,6 +19,8 @@ CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,ve-qualification'
+ENCODER_MARKER = 'allwinner,encoder-qualification'
+ENCODER_CONTRACT = 'bounded-320x240-h264-qp30-jpeg-q95'
 IOMMU = '/soc/iommu@30f0000'
 VE = '/soc/video-codec@1c0e000'
 VP9 = '/soc/video-codec@1c00000'
@@ -108,6 +110,46 @@ def _status(fdtget, dtb, node):
     return _get(fdtget, dtb, node, 'status')
 
 
+def _config_value(config, key):
+    text = config.read_text()
+    yes = re.findall(rf'^{re.escape(key)}=y$', text, re.M)
+    no = re.findall(rf'^# {re.escape(key)} is not set$', text, re.M)
+    if len(yes) + len(no) != 1:
+        raise ValueError(f'Expected exactly one {key} kernel configuration')
+    return bool(yes)
+
+
+def verify_kernel(config, kernel):
+    if not enabled(config):
+        raise ValueError('kernel verification requires video-engine qualification')
+    kernel_config = kernel / '.config'
+    if not kernel_config.is_file():
+        raise FileNotFoundError(kernel_config)
+    for key in ('CONFIG_VIDEO_SUNXI_CEDRUS',
+                'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE',
+                'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION',
+                'CONFIG_SUN50I_A133_VE_DOMAIN'):
+        if not _config_value(kernel_config, key):
+            raise ValueError(f'{key} is not built into the qualification kernel')
+    for relative in (
+            'drivers/staging/media/sunxi/cedrus/cedrus.o',
+            'drivers/staging/media/sunxi/cedrus/cedrus_a133_enc_backend.o',
+            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o',
+            'drivers/soc/sunxi/sun50i-a133-ve-domain.o'):
+        if not (kernel / relative).is_file():
+            raise FileNotFoundError(kernel / relative)
+    cedrus = (kernel / 'drivers/staging/media/sunxi/cedrus/cedrus.c').read_text()
+    hardware = (kernel / 'drivers/staging/media/sunxi/cedrus/cedrus_hw.c').read_text()
+    if not re.search(
+            r'\.enc_ops\s*=\s*CEDRUS_A133_QUALIFICATION_OPS,', cedrus):
+        raise ValueError('encoder qualification kernel lacks the A133 backend gate')
+    for contract, source in (
+            ('"allwinner,encoder-qualification"', hardware),
+            ('"bounded-320x240-h264-qp30-jpeg-q95"', hardware)):
+        if contract not in source:
+            raise ValueError(f'encoder qualification kernel lacks contract: {contract}')
+
+
 def validate(fdtget, dtb, active, marker=False):
     contracts = {
         IOMMU: ('allwinner,sun50i-a133-iommu', [0x030f0000, 0x1000], [0, 66, 4]),
@@ -188,6 +230,10 @@ def validate(fdtget, dtb, active, marker=False):
     expected_marker = 'isolated' if marker else 'absent'
     if actual_marker != expected_marker:
         raise ValueError('Unexpected video-engine qualification marker')
+    actual_encoder = _get(fdtget, dtb, VE, ENCODER_MARKER, default='absent')
+    expected_encoder = ENCODER_CONTRACT if marker else 'absent'
+    if actual_encoder != expected_encoder:
+        raise ValueError('Unexpected encoder qualification contract')
 
 
 def install(images, config, fdtget, fdtput):
@@ -216,6 +262,8 @@ def install(images, config, fdtget, fdtput):
                             'status', 'okay'], check=True)
         subprocess.run([str(fdtput), '-t', 's', str(staged), MARKER_NODE,
                         MARKER, 'isolated'], check=True)
+        subprocess.run([str(fdtput), '-t', 's', str(staged), VE,
+                        ENCODER_MARKER, ENCODER_CONTRACT], check=True)
         validate(fdtget, staged, True, marker=True)
         staged.replace(destination)
     finally:
@@ -231,6 +279,9 @@ if __name__ == '__main__':
     setup = commands.add_parser('configure')
     setup.add_argument('config', type=Path)
     setup.add_argument('requested', choices=('disabled', 'qualification'))
+    verify = commands.add_parser('verify-kernel')
+    verify.add_argument('config', type=Path)
+    verify.add_argument('kernel', type=Path)
     build = commands.add_parser('install')
     build.add_argument('images', type=Path)
     build.add_argument('config', type=Path)
@@ -241,5 +292,7 @@ if __name__ == '__main__':
         check_output(args.config, args.requested)
     elif args.command == 'configure':
         configure(args.config, args.requested)
+    elif args.command == 'verify-kernel':
+        verify_kernel(args.config, args.kernel)
     else:
         install(args.images, args.config, args.fdtget, args.fdtput)

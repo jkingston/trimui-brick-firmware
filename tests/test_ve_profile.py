@@ -124,6 +124,42 @@ class VeProfileTests(unittest.TestCase):
         ve_profile.configure(self.config, 'qualification')
         ve_profile.install(self.root, self.config, fdtget, fdtput)
         ve_profile.validate(fdtget, dtb, True, marker=True)
+        self.assertEqual(
+            ve_profile._get(fdtget, dtb, ve_profile.VE,
+                            ve_profile.ENCODER_MARKER),
+            ve_profile.ENCODER_CONTRACT)
+
+    def test_kernel_verification_requires_bounded_encoder_and_shared_domain(self):
+        kernel = self.root / 'kernel'
+        objects = (
+            'drivers/staging/media/sunxi/cedrus/cedrus.o',
+            'drivers/staging/media/sunxi/cedrus/cedrus_a133_enc_backend.o',
+            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o',
+            'drivers/soc/sunxi/sun50i-a133-ve-domain.o',
+        )
+        for relative in objects:
+            path = kernel / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        (kernel / '.config').write_text(
+            'CONFIG_VIDEO_SUNXI_CEDRUS=y\n'
+            'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE=y\n'
+            'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y\n'
+            'CONFIG_SUN50I_A133_VE_DOMAIN=y\n')
+        cedrus = kernel / 'drivers/staging/media/sunxi/cedrus/cedrus.c'
+        cedrus.write_text('.enc_ops = CEDRUS_A133_QUALIFICATION_OPS,\n')
+        hardware = kernel / 'drivers/staging/media/sunxi/cedrus/cedrus_hw.c'
+        hardware.write_text(
+            '"allwinner,encoder-qualification"\n'
+            '"bounded-320x240-h264-qp30-jpeg-q95"\n')
+        ve_profile.configure(self.config, 'qualification')
+        ve_profile.verify_kernel(self.config, kernel)
+        (kernel / '.config').write_text(
+            (kernel / '.config').read_text().replace(
+                'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y',
+                '# CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION is not set'))
+        with self.assertRaisesRegex(ValueError, 'not built'):
+            ve_profile.verify_kernel(self.config, kernel)
 
     def test_wrong_iommu_master_is_rejected_without_mutating_image(self):
         dtb = self.compile_dtb(master=5)
