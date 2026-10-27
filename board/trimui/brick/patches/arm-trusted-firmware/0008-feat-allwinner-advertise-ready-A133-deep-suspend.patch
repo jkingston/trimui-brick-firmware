@@ -1,0 +1,148 @@
+From 6f5cc71f82cd4414f558c67f4965369290a912f0 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:56:51 +0000
+Subject: [PATCH] feat(allwinner): advertise ready A133 deep suspend
+
+---
+ .../common/include/sunxi_a133_native_svc.h    |  4 +++-
+ plat/allwinner/common/sunxi_a133_native_svc.c | 24 +++++++++++++++++--
+ .../common/tests/test_sunxi_a133_native_svc.c | 22 +++++++++++++++++
+ 3 files changed, 47 insertions(+), 3 deletions(-)
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_native_svc.h b/plat/allwinner/common/include/sunxi_a133_native_svc.h
+index bc7f618..0c47055 100644
+--- a/plat/allwinner/common/include/sunxi_a133_native_svc.h
++++ b/plat/allwinner/common/include/sunxi_a133_native_svc.h
+@@ -17,7 +17,7 @@
+ 
+ #define SUNXI_A133_SIP_NUM_CALLS		6U
+ #define SUNXI_A133_SIP_VERSION_MAJOR	1U
+-#define SUNXI_A133_SIP_VERSION_MINOR	0U
++#define SUNXI_A133_SIP_VERSION_MINOR	1U
+ 
+ /* UUID 2052c028-f921-540c-8330-bba08ba2c772 in SMCCC register order. */
+ #define SUNXI_A133_SIP_UID_WORD0		0x28c05220U
+@@ -27,6 +27,7 @@
+ 
+ #define SUNXI_A133_SIP_CAP_WAKE_SOURCE		(1U << 0)
+ #define SUNXI_A133_SIP_CAP_RAW_SPI_INDEX		(1U << 1)
++#define SUNXI_A133_SIP_CAP_SYSTEM_SUSPEND	(1U << 2)
+ 
+ /* GICv2 SPI INTIDs are 32 through 1019; the ABI carries INTID - 32. */
+ #define SUNXI_A133_SIP_NUM_SPI_INDICES		988U
+@@ -45,6 +46,7 @@ enum sunxi_a133_sip_status {
+ struct sunxi_a133_native_svc_backend {
+ 	void *cookie;
+ 	uint32_t (*capabilities)(void *cookie);
++	bool (*system_suspend_available)(void *cookie);
+ 	int (*set_wake_source)(void *cookie, uint32_t wake_source,
+ 			       uint8_t *scp_result);
+ 	int (*clear_wake_source)(void *cookie, uint32_t wake_source,
+diff --git a/plat/allwinner/common/sunxi_a133_native_svc.c b/plat/allwinner/common/sunxi_a133_native_svc.c
+index 883b92e..08b87ef 100644
+--- a/plat/allwinner/common/sunxi_a133_native_svc.c
++++ b/plat/allwinner/common/sunxi_a133_native_svc.c
+@@ -9,6 +9,9 @@
+ #include <lib/smccc.h>
+ 
+ #include <sunxi_a133_vendor_scp_runtime.h>
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++#include <sunxi_a133_system_suspend.h>
++#endif
+ #endif
+ 
+ #include <sunxi_a133_native_svc.h>
+@@ -50,8 +53,14 @@ static uint32_t abi_capabilities(
+ 		return 0U;
+ 	}
+ 
+-	return SUNXI_A133_SIP_CAP_WAKE_SOURCE |
+-	       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX;
++	transport = SUNXI_A133_SIP_CAP_WAKE_SOURCE |
++		    SUNXI_A133_SIP_CAP_RAW_SPI_INDEX;
++	if ((backend->system_suspend_available != NULL) &&
++	    backend->system_suspend_available(backend->cookie)) {
++		transport |= SUNXI_A133_SIP_CAP_SYSTEM_SUSPEND;
++	}
++
++	return transport;
+ }
+ 
+ static void dispatch_wake_source(
+@@ -153,8 +162,19 @@ static int runtime_clear_wake_source(void *cookie, uint32_t wake_source,
+ 							     scp_result);
+ }
+ 
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++static bool runtime_system_suspend_available(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_system_suspend_runtime_available();
++}
++#endif
++
+ static const struct sunxi_a133_native_svc_backend runtime_backend = {
+ 	.capabilities = runtime_capabilities,
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++	.system_suspend_available = runtime_system_suspend_available,
++#endif
+ 	.set_wake_source = runtime_set_wake_source,
+ 	.clear_wake_source = runtime_clear_wake_source,
+ };
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c b/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
+index dc3c180..ddd4194 100644
+--- a/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_native_svc.c
+@@ -12,6 +12,7 @@
+ struct fake_backend {
+ 	uint32_t capabilities;
+ 	uint32_t last_wake_source;
++	bool system_suspend_available;
+ 	unsigned int capability_calls;
+ 	unsigned int set_calls;
+ 	unsigned int clear_calls;
+@@ -27,6 +28,13 @@ static uint32_t fake_capabilities(void *cookie)
+ 	return fake->capabilities;
+ }
+ 
++static bool fake_system_suspend_available(void *cookie)
++{
++	struct fake_backend *fake = cookie;
++
++	return fake->system_suspend_available;
++}
++
+ static int fake_set(void *cookie, uint32_t wake_source, uint8_t *result)
+ {
+ 	struct fake_backend *fake = cookie;
+@@ -56,6 +64,7 @@ static void init_backend(struct fake_backend *fake,
+ 	*backend = (struct sunxi_a133_native_svc_backend){
+ 		.cookie = fake,
+ 		.capabilities = fake_capabilities,
++		.system_suspend_available = fake_system_suspend_available,
+ 		.set_wake_source = fake_set,
+ 		.clear_wake_source = fake_clear,
+ 	};
+@@ -115,6 +124,19 @@ static void test_capability_requires_ready_complete_backend(void)
+ 	assert(response.x1 == (SUNXI_A133_SIP_CAP_WAKE_SOURCE |
+ 			       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX));
+ 
++	fake.system_suspend_available = true;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
++			    0U, 0U, 0U, 0U);
++	assert(response.x1 == (SUNXI_A133_SIP_CAP_WAKE_SOURCE |
++			       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX |
++			       SUNXI_A133_SIP_CAP_SYSTEM_SUSPEND));
++	backend.system_suspend_available = NULL;
++	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
++			    0U, 0U, 0U, 0U);
++	assert(response.x1 == (SUNXI_A133_SIP_CAP_WAKE_SOURCE |
++			       SUNXI_A133_SIP_CAP_RAW_SPI_INDEX));
++	backend.system_suspend_available = fake_system_suspend_available;
++
+ 	fake.capabilities = 0U;
+ 	response = dispatch(&backend, true, SUNXI_A133_SIP_CAPABILITIES,
+ 			    0U, 0U, 0U, 0U);
+-- 
+2.55.0
+

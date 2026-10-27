@@ -105,6 +105,15 @@ def install(images, config, fdtget):
         nmi_irq = get(r_intc, 'interrupts', 'x').split()
         if nmi_irq[:2] != ['0', '67']:
             raise ValueError('NMI cascade input is not a GIC SPI')
+        context_nodes = ('/soc/clock@3001000', '/soc/clock@7010000',
+                         '/soc/pinctrl@300b000', '/soc/pinctrl@7022000')
+        context_enabled = [
+            'allwinner,stock-suspend' in properties(node)
+            for node in context_nodes
+        ]
+        if any(context_enabled) != (wake_profile == 'deep') or \
+                len(set(context_enabled)) != 1:
+            raise ValueError('Native wake profile has an incomplete deep-context contract')
 
     for node, enabled in [('usb@5100000', role == 'peripheral'),
                           ('usb@5101000', role == 'host'),

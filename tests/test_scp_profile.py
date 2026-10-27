@@ -26,7 +26,7 @@ class ScpProfileTests(unittest.TestCase):
         self.assertEqual(self.config.read_text(),
                          'BR2_OTHER=y\nBR2_PACKAGE_BRICK_SCP=y\n'
                          '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
-                         f'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="{scp_profile.FRAGMENT}"\n')
+                         f'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="{scp_profile.WAKE_FRAGMENT}"\n')
         scp_profile.configure(self.config, 'deep')
         self.assertEqual(scp_profile.profile(self.config), 'deep')
         scp_profile.configure(self.config, 'disabled')
@@ -63,17 +63,30 @@ class ScpProfileTests(unittest.TestCase):
     def test_kernel_verification_requires_config_and_object_as_a_pair(self):
         kernel = self.config.parent / 'linux'
         obj = kernel / 'drivers/irqchip/irq-sun50i-a133-wakeupgen.o'
+        ccu_obj = kernel / 'drivers/clk/sunxi-ng/ccu-sun50i-a133-sleep.o'
         obj.parent.mkdir(parents=True)
+        ccu_obj.parent.mkdir(parents=True)
         (kernel / '.config').write_text(
-            '# CONFIG_SUN50I_A133_WAKEUPGEN is not set\n')
+            '# CONFIG_SUN50I_A133_WAKEUPGEN is not set\n'
+            '# CONFIG_SUN50I_A133_CCU_SLEEP is not set\n')
         scp_profile.verify_kernel(self.config, kernel)
         scp_profile.configure(self.config, 'startup')
-        (kernel / '.config').write_text('CONFIG_SUN50I_A133_WAKEUPGEN=y\n')
+        (kernel / '.config').write_text(
+            'CONFIG_SUN50I_A133_WAKEUPGEN=y\n'
+            '# CONFIG_SUN50I_A133_CCU_SLEEP is not set\n')
         with self.assertRaisesRegex(ValueError, 'object'):
             scp_profile.verify_kernel(self.config, kernel)
         obj.write_bytes(b'object')
         scp_profile.verify_kernel(self.config, kernel)
         scp_profile.configure(self.config, 'deep')
+        with self.assertRaisesRegex(ValueError, 'CCU deep-context configuration'):
+            scp_profile.verify_kernel(self.config, kernel)
+        (kernel / '.config').write_text(
+            'CONFIG_SUN50I_A133_WAKEUPGEN=y\n'
+            'CONFIG_SUN50I_A133_CCU_SLEEP=y\n')
+        with self.assertRaisesRegex(ValueError, 'CCU deep-context object'):
+            scp_profile.verify_kernel(self.config, kernel)
+        ccu_obj.write_bytes(b'object')
         scp_profile.verify_kernel(self.config, kernel)
 
     def test_system_suspend_requires_complete_scp_profile(self):

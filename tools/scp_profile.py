@@ -8,14 +8,15 @@ import re
 PACKAGE_KEY = 'BR2_PACKAGE_BRICK_SCP'
 SYSTEM_SUSPEND_KEY = 'BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
-FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment'
+WAKE_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment'
+DEEP_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-deep.fragment'
 LINES = {
     'disabled': (f'# {PACKAGE_KEY} is not set',
                  f'# {SYSTEM_SUSPEND_KEY} is not set', f'{FRAGMENT_KEY}=""'),
     'startup': (f'{PACKAGE_KEY}=y', f'# {SYSTEM_SUSPEND_KEY} is not set',
-                f'{FRAGMENT_KEY}="{FRAGMENT}"'),
+                f'{FRAGMENT_KEY}="{WAKE_FRAGMENT}"'),
     'deep': (f'{PACKAGE_KEY}=y', f'{SYSTEM_SUSPEND_KEY}=y',
-             f'{FRAGMENT_KEY}="{FRAGMENT}"'),
+             f'{FRAGMENT_KEY}="{DEEP_FRAGMENT}"'),
 }
 
 
@@ -71,16 +72,26 @@ def verify_kernel(config, kernel):
     kernel_config = kernel / '.config'
     if not kernel_config.is_file():
         raise FileNotFoundError(kernel_config)
-    enabled = _one(
+    wake_enabled = _one(
         kernel_config,
         r'^(?:CONFIG_SUN50I_A133_WAKEUPGEN=y|# CONFIG_SUN50I_A133_WAKEUPGEN is not set)$',
         'native wakeupgen kernel configuration') == 'CONFIG_SUN50I_A133_WAKEUPGEN=y'
-    expected = selected != 'disabled'
-    if enabled != expected:
+    wake_expected = selected != 'disabled'
+    if wake_enabled != wake_expected:
         raise ValueError('Kernel wakeupgen configuration does not match SCP profile')
     wakeupgen = kernel / 'drivers/irqchip/irq-sun50i-a133-wakeupgen.o'
-    if wakeupgen.is_file() != expected:
+    if wakeupgen.is_file() != wake_expected:
         raise ValueError('Kernel wakeupgen object does not match SCP profile')
+    ccu_enabled = _one(
+        kernel_config,
+        r'^(?:CONFIG_SUN50I_A133_CCU_SLEEP=y|# CONFIG_SUN50I_A133_CCU_SLEEP is not set)$',
+        'A133 deep CCU context configuration') == 'CONFIG_SUN50I_A133_CCU_SLEEP=y'
+    ccu_expected = selected == 'deep'
+    if ccu_enabled != ccu_expected:
+        raise ValueError('Kernel CCU deep-context configuration does not match SCP profile')
+    ccu_context = kernel / 'drivers/clk/sunxi-ng/ccu-sun50i-a133-sleep.o'
+    if ccu_context.is_file() != ccu_expected:
+        raise ValueError('Kernel CCU deep-context object does not match SCP profile')
 
 
 if __name__ == '__main__':

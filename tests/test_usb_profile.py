@@ -59,10 +59,12 @@ class ProfileTests(unittest.TestCase):
  peripheral = <&musb>; ehci = <&ehci>; ohci = <&ohci>;
 };'''
         wake = ''
+        deep_context = ''
         nmi_parent = '&gic'
         if wake_profile in ('startup', 'deep'):
             timer_parent = '&wakeupgen' if broken_timer else '&gic'
             nmi_parent = '&wakeupgen' if wake_profile == 'deep' else '&gic'
+            deep_context = 'allwinner,stock-suspend;' if wake_profile == 'deep' else ''
             wake = f'''
  interrupt-parent = <&wakeupgen>;
  wakeupgen: interrupt-controller {{
@@ -77,6 +79,10 @@ class ProfileTests(unittest.TestCase):
 / {{ #address-cells = <1>; #size-cells = <1>; {wake}
  {coordinator}
  soc {{ #address-cells = <1>; #size-cells = <1>; ranges;
+ ccu: clock@3001000 {{ reg = <0x3001000 0x1000>; {deep_context} }};
+ rccu: clock@7010000 {{ reg = <0x7010000 0x400>; {deep_context} }};
+ pio: pinctrl@300b000 {{ reg = <0x300b000 0x400>; {deep_context} }};
+ rpio: pinctrl@7022000 {{ reg = <0x7022000 0x400>; {deep_context} }};
  gic: interrupt-controller@3021000 {{ reg = <0x3021000 0x1000>;
   interrupt-controller; #interrupt-cells = <3>; interrupt-parent = <&gic>;
   interrupts = <1 9 0xf04>;
@@ -167,6 +173,18 @@ class ProfileTests(unittest.TestCase):
         source, fdtget = self.compile_dtb('peripheral', wake_profile='startup')
         source.rename(self.root / (usb_profile.NATIVE_DEEP_DTB + '.dtb'))
         with self.assertRaisesRegex(ValueError, 'NMI wake parent'):
+            usb_profile.install(self.root, self.config, fdtget)
+
+    def test_deep_profile_rejects_incomplete_context_opt_in(self):
+        scp_profile.configure(self.config, 'deep')
+        usb_profile.configure(self.config, 'peripheral', 'deep')
+        source, fdtget = self.compile_dtb('peripheral', wake_profile='deep')
+        fdtput = shutil.which('fdtput')
+        if not fdtput:
+            self.skipTest('fdtput required for mutated DT test')
+        subprocess.run([fdtput, '-d', str(source), '/soc/pinctrl@7022000',
+                        'allwinner,stock-suspend'], check=True)
+        with self.assertRaisesRegex(ValueError, 'deep-context contract'):
             usb_profile.install(self.root, self.config, fdtget)
 
     def test_host_profile_rejects_enabled_gadget_before_overwriting_payload(self):
