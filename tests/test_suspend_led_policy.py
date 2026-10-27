@@ -149,7 +149,8 @@ int main(int argc, char **argv)
         self.assertIn('execl("/usr/sbin/brick-suspend", "brick-suspend",', daemon)
         self.assertIn('led_policy_quiesce(&leds)', suspend)
         self.assertGreaterEqual(suspend.count('led_policy_restore(&leds)'), 2)
-        self.assertNotIn('"mem\\n"', suspend)
+        self.assertIn('#ifdef BRICK_DEEP_SUSPEND', suspend)
+        self.assertIn('write_value(BRICK_POWER_STATE_PATH, "mem\\n")', suspend)
 
 
 if __name__ == '__main__':

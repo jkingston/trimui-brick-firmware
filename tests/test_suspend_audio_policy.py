@@ -186,7 +186,7 @@ struct audio_state { int lock; };
 struct led_policy_state { int lock; };
 static char *owner;
 static int present, get_calls, same_calls, wait_calls, freeze_calls;
-static bool supports_freeze(void) { return true; }
+static bool supports_suspend(void) { return true; }
 static int audio_quiesce(struct audio_state *state) { (void)state; return 0; }
 static int audio_restore(struct audio_state *state) { (void)state; return 0; }
 static int led_policy_quiesce(struct led_policy_state *state) { (void)state; return 0; }
@@ -197,7 +197,7 @@ static int set_power(bool powered) { (void)powered; return 0; }
 static bool same_owner(void) { same_calls++; return true; }
 static int wait_power_off(void) { wait_calls++; return 0; }
 static bool interrupted(void) { return false; }
-static int freeze_once(void) { freeze_calls++; return 0; }
+static int suspend_once(void) { freeze_calls++; return 0; }
 TRANSACTION
 int main(void)
 {

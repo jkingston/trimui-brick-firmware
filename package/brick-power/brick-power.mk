@@ -4,10 +4,15 @@ BRICK_POWER_SITE_METHOD = local
 BRICK_POWER_LICENSE = GPL-2.0-only
 BRICK_POWER_DEPENDENCIES = alsa-lib dbus host-pkgconf
 
+ifeq ($(BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND),y)
+BRICK_POWER_SUSPEND_CFLAGS = -DBRICK_DEEP_SUSPEND=1
+endif
+
 define BRICK_POWER_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
 		$(@D)/brick-power-key.c -o $(@D)/brick-power-key
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
+		$(BRICK_POWER_SUSPEND_CFLAGS) \
 		$(@D)/brick-suspend.c \
 		`$(PKG_CONFIG_HOST_BINARY) --cflags --libs alsa dbus-1` \
 		-o $(@D)/brick-suspend

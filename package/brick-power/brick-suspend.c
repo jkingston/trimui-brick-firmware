@@ -18,6 +18,12 @@
 #define ADAPTER "/org/bluez/hci0"
 #define TIMEOUT_MS 10000
 #define AUDIO_POLICY_LOCK "/run/brick-audio-policy.lock"
+#ifndef BRICK_POWER_STATE_PATH
+#define BRICK_POWER_STATE_PATH "/sys/power/state"
+#endif
+#ifndef BRICK_MEM_SLEEP_PATH
+#define BRICK_MEM_SLEEP_PATH "/sys/power/mem_sleep"
+#endif
 static DBusConnection *bus;
 static char *owner;
 static sigset_t blocked;
@@ -356,51 +362,205 @@ static void alarm_handler(int signal)
 	(void)signal;
 }
 
-static int freeze_once(void)
+static int read_value(const char *path, char *value, size_t size)
 {
-	char count[32];
-	int fd = open("/sys/power/wakeup_count", O_RDONLY | O_CLOEXEC);
-	ssize_t n;
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	ssize_t count;
+	int saved;
+
 	if (fd < 0)
 		return -1;
+	count = read(fd, value, size - 1);
+	saved = errno;
+	if (close(fd) && count >= 0)
+		return -1;
+	if (count <= 0 || (size_t)count == size - 1) {
+		errno = count < 0 ? saved : EIO;
+		return -1;
+	}
+	value[count] = '\0';
+	return 0;
+}
+
+static bool has_word(char *text, const char *wanted)
+{
+	char *word, *save;
+
+	for (word = strtok_r(text, " \t\r\n", &save); word;
+	     word = strtok_r(NULL, " \t\r\n", &save))
+		if (!strcmp(word, wanted))
+			return true;
+	return false;
+}
+
+static bool supports_state(const char *wanted)
+{
+	char states[128];
+
+	return !read_value(BRICK_POWER_STATE_PATH, states, sizeof(states)) &&
+	       has_word(states, wanted);
+}
+
+#ifdef BRICK_DEEP_SUSPEND
+static int mem_sleep_state(char *selected, size_t selected_size, bool *has_deep)
+{
+	char states[128], *word, *save;
+	unsigned int selections = 0;
+
+	if (read_value(BRICK_MEM_SLEEP_PATH, states, sizeof(states)))
+		return -1;
+	*has_deep = false;
+	for (word = strtok_r(states, " \t\r\n", &save); word;
+	     word = strtok_r(NULL, " \t\r\n", &save)) {
+		size_t length = strlen(word);
+		bool chosen = length >= 3 && word[0] == '[' && word[length - 1] == ']';
+		const char *name = word;
+
+		if (chosen) {
+			word[length - 1] = '\0';
+			name = word + 1;
+			selections++;
+			if (!*name || strlen(name) >= selected_size) {
+				errno = EINVAL;
+				return -1;
+			}
+			strcpy(selected, name);
+		}
+		if (!strcmp(name, "deep"))
+			*has_deep = true;
+	}
+	if (selections != 1) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
+
+static int restore_mem_sleep(const char *previous)
+{
+	char selected[16];
+	bool has_deep;
+	bool already_restored;
+
+	already_restored = !mem_sleep_state(selected, sizeof(selected), &has_deep) &&
+			   !strcmp(selected, previous);
+	if (!already_restored) {
+		char request[18];
+		int length = snprintf(request, sizeof(request), "%s\n", previous);
+
+		if (length <= 0 || (size_t)length >= sizeof(request) ||
+		    write_value(BRICK_MEM_SLEEP_PATH, request) ||
+		    mem_sleep_state(selected, sizeof(selected), &has_deep))
+			return -1;
+	}
+	if (strcmp(selected, previous)) {
+		errno = EIO;
+		return -1;
+	}
+	return 0;
+}
+
+static int restore_mem_sleep_report(const char *previous)
+{
+	int saved_errno;
+
+	if (!restore_mem_sleep(previous))
+		return 0;
+	saved_errno = errno;
+	fprintf(stderr, "Deep sleep mode restoration failed: %s\n",
+		strerror(saved_errno));
+	errno = saved_errno;
+	return -1;
+}
+
+static bool supports_suspend(void)
+{
+	char selected[16];
+	bool has_deep;
+
+	return supports_state("mem") &&
+	       !mem_sleep_state(selected, sizeof(selected), &has_deep) && has_deep;
+}
+#else
+static bool supports_suspend(void)
+{
+	return supports_state("freeze");
+}
+#endif
+
+static int suspend_once(void)
+{
+	char count[32];
+	int fd;
+	ssize_t n;
+#ifdef BRICK_DEEP_SUSPEND
+	char previous[16], selected[16];
+	bool has_deep;
+	int result, saved_errno;
+
+	if (mem_sleep_state(previous, sizeof(previous), &has_deep))
+		return -1;
+	if (!has_deep) {
+		errno = EOPNOTSUPP;
+		return -1;
+	}
+	if (strcmp(previous, "deep")) {
+		if (write_value(BRICK_MEM_SLEEP_PATH, "deep\n"))
+			saved_errno = errno;
+		else if (mem_sleep_state(selected, sizeof(selected), &has_deep))
+			saved_errno = errno;
+		else if (strcmp(selected, "deep"))
+			saved_errno = EIO;
+		else
+			goto selected;
+		if (!saved_errno)
+			saved_errno = EIO;
+		(void)restore_mem_sleep_report(previous);
+		errno = saved_errno;
+		return -1;
+	}
+selected:
+#endif
+
+	fd = open("/sys/power/wakeup_count", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		goto failed;
 	/* sysfs wakeup_count ignores O_NONBLOCK; bound its interruptible wait. */
 	alarm(3);
 	n = read(fd, count, sizeof(count) - 1);
 	alarm(0);
 	close(fd);
 	if (n <= 0)
-		return -1;
+		goto failed;
 	count[n] = '\0';
 	if (interrupted()) {
 		errno = EINTR;
-		return -1;
+		goto failed;
 	}
 	if (write_value("/sys/power/wakeup_count", count))
-		return -1;
+		goto failed;
 	/* One attempt: the kernel's closed/unpowered gate is authoritative.
 	 * Powered=false alone does not prove that UART shutdown has completed.
 	 */
-	return write_value("/sys/power/state", "freeze\n");
-}
+#ifdef BRICK_DEEP_SUSPEND
+	result = write_value(BRICK_POWER_STATE_PATH, "mem\n");
+	saved_errno = errno;
+	if (restore_mem_sleep_report(previous))
+		return -1;
+	errno = saved_errno;
+	return result;
+#else
+	return write_value(BRICK_POWER_STATE_PATH, "freeze\n");
+#endif
 
-static bool supports_freeze(void)
-{
-	char states[128];
-	int fd = open("/sys/power/state", O_RDONLY | O_CLOEXEC);
-	ssize_t n;
-	char *word, *save;
-	if (fd < 0)
-		return false;
-	n = read(fd, states, sizeof(states) - 1);
-	close(fd);
-	if (n <= 0 || n == sizeof(states) - 1)
-		return false;
-	states[n] = '\0';
-	for (word = strtok_r(states, " \t\r\n", &save); word;
-	     word = strtok_r(NULL, " \t\r\n", &save))
-		if (!strcmp(word, "freeze"))
-			return true;
-	return false;
+failed:
+#ifdef BRICK_DEEP_SUSPEND
+	saved_errno = errno;
+	if (restore_mem_sleep_report(previous))
+		return -1;
+	errno = saved_errno;
+#endif
+	return -1;
 }
 
 static int transaction(void)
@@ -412,8 +572,12 @@ static int transaction(void)
 	bool attempted_off = false;
 	int result = -1;
 
-	if (!supports_freeze()) {
+	if (!supports_suspend()) {
+#ifdef BRICK_DEEP_SUSPEND
+		fprintf(stderr, "Kernel does not offer the selected deep suspend path.\n");
+#else
 		fprintf(stderr, "Kernel does not offer s2idle (freeze).\n");
+#endif
 		return -1;
 	}
 	if (audio_quiesce(&audio) < 0) {
@@ -443,7 +607,7 @@ static int transaction(void)
 		 */
 		goto restore;
 	}
-	result = freeze_once();
+	result = suspend_once();
 	if (result)
 		fprintf(stderr, "Suspend not completed: %s\n", strerror(errno));
 restore:
@@ -483,9 +647,17 @@ int main(int argc, char **argv)
 	struct sigaction action = { .sa_handler = alarm_handler };
 	if (argc != 2 || strcmp(argv[1], "--disconnect-bluetooth")) {
 		fprintf(stderr, "Usage: brick-suspend --disconnect-bluetooth\n"
+#ifdef BRICK_DEEP_SUSPEND
+			"Mutes and restores the internal codec around deep suspend.\n"
+#else
 			"Mutes and restores the internal codec around s2idle.\n"
+#endif
 			"Turns off and restores the 23 standard mood LED devices.\n"
+#ifdef BRICK_DEEP_SUSPEND
+			"Disconnects Bluetooth for deep suspend; restores adapter power, not connections.\n"
+#else
 			"Disconnects Bluetooth for s2idle; restores adapter power, not connections.\n"
+#endif
 			"Wi-Fi disconnects and reloads on resume.\n"
 			"Do not change audio, mood LEDs or Bluetooth power concurrently.\n");
 		return EXIT_FAILURE;
@@ -530,9 +702,17 @@ int main(int argc, char **argv)
 		owner = bluez_owner();
 		if (!owner)
 			goto close_bus;
+#ifdef BRICK_DEEP_SUSPEND
+		fprintf(stderr, "Requesting deep suspend; Bluetooth and Wi-Fi will disconnect.\n");
+#else
 		fprintf(stderr, "Requesting s2idle; Bluetooth and Wi-Fi will disconnect.\n");
+#endif
 	} else {
+#ifdef BRICK_DEEP_SUSPEND
+		fprintf(stderr, "Requesting deep suspend; Bluetooth is already stopped and Wi-Fi will disconnect.\n");
+#else
 		fprintf(stderr, "Requesting s2idle; Bluetooth is already stopped and Wi-Fi will disconnect.\n");
+#endif
 	}
 	if (!transaction())
 		result = EXIT_SUCCESS;
