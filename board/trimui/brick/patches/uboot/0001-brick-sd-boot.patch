@@ -18,8 +18,8 @@ index b0c5d3c..318bbd9 100644
 +	bool "TrimUI Brick removable-SD-only diagnostic boot"
 +	depends on MACH_SUN50I_A133 && AXP717_POWER
 +	help
-+	  Restrict the diagnostic SPL to an SD boot source, and enable the
-+	  Brick-specific PMIC rail table. This does not change power-key timing.
++	  Restrict persistent boot to removable SD while retaining volatile FEL
++	  recovery, and enable the Brick-specific PMIC rail table.
 +
  config IDENT_STRING
  	default " Allwinner Technology"
@@ -52,11 +52,12 @@ diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
 index 432b1c1..b54efea 100644
 --- a/arch/arm/mach-sunxi/board.c
 +++ b/arch/arm/mach-sunxi/board.c
-@@ -291,6 +291,11 @@ uint32_t sunxi_get_boot_device(void)
+@@ -291,6 +291,12 @@ uint32_t sunxi_get_boot_device(void)
  {
  	int boot_source = sunxi_get_boot_source();
  
 +	if (IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC) &&
++	    boot_source != SUNXI_INVALID_BOOT_SOURCE &&
 +	    boot_source != SUNXI_BOOTED_FROM_MMC0 &&
 +	    boot_source != SUNXI_BOOTED_FROM_MMC0_HIGH)
 +		panic("Brick diagnostic requires removable SD boot\n");

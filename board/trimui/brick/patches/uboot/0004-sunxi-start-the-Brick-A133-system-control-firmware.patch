@@ -113,8 +113,8 @@ index 318bbd97275..a7f2d88b6fe 100644
 --- a/arch/arm/mach-sunxi/Kconfig
 +++ b/arch/arm/mach-sunxi/Kconfig
 @@ -7,6 +7,20 @@ config TRIMUI_BRICK_SD_DIAGNOSTIC
- 	  Restrict the diagnostic SPL to an SD boot source, and enable the
- 	  Brick-specific PMIC rail table. This does not change power-key timing.
+ 	  Restrict persistent boot to removable SD while retaining volatile FEL
+ 	  recovery, and enable the Brick-specific PMIC rail table.
  
 +config SUNXI_A133_VENDOR_SCP
 +	bool "Experimental A133 vendor SCP boot boundary"
@@ -224,8 +224,8 @@ index 00000000000..e0a21b6d55e
 +static const u8 a133_scp_fdt_sha256[SHA256_SUM_LEN] = {
 +	0x06, 0xc8, 0x20, 0xc4, 0xfe, 0x4d, 0xf1, 0xef,
 +	0xb4, 0x54, 0xfb, 0x57, 0x94, 0xe7, 0xe8, 0xa1,
-+	0x85, 0x95, 0xcb, 0x66, 0x0a, 0xd3, 0x37, 0x11,
-+	0xc3, 0x65, 0xaf, 0x66, 0xa5, 0xcf, 0x7d, 0x8c,
++	0x85, 0x95, 0x6c, 0xb6, 0x60, 0xad, 0x33, 0x71,
++	0x1c, 0x36, 0x5a, 0xf6, 0x6a, 0x5c, 0xf7, 0xd8,
 +};
 +
 +static u8 a133_scp_loaded;

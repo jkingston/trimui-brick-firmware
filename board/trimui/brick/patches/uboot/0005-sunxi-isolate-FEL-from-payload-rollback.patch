@@ -1,0 +1,36 @@
+Subject: [PATCH] sunxi: isolate Brick FEL recovery from payload rollback
+
+The sunxi board code publishes fel_booted before main_loop(), but the generic
+autoboot path still increments the filesystem bootcount and can select the
+rollback command.  A volatile recovery boot must try the current payload and
+must not change persistent rollback state.  Limit the exception to the Brick
+diagnostic configuration; ordinary SD boots keep the existing behavior.
+
+diff --git a/common/autoboot.c b/common/autoboot.c
+index 5d356f8..04dbe01 100644
+--- a/common/autoboot.c
++++ b/common/autoboot.c
+@@ -452,9 +452,13 @@ static void process_fdt_options(void)
+ const char *bootdelay_process(void)
+ {
+ 	char *s;
++	bool brick_fel_recovery;
+ 	int bootdelay;
+ 
+-	bootcount_inc();
++	brick_fel_recovery = IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC) &&
++			     env_get("fel_booted");
++	if (!brick_fel_recovery)
++		bootcount_inc();
+ 
+ 	s = env_get("bootdelay");
+ 	bootdelay = s ? (int)simple_strtol(s, NULL, 10) : CONFIG_BOOTDELAY;
+@@ -477,7 +481,7 @@ const char *bootdelay_process(void)
+ 		s = env_get("failbootcmd");
+ 	} else
+ #endif /* CONFIG_POST */
+-	if (bootcount_error())
++	if (!brick_fel_recovery && bootcount_error())
+ 		s = env_get("altbootcmd");
+ 	else
+ 		s = env_get("bootcmd");
