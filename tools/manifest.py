@@ -10,6 +10,8 @@ from scp_profile import profile as scp_profile
 from emmc_recovery import enabled as emmc_recovery_enabled
 from g2d_profile import enabled as g2d_qualification_enabled
 from ve_profile import enabled as ve_qualification_enabled
+from vp9_profile import enabled as vp9_qualification_enabled
+from ce_trng_profile import enabled as ce_trng_qualification_enabled
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--rootfs', type=Path)
@@ -37,6 +39,8 @@ manifest = {'firmware': source(root), 'kernel': kernel, 'buildroot': '2026.08.1'
             'emmc_recovery': emmc_recovery_enabled(a.config),
             'g2d_qualification': g2d_qualification_enabled(a.config),
             've_qualification': ve_qualification_enabled(a.config),
+            'vp9_qualification': vp9_qualification_enabled(a.config),
+            'ce_trng_qualification': ce_trng_qualification_enabled(a.config),
             'config_sha256': hashlib.sha256(a.config.read_bytes()).hexdigest(), 'files': {}}
 selected_scp_profile = scp_profile(a.config)
 if selected_scp_profile != 'disabled':

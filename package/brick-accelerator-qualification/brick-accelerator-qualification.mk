@@ -46,4 +46,14 @@ endef
 BRICK_ACCELERATOR_QUALIFICATION_POST_INSTALL_TARGET_HOOKS += BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VE
 endif
 
+ifeq ($(BR2_BRICK_VP9_QUALIFICATION),y)
+define BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VP9
+	$(INSTALL) -D -m 0755 $(@D)/brick-qualify-vp9 \
+		$(TARGET_DIR)/usr/sbin/brick-qualify-vp9
+	mkdir -p $(TARGET_DIR)/usr/share/brick-qualification/vp9
+	cp -a $(@D)/fixtures/vp9/. $(TARGET_DIR)/usr/share/brick-qualification/vp9/
+endef
+BRICK_ACCELERATOR_QUALIFICATION_POST_INSTALL_TARGET_HOOKS += BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VP9
+endif
+
 $(eval $(generic-package))

@@ -10,7 +10,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import g2d_profile
-import ve_profile
 
 
 class G2dProfileTests(unittest.TestCase):
@@ -26,7 +25,9 @@ class G2dProfileTests(unittest.TestCase):
             '# BR2_PACKAGE_BRICK_SCP is not set\n'
             '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
-            '# BR2_BRICK_VE_QUALIFICATION is not set\n')
+            '# BR2_BRICK_VE_QUALIFICATION is not set\n'
+            '# BR2_BRICK_VP9_QUALIFICATION is not set\n'
+            '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set\n')
 
     def tools(self):
         bindir = ROOT / 'output/build-default/host/bin'
@@ -36,7 +37,8 @@ class G2dProfileTests(unittest.TestCase):
             self.skipTest('dtc, fdtget and fdtput are required')
         return tuple(map(str, tools))
 
-    def compile_dtb(self, master=5, rate=300000000, ve='disabled'):
+    def compile_dtb(self, master=5, rate=300000000, ve='disabled',
+                    vp9='disabled'):
         dtc, _, _ = self.tools()
         source = f'''/dts-v1/;
 / {{ #address-cells = <1>; #size-cells = <1>; chosen {{ }};
@@ -55,6 +57,8 @@ class G2dProfileTests(unittest.TestCase):
    status = "disabled"; }};
   video-codec@1c0e000 {{ compatible = "allwinner,sun50i-a133-video-engine";
    reg = <0x01c0e000 0x1000>; status = "{ve}"; }};
+  video-codec@1c00000 {{ compatible = "allwinner,sun50i-a133-vpu-g2";
+   reg = <0x01c00000 0x1000>; status = "{vp9}"; }};
   crypto@1904000 {{ compatible = "allwinner,sun50i-a133-crypto";
    reg = <0x01904000 0xa0>; status = "disabled"; }};
  }};

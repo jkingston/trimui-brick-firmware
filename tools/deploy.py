@@ -169,6 +169,10 @@ def verify_boot_manifest(actual, expected):
         raise ProtocolError('Boot SCP profile does not match expected image')
     if actual.get('ve_qualification', False) != expected.get('ve_qualification', False):
         raise ProtocolError('Boot video-engine qualification profile does not match expected image')
+    if actual.get('vp9_qualification', False) != expected.get('vp9_qualification', False):
+        raise ProtocolError('Boot VP9 qualification profile does not match expected image')
+    if actual.get('ce_trng_qualification', False) != expected.get('ce_trng_qualification', False):
+        raise ProtocolError('Boot CE/TRNG qualification profile does not match expected image')
     for field in ('firmware', 'kernel', 'config_sha256'):
         if actual[field] != expected[field]:
             raise ProtocolError(f'Running rootfs has different {field} metadata')
@@ -211,6 +215,10 @@ def main():
                         help='explicitly permit deploying a video-engine qualification profile')
     parser.add_argument('--g2d-qualification', action='store_true',
                         help='explicitly permit deploying a G2D qualification profile')
+    parser.add_argument('--vp9-qualification', action='store_true',
+                        help='explicitly permit deploying a VP9 qualification profile')
+    parser.add_argument('--ce-trng-qualification', action='store_true',
+                        help='explicitly permit deploying a CE/TRNG qualification profile')
     args = parser.parse_args()
     token = 'brick-update-' + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='brick-update-') as temporary:
@@ -222,6 +230,10 @@ def main():
             raise ValueError('Use --ve-qualification for the dedicated video-engine profile')
         if manifest.get('g2d_qualification', False) and not args.g2d_qualification:
             raise ValueError('Use --g2d-qualification for the dedicated G2D profile')
+        if manifest.get('vp9_qualification', False) and not args.vp9_qualification:
+            raise ValueError('Use --vp9-qualification for the dedicated VP9 profile')
+        if manifest.get('ce_trng_qualification', False) and not args.ce_trng_qualification:
+            raise ValueError('Use --ce-trng-qualification for the dedicated CE/TRNG profile')
         script = directory / 'install.sh'
         script.write_text(install_script(token))
         with Console(args.port) as console:

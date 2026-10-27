@@ -331,6 +331,26 @@ class BootIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.ProtocolError, 'G2D qualification'):
             deploy.verify_boot_manifest(actual, expected)
 
+    def test_vp9_profile_cannot_be_mistaken_for_normal_image(self):
+        expected = {'firmware': {'commit': 'firmware-a'},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a', 'vp9_qualification': True,
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        actual = dict(expected, vp9_qualification=False)
+        with self.assertRaisesRegex(deploy.ProtocolError, 'VP9 qualification'):
+            deploy.verify_boot_manifest(actual, expected)
+
+    def test_ce_trng_profile_cannot_be_mistaken_for_normal_image(self):
+        expected = {'firmware': {'commit': 'firmware-a'},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a', 'ce_trng_qualification': True,
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        actual = dict(expected, ce_trng_qualification=False)
+        with self.assertRaisesRegex(deploy.ProtocolError, 'CE/TRNG qualification'):
+            deploy.verify_boot_manifest(actual, expected)
+
 
 class DeploymentLifecycleTests(unittest.TestCase):
     def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None,
@@ -430,6 +450,44 @@ class DeploymentLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '--g2d-qualification'):
                 deploy.main()
         console.assert_not_called()
+
+    def test_vp9_qualification_requires_explicit_deployment_flag(self):
+        args = ['deploy.py', 'images']
+        manifest = {'vp9_qualification': True}
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
+             patch.object(deploy, 'Console') as console:
+            with self.assertRaisesRegex(ValueError, '--vp9-qualification'):
+                deploy.main()
+        console.assert_not_called()
+
+    def test_ce_trng_qualification_requires_explicit_deployment_flag(self):
+        args = ['deploy.py', 'images']
+        manifest = {'ce_trng_qualification': True}
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
+             patch.object(deploy, 'Console') as console:
+            with self.assertRaisesRegex(ValueError, '--ce-trng-qualification'):
+                deploy.main()
+        console.assert_not_called()
+
+    def test_new_qualification_flags_explicitly_admit_matching_profiles(self):
+        cases = (
+            ('vp9_qualification', '--vp9-qualification'),
+            ('ce_trng_qualification', '--ce-trng-qualification'),
+        )
+        for field, flag in cases:
+            console = MagicMock()
+            console.__enter__.return_value = console
+            console.checked.return_value = b'UPDATE_VERIFIED\n'
+            args = ['deploy.py', 'images', flag, '--no-reboot']
+            with self.subTest(flag=flag), \
+                 patch.object(sys, 'argv', args), \
+                 patch.object(deploy, 'package',
+                              return_value=(Path('archive'), {field: True})), \
+                 patch.object(deploy, 'Console', return_value=console):
+                deploy.main()
+            console.upload.assert_called()
 
 
 class BootTransitionTests(unittest.TestCase):

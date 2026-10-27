@@ -21,4 +21,19 @@ config BR2_BRICK_VE_QUALIFICATION
 	  is intended for deterministic codec and DMA-containment qualification;
 	  the ordinary image keeps every accelerator node disabled.
 
+config BR2_BRICK_VP9_QUALIFICATION
+	bool "Brick VP9 qualification profile"
+	help
+	  Enable only the reviewed A133 Hantro G2 VP9 engine and its shared
+	  video clock/reset provider. The ordinary image keeps the engine
+	  disabled, and the isolated profile does not enable an IOMMU mapping.
+
+config BR2_BRICK_CE_TRNG_QUALIFICATION
+	bool "Brick CE/TRNG qualification profile"
+	help
+	  Enable the reviewed A133 crypto engine and its zero-entropy-credit
+	  TRNG transport in an isolated image. The ordinary image keeps the
+	  crypto node and TRNG transport disabled.
+
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-accelerator-qualification/Config.in"
+source "$BR2_EXTERNAL_BRICK_PATH/package/brick-ce-trng-qualification/Config.in"

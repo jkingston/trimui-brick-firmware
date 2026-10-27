@@ -113,12 +113,18 @@ class RecoveryProfileTests(unittest.TestCase):
             'BR2_PACKAGE_BRICK_SCP=y').replace(
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=""',
             'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment"')))
-        cases.append(('accelerator', self.config.read_text().replace(
+        cases.append(('qualification', self.config.read_text().replace(
             '# BR2_BRICK_G2D_QUALIFICATION is not set',
             'BR2_BRICK_G2D_QUALIFICATION=y')))
-        cases.append(('accelerator', self.config.read_text().replace(
+        cases.append(('qualification', self.config.read_text().replace(
             '# BR2_BRICK_VE_QUALIFICATION is not set',
             'BR2_BRICK_VE_QUALIFICATION=y')))
+        cases.append(('qualification', self.config.read_text().replace(
+            '# BR2_BRICK_VP9_QUALIFICATION is not set',
+            'BR2_BRICK_VP9_QUALIFICATION=y')))
+        cases.append(('qualification', self.config.read_text().replace(
+            '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set',
+            'BR2_BRICK_CE_TRNG_QUALIFICATION=y')))
         for message, text in cases:
             with self.subTest(message=message):
                 self.config.write_text(text)

@@ -83,3 +83,23 @@ define BRICK_VE_QUALIFICATION_PROFILE
 endef
 LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_VE_QUALIFICATION_PROFILE
 endif
+
+ifeq ($(BR2_BRICK_VP9_QUALIFICATION),y)
+define BRICK_VP9_QUALIFICATION_PROFILE
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/vp9_profile.py verify-kernel \
+		$(BR2_CONFIG) $(LINUX_DIR)
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/vp9_profile.py install \
+		$(BINARIES_DIR) $(BR2_CONFIG) $(HOST_DIR)/bin/fdtget $(HOST_DIR)/bin/fdtput
+endef
+LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_VP9_QUALIFICATION_PROFILE
+endif
+
+ifeq ($(BR2_BRICK_CE_TRNG_QUALIFICATION),y)
+define BRICK_CE_TRNG_QUALIFICATION_PROFILE
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/ce_trng_profile.py verify-kernel \
+		$(BR2_CONFIG) $(LINUX_DIR)
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_BRICK_PATH)/tools/ce_trng_profile.py install \
+		$(BINARIES_DIR) $(BR2_CONFIG) $(HOST_DIR)/bin/fdtget $(HOST_DIR)/bin/fdtput
+endef
+LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_CE_TRNG_QUALIFICATION_PROFILE
+endif

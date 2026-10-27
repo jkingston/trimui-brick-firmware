@@ -1,0 +1,137 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+usage="usage: $0 probe|decode NEW-RESULT-DIRECTORY"
+[ "$#" -eq 2 ] || { echo "$usage" >&2; exit 2; }
+mode=$1
+out=$2
+case "$mode" in probe|decode) ;; *) echo "$usage" >&2; exit 2;; esac
+[ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
+marker=/sys/firmware/devicetree/base/chosen/trimui,vp9-qualification
+[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-no-iommu ] || {
+	echo "not a VP9 qualification image" >&2
+	exit 2
+}
+mkdir "$out"
+out=$(cd "$out" && pwd)
+assets=/usr/share/brick-qualification/vp9
+before_lines=0
+
+capture_diagnostics()
+{
+	cat /proc/interrupts > "$out/interrupts-after" 2>&1 || true
+	find /sys/kernel/debug/clk -maxdepth 2 -type f \
+		\( -name clk_rate -o -name clk_parent \) -path '*ve*' \
+		-print -exec cat '{}' \; > "$out/clocks-after" 2>&1 || true
+	dmesg > "$out/dmesg-after" 2>&1 || true
+	if [ "$before_lines" -gt 0 ]; then
+		sed -n "$((before_lines + 1)),\$p" "$out/dmesg-after" \
+			> "$out/dmesg-delta" || true
+	fi
+}
+
+finish()
+{
+	status=$?
+	trap - EXIT
+	capture_diagnostics
+	if [ "$status" -ne 0 ] && [ ! -e "$out/RESULT" ]; then
+		printf 'FAIL mode=%s status=%s\n' "$mode" "$status" > "$out/RESULT"
+	fi
+	exit "$status"
+}
+
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! grep -q '[[:space:]]/sys/kernel/debug[[:space:]]debugfs[[:space:]]' /proc/mounts; then
+	mount -t debugfs debugfs /sys/kernel/debug
+fi
+
+set -- /sys/bus/platform/devices/*1c00000.video-codec
+[ "$#" -eq 1 ] && [ -d "$1" ] && [ -L "$1/driver" ] || {
+	echo "missing bound A133 Hantro VP9 device" >&2
+	exit 2
+}
+device_node=$1
+[ "$(basename "$(readlink -f "$device_node/driver")")" = hantro-vpu ] || {
+	echo "A133 VP9 is bound to an unexpected driver" >&2
+	exit 2
+}
+[ ! -e "$device_node/iommu_group" ] || {
+	echo "A133 VP9 unexpectedly acquired an IOMMU mapping" >&2
+	exit 2
+}
+set -- /sys/bus/platform/devices/video-engine-domain
+[ "$#" -eq 1 ] && [ -d "$1" ] && [ -L "$1/driver" ] && \
+	[ "$(basename "$(readlink -f "$1/driver")")" = sun50i-a133-ve-domain ] || {
+	echo "shared video-engine domain is not bound to its reviewed driver" >&2
+	exit 2
+}
+[ "$(cat /sys/kernel/debug/clk/ve/clk_rate)" = 432000000 ] || {
+	echo "VE clock is not at stock 432 MHz" >&2
+	exit 2
+}
+[ "$(cat /sys/kernel/debug/clk/ve/clk_parent)" = pll-ve ] || {
+	echo "VE clock parent is not stock PLL-VE" >&2
+	exit 2
+}
+
+video=
+for path in /sys/class/video4linux/video*; do
+	[ -e "$path" ] || continue
+	case "$(cat "$path/name")" in
+		allwinner,sun50i-a133-vpu-g2*) ;;
+		*) continue;;
+	esac
+	[ -z "$video" ] || { echo "duplicate A133 VP9 devices" >&2; exit 2; }
+	video=/dev/$(basename "$path")
+done
+[ -n "$video" ] || { echo "missing A133 VP9 video device" >&2; exit 2; }
+printf '%s\n' "$video" > "$out/device"
+dmesg > "$out/dmesg-before"
+before_lines=$(wc -l < "$out/dmesg-before")
+cat /proc/interrupts > "$out/interrupts-before"
+v4l2-ctl -d "$video" --all > "$out/v4l2-ctl.log" 2>&1
+timeout 120 v4l2-compliance -d "$video" > "$out/v4l2-compliance.log" 2>&1
+timeout 15 gst-inspect-1.0 v4l2slvp9dec > "$out/decoder-inspect.log" 2>&1
+
+if [ "$mode" = decode ]; then
+	input=$assets/vp9-ip.ivf
+	expected_input=$(awk '$2 == "vp9-ip.ivf" { print $1 }' "$assets/FIXTURE-SHA256")
+	[ -n "$expected_input" ] && \
+		[ "$(sha256sum "$input" | awk '{ print $1 }')" = "$expected_input" ] || {
+		echo "VP9 fixture checksum mismatch" >&2
+		exit 2
+	}
+	GST_DEBUG='v4l2codecs*:5' timeout 30 gst-launch-1.0 -e -v \
+		filesrc location="$input" ! ivfparse ! v4l2slvp9dec ! \
+		videoconvert ! 'video/x-raw,format=I420' ! \
+		filesink location="$out/output.yuv" >> "$out/decoder.log" 2>&1
+	[ "$(sha256sum "$input" | awk '{ print $1 }')" = "$expected_input" ] || {
+		echo "VP9 fixture changed during decode" >&2
+		exit 1
+	}
+	expected=$(awk '$2 == "vp9-ip.reference.yuv" { print $1 }' \
+		"$assets/REFERENCE-SHA256")
+	actual=$(sha256sum "$out/output.yuv" | awk '{ print $1 }')
+	[ -n "$expected" ] && [ "$actual" = "$expected" ] || {
+		printf 'FAIL expected=%s actual=%s\n' "$expected" "$actual" | tee "$out/RESULT"
+		exit 1
+	}
+fi
+
+capture_diagnostics
+if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|(hantro|video-engine-domain).*(timeout|fault|error|failed))' \
+	"$out/dmesg-delta" > "$out/kernel-errors"; then
+	echo "new kernel fault or VP9 error during qualification" >&2
+	exit 1
+fi
+if [ "$mode" = decode ]; then
+	printf 'PASS vp9 decode sha256=%s\n' "$actual" | tee "$out/RESULT"
+else
+	printf 'PASS vp9 probe qualification\n' | tee "$out/RESULT"
+fi

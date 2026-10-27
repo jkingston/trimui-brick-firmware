@@ -60,6 +60,19 @@ class ScpProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'do not form'):
             scp_profile.profile(self.config)
 
+    def test_disabled_scp_accepts_only_known_non_scp_fragments(self):
+        prefix = ('# BR2_PACKAGE_BRICK_SCP is not set\n'
+                  '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n')
+        for fragment in scp_profile.NON_SCP_FRAGMENTS:
+            with self.subTest(fragment=fragment):
+                self.config.write_text(
+                    prefix + f'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="{fragment}"\n')
+                self.assertEqual(scp_profile.profile(self.config), 'disabled')
+        self.config.write_text(
+            prefix + 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="unknown.fragment"\n')
+        with self.assertRaisesRegex(ValueError, 'do not form'):
+            scp_profile.profile(self.config)
+
     def test_kernel_verification_requires_config_and_object_as_a_pair(self):
         kernel = self.config.parent / 'linux'
         obj = kernel / 'drivers/irqchip/irq-sun50i-a133-wakeupgen.o'

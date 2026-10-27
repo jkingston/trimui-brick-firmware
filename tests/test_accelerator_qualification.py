@@ -50,7 +50,10 @@ class AcceleratorQualificationTests(unittest.TestCase):
         self.assertEqual({line.split()[1].split('.', 1)[0] for line in lines},
                          {line.split()[1].split('.', 1)[0] for line in
                           (fixture_dir / 'REFERENCE-SHA256').read_text().splitlines()})
-        for script in ('brick-qualify-g2d', 'brick-qualify-ve'):
+        vp9_fixture = fixture_dir.parent / 'vp9/vp9-ip.ivf'
+        self.assertEqual(hashlib.sha256(vp9_fixture.read_bytes()).hexdigest(),
+                         '6f9849001939af34e3d867a109289890c9585ca3eae802bd7ffb2143242ed70d')
+        for script in ('brick-qualify-g2d', 'brick-qualify-ve', 'brick-qualify-vp9'):
             subprocess.run(['/bin/sh', '-n', PACKAGE / script], check=True)
 
     def test_target_qualification_is_bounded_and_has_explicit_build_dependency(self):
@@ -58,6 +61,7 @@ class AcceleratorQualificationTests(unittest.TestCase):
         config = (PACKAGE / 'Config.in').read_text()
         g2d = (PACKAGE / 'brick-qualify-g2d').read_text()
         ve = (PACKAGE / 'brick-qualify-ve').read_text()
+        vp9 = (PACKAGE / 'brick-qualify-vp9').read_text()
         busybox = (ROOT / 'board/trimui/brick/busybox.fragment').read_text()
         self.assertIn('BRICK_ACCELERATOR_QUALIFICATION_DEPENDENCIES += host-python3',
                       package)
@@ -70,6 +74,9 @@ class AcceleratorQualificationTests(unittest.TestCase):
         self.assertIn('v4l2slvp8dec', ve)
         self.assertIn('vp8-ip) suffix=ivf; parser=ivfparse', ve)
         self.assertIn('fixture changed during decode', ve)
+        self.assertIn('v4l2slvp9dec', vp9)
+        self.assertIn('isolated-no-iommu', vp9)
+        self.assertIn('timeout 120 v4l2-compliance', vp9)
         self.assertIn('trap finish EXIT', g2d)
         self.assertIn('trap finish EXIT', ve)
         self.assertIn('CONFIG_TIMEOUT=y', busybox.splitlines())

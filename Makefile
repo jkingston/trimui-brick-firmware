@@ -9,6 +9,8 @@ EMMC_RECOVERY ?= 0
 SCP_PROFILE ?= disabled
 G2D_PROFILE ?= disabled
 VE_PROFILE ?= disabled
+VP9_PROFILE ?= disabled
+CE_TRNG_PROFILE ?= disabled
 ifeq ($(filter $(USB_ROLE),peripheral host auto),)
 $(error USB_ROLE must be peripheral, host or auto)
 endif
@@ -26,8 +28,14 @@ endif
 ifeq ($(filter $(G2D_PROFILE),disabled qualification),)
 $(error G2D_PROFILE must be disabled or qualification)
 endif
-ifeq ($(G2D_PROFILE):$(VE_PROFILE),qualification:qualification)
-$(error G2D_PROFILE and VE_PROFILE qualification modes are mutually exclusive)
+ifeq ($(filter $(VP9_PROFILE),disabled qualification),)
+$(error VP9_PROFILE must be disabled or qualification)
+endif
+ifeq ($(filter $(CE_TRNG_PROFILE),disabled qualification),)
+$(error CE_TRNG_PROFILE must be disabled or qualification)
+endif
+ifneq ($(words $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE))),$(words $(sort $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)))))
+$(error Hardware qualification modes are mutually exclusive)
 endif
 ifeq ($(filter $(EMMC_RECOVERY),0 1),)
 $(error EMMC_RECOVERY must be 0 or 1)
@@ -39,16 +47,16 @@ endif
 ifneq ($(SCP_PROFILE),disabled)
 $(error EMMC_RECOVERY=1 and SCP_PROFILE are mutually exclusive)
 endif
-ifneq ($(G2D_PROFILE):$(VE_PROFILE),disabled:disabled)
-$(error EMMC_RECOVERY=1 and accelerator qualification are mutually exclusive)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled:disabled)
+$(error EMMC_RECOVERY=1 and hardware qualification are mutually exclusive)
 endif
 endif
-ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE)),)
+ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)),)
 ifneq ($(USB_ROLE),peripheral)
-$(error Accelerator qualification requires USB_ROLE=peripheral)
+$(error Hardware qualification requires USB_ROLE=peripheral)
 endif
 ifneq ($(SCP_PROFILE),disabled)
-$(error Accelerator qualification and SCP_PROFILE are mutually exclusive)
+$(error Hardware qualification and SCP_PROFILE are mutually exclusive)
 endif
 endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
@@ -75,18 +83,24 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py check-output $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
+	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
+	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py configure $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py configure $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py configure $(O)/.config $(VE_PROFILE)
+	python3 $(ROOT)/tools/vp9_profile.py configure $(O)/.config $(VP9_PROFILE)
+	python3 $(ROOT)/tools/ce_trng_profile.py configure $(O)/.config $(CE_TRNG_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
 	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py check-output $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
+	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
+	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 
 $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure

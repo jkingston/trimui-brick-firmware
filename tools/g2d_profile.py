@@ -10,16 +10,17 @@ import tempfile
 from emmc_recovery import enabled as emmc_recovery_enabled
 from scp_profile import profile as scp_profile
 from usb_profile import profile as usb_profile
-from ve_profile import enabled as ve_qualification_enabled
-
-
 KEY = 'BR2_BRICK_G2D_QUALIFICATION'
+VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
+VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
+CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,g2d-qualification'
 IOMMU = '/soc/iommu@30f0000'
 G2D = '/soc/g2d@6480000'
 VE = '/soc/video-codec@1c0e000'
+VP9 = '/soc/video-codec@1c00000'
 CE = '/soc/crypto@1904000'
 CCU = '/soc/clock@3001000'
 
@@ -115,7 +116,7 @@ def validate(fdtget, dtb, active, marker=False):
     iommu_phandle = _cells(fdtget, dtb, IOMMU, 'phandle')[0]
     if _cells(fdtget, dtb, G2D, 'iommus') != [iommu_phandle, 5]:
         raise ValueError('G2D must use exact IOMMU master 5')
-    for node in (VE, CE):
+    for node in (VE, VP9, CE):
         if _status(fdtget, dtb, node) != 'disabled':
             raise ValueError('qualification image must isolate G2D')
 
@@ -128,8 +129,10 @@ def validate(fdtget, dtb, active, marker=False):
 def install(images, config, fdtget, fdtput):
     if not enabled(config):
         raise ValueError('G2D installation requires the qualification configuration')
-    if ve_qualification_enabled(config):
-        raise ValueError('G2D and video-engine qualification must remain separate')
+    text = config.read_text()
+    if any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
+           for key in (VE_KEY, VP9_KEY, CE_KEY)):
+        raise ValueError('G2D and peer accelerator qualification must remain separate')
     if usb_profile(config) != 'peripheral':
         raise ValueError('G2D qualification requires the USB gadget profile')
     if emmc_recovery_enabled(config):

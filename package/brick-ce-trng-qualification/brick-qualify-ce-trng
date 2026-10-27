@@ -1,0 +1,276 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+usage="usage: $0 core|lifecycle|suspend NEW-RESULT-DIRECTORY"
+[ "$#" -eq 2 ] || { echo "$usage" >&2; exit 2; }
+mode=$1
+out=$2
+case "$mode" in core|lifecycle|suspend) ;; *) echo "$usage" >&2; exit 2;; esac
+[ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
+marker=/sys/firmware/devicetree/base/chosen/trimui,ce-trng-qualification
+[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-zero-credit ] || {
+	echo "not a CE/TRNG qualification image" >&2
+	exit 2
+}
+mkdir "$out"
+out=$(cd "$out" && pwd)
+tool=/usr/libexec/brick-qualification/brick-ce-kat
+before_lines=0
+stress_pid=
+stress_group=0
+
+stress_exit()
+{
+	stage=$1
+	pgid=$stress_pid
+	if kill -0 -"$pgid" 2>/dev/null; then
+		kill -KILL -"$pgid" 2>/dev/null || true
+	else
+		kill -KILL "$stress_pid" 2>/dev/null || true
+	fi
+	status=0
+	wait "$stress_pid" || status=$?
+	stress_pid=
+	stress_group=0
+	if kill -0 -"$pgid" 2>/dev/null; then
+		kill -KILL -"$pgid" 2>/dev/null || true
+	fi
+	echo "concurrent CE load exited $stage (status=$status)" >&2
+	return 1
+}
+
+stress_require_alive()
+{
+	stage=$1
+	kill -0 "$stress_pid" 2>/dev/null &&
+		kill -0 -"$stress_pid" 2>/dev/null || stress_exit "$stage"
+}
+
+stress_stop()
+{
+	pgid=$stress_pid
+	if ! kill -TERM -"$pgid" 2>/dev/null; then
+		stress_exit "before explicit stop"
+	fi
+	# Terminate every member even if a future worker grows helper processes or
+	# mishandles TERM. The qualification fails if the group remains afterwards.
+	sleep 1
+	if kill -0 -"$pgid" 2>/dev/null; then
+		kill -KILL -"$pgid" 2>/dev/null || {
+			echo "could not terminate concurrent CE process group" >&2
+			return 1
+		}
+	fi
+	status=0
+	wait "$stress_pid" || status=$?
+	stress_pid=
+	stress_group=0
+	if [ "$status" -ne 143 ] && [ "$status" -ne 137 ]; then
+		echo "concurrent CE load returned unexpected stop status $status" >&2
+		return 1
+	fi
+	sleep 1
+	if kill -0 -"$pgid" 2>/dev/null; then
+		echo "concurrent CE descendants survived process-group termination" >&2
+		return 1
+	fi
+}
+
+select_and_probe_trng()
+{
+	phase=$1
+	grep -qw a133-ce-trng-unqualified "$rng/rng_available" || {
+		echo "missing explicitly unqualified A133 TRNG after $phase" >&2
+		return 1
+	}
+	printf '%s\n' a133-ce-trng-unqualified > "$rng/rng_current"
+	[ "$(cat "$rng/rng_current")" = a133-ce-trng-unqualified ] || {
+		echo "A133 TRNG is not selected after $phase" >&2
+		return 1
+	}
+	[ "$(cat "$rng/rng_quality")" = 0 ] || {
+		echo "A133 TRNG received nonzero entropy credit after $phase" >&2
+		return 1
+	}
+	timeout 15 dd if=/dev/hwrng of="$out/trng-$phase.bin" bs=32 count=1 \
+		2> "$out/trng-$phase.log"
+	[ "$(wc -c < "$out/trng-$phase.bin")" -eq 32 ] || {
+		echo "A133 TRNG returned a short sample after $phase" >&2
+		return 1
+	}
+}
+
+capture_diagnostics()
+{
+	cat /proc/interrupts > "$out/interrupts-after" 2>&1 || true
+	cat /proc/crypto > "$out/proc-crypto-after" 2>&1 || true
+	find /sys/kernel/debug/clk -maxdepth 2 -type f \
+		\( -name clk_rate -o -name clk_parent \) -path '*ce*' \
+		-print -exec cat '{}' \; > "$out/clocks-after" 2>&1 || true
+	find /sys/kernel/iommu_groups -maxdepth 3 -type l -print \
+		> "$out/iommu-groups-after" 2>&1 || true
+	dmesg > "$out/dmesg-after" 2>&1 || true
+	if [ "$before_lines" -gt 0 ]; then
+		sed -n "$((before_lines + 1)),\$p" "$out/dmesg-after" \
+			> "$out/dmesg-delta" || true
+	fi
+}
+
+finish()
+{
+	status=$?
+	trap - EXIT
+	if [ -n "$stress_pid" ]; then
+		if [ "$stress_group" -eq 1 ]; then
+			kill -KILL -"$stress_pid" 2>/dev/null || true
+		else
+			kill -KILL "$stress_pid" 2>/dev/null || true
+		fi
+		wait "$stress_pid" 2>/dev/null || true
+	fi
+	capture_diagnostics
+	if [ "$status" -ne 0 ] && [ ! -e "$out/RESULT" ]; then
+		printf 'FAIL mode=%s status=%s\n' "$mode" "$status" > "$out/RESULT"
+	fi
+	exit "$status"
+}
+
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! grep -q '[[:space:]]/sys/kernel/debug[[:space:]]debugfs[[:space:]]' /proc/mounts; then
+	mount -t debugfs debugfs /sys/kernel/debug
+fi
+
+set -- /sys/bus/platform/devices/*1904000.crypto
+[ "$#" -eq 1 ] && [ -d "$1" ] || { echo "missing unique A133 CE device" >&2; exit 2; }
+device=$1
+device_name=$(basename "$device")
+[ -L "$device/driver" ] && [ "$(basename "$(readlink -f "$device/driver")")" = sun50i-a133-ce ] || {
+	echo "A133 CE is not bound to its reviewed driver" >&2
+	exit 2
+}
+[ ! -e "$device/iommu_group" ] || {
+	echo "A133 CE unexpectedly acquired an IOMMU mapping" >&2
+	exit 2
+}
+for member in /sys/kernel/iommu_groups/*/devices/*; do
+	[ -e "$member" ] || continue
+	[ "$(basename "$(readlink -f "$member")")" != "$device_name" ] || {
+		echo "A133 CE appears in an IOMMU group" >&2
+		exit 2
+	}
+done
+
+set -- /sys/kernel/debug/clk/ce/clk_rate
+[ "$#" -eq 1 ] && [ -f "$1" ] && [ "$(cat "$1")" = 400000000 ] || {
+	echo "CE clock is not held at reviewed 400 MHz" >&2
+	exit 2
+}
+
+for driver in ecb-aes-a133-ce cbc-aes-a133-ce sha256-a133-ce; do
+	grep -q "^driver[[:space:]]*: $driver$" /proc/crypto || {
+		echo "missing exact Crypto API driver $driver" >&2
+		exit 2
+	}
+done
+
+rng=/sys/class/misc/hw_random
+[ -c /dev/hwrng ] && [ -f "$rng/rng_available" ] && [ -f "$rng/rng_current" ] || {
+	echo "missing hwrng public interface" >&2
+	exit 2
+}
+select_and_probe_trng baseline
+
+cat /proc/interrupts > "$out/interrupts-before"
+cat /proc/crypto > "$out/proc-crypto-before"
+find /sys/kernel/debug/clk -maxdepth 2 -type f \
+	\( -name clk_rate -o -name clk_parent \) -path '*ce*' \
+	-print -exec cat '{}' \; > "$out/clocks-before" 2>&1 || true
+find /sys/kernel/iommu_groups -maxdepth 3 -type l -print \
+	> "$out/iommu-groups-before" 2>&1 || true
+dmesg > "$out/dmesg-before"
+before_lines=$(wc -l < "$out/dmesg-before")
+
+run_core()
+{
+	timeout 180 "$tool" kat > "$out/ce-kat.log" 2>&1
+	timeout 180 "$tool" concurrency 1024 > "$out/mixed-concurrency.log" 2>&1 &
+	stress_pid=$!
+	for flow in 0 1 2 3; do
+		timeout 15 dd if=/dev/hwrng of="$out/trng-flow-$flow.bin" bs=32 count=1 \
+			2> "$out/trng-flow-$flow.log"
+		[ "$(wc -c < "$out/trng-flow-$flow.bin")" -eq 32 ] || exit 1
+	done
+	for sample in 0 1; do
+		timeout 30 dd if=/dev/hwrng of="$out/trng-8192-$sample.bin" bs=8192 count=1 \
+			2> "$out/trng-8192-$sample.log"
+		[ "$(wc -c < "$out/trng-8192-$sample.bin")" -eq 8192 ] || exit 1
+	done
+	cmp -s "$out/trng-8192-0.bin" "$out/trng-8192-1.bin" && {
+		echo "repeated 8 KiB TRNG output" >&2
+		exit 1
+	}
+	dd if=/dev/zero of="$out/zero-8192.bin" bs=8192 count=1 2>/dev/null
+	cmp -s "$out/trng-8192-0.bin" "$out/zero-8192.bin" && {
+		echo "TRNG returned an all-zero block" >&2
+		exit 1
+	}
+	rm "$out/zero-8192.bin"
+	wait "$stress_pid"
+	stress_pid=
+}
+
+if [ "$mode" = core ]; then
+	run_core
+elif [ "$mode" = lifecycle ]; then
+	run_core
+	driver=$(readlink -f "$device/driver")
+	printf '%s\n' "$device_name" > "$driver/unbind"
+	[ ! -L "$device/driver" ] || { echo "CE unbind did not complete" >&2; exit 1; }
+	for name in ecb-aes-a133-ce cbc-aes-a133-ce sha256-a133-ce; do
+		! grep -q "^driver[[:space:]]*: $name$" /proc/crypto || {
+			echo "$name survived CE unbind" >&2
+			exit 1
+		}
+	done
+	if grep -qw a133-ce-trng-unqualified "$rng/rng_available"; then
+		echo "A133 TRNG survived CE unbind" >&2
+		exit 1
+	fi
+	printf '%s\n' "$device_name" > "$driver/bind"
+	[ -L "$device/driver" ] || { echo "CE rebind did not complete" >&2; exit 1; }
+	timeout 180 "$tool" all > "$out/post-reset-kat.log" 2>&1
+	select_and_probe_trng rebind
+else
+	set -- /sys/class/rtc/rtc*/wakealarm
+	[ "$#" -ge 1 ] && [ -w "$1" ] || {
+		echo "no writable RTC wake alarm; suspend was not attempted" >&2
+		exit 2
+	}
+	wakealarm=$1
+	setsid "$tool" concurrency 4294967295 > "$out/suspend-load.log" 2>&1 &
+	stress_pid=$!
+	stress_group=1
+	sleep 1
+	printf '0\n' > "$wakealarm"
+	printf '+5\n' > "$wakealarm"
+	cat "$wakealarm" > "$out/wakealarm"
+	stress_require_alive "before suspend"
+	printf 'freeze\n' > /sys/power/state
+	stress_require_alive "after resume"
+	stress_stop
+	timeout 180 "$tool" all > "$out/post-resume-kat.log" 2>&1
+	select_and_probe_trng resume
+fi
+
+capture_diagnostics
+if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|sun50i-a133-ce.*(timeout|fault|error|failed|uncontained|quarantine))' \
+	"$out/dmesg-delta" > "$out/kernel-errors"; then
+	echo "new kernel fault or CE containment error during qualification" >&2
+	exit 1
+fi
+printf 'PASS ce-trng qualification mode=%s zero-entropy-credit\n' "$mode" | tee "$out/RESULT"

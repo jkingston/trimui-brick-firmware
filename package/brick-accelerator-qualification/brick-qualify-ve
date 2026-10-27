@@ -59,12 +59,19 @@ runtime_contract()
 		exit 2
 	}
 	readlink -f "$1/iommu_group" > "$out/iommu-group"
+	set -- /sys/bus/platform/devices/video-engine-domain
+	[ "$#" -eq 1 ] && [ -d "$1" ] && [ -L "$1/driver" ] && \
+		[ "$(basename "$(readlink -f "$1/driver")")" = sun50i-a133-ve-domain ] || {
+		echo "shared video-engine domain is not bound to its reviewed driver" >&2
+		exit 2
+	}
+	readlink -f "$1/driver" > "$out/domain-driver"
 }
 
 check_new_diagnostics()
 {
 	capture_diagnostics
-	if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|cedrus.*(timeout|fault|error|failed))' \
+	if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|(cedrus|video-engine-domain).*(timeout|fault|error|failed))' \
 		"$out/dmesg-delta" > "$out/kernel-errors"; then
 		echo "new kernel fault or Cedrus error during qualification" >&2
 		return 1

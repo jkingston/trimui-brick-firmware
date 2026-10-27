@@ -14,11 +14,16 @@ from usb_profile import profile as usb_profile
 
 KEY = 'BR2_BRICK_VE_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
+VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
+CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,ve-qualification'
 IOMMU = '/soc/iommu@30f0000'
 VE = '/soc/video-codec@1c0e000'
+VP9 = '/soc/video-codec@1c00000'
+VE_DOMAIN = '/video-engine-domain'
+DOMAIN_PROPERTY = 'allwinner,video-engine-domain'
 MM_SRAM = '/soc/syscon@3000000/sram@24000/sram-section@0'
 VE_SRAM_PARENT = '/soc/syscon@3000000/sram@1a00000'
 VE_SRAM = VE_SRAM_PARENT + '/sram-section@0'
@@ -44,9 +49,11 @@ def check_output(config, requested):
     if enabled(config) != requested:
         raise ValueError('Use a fresh output directory when changing video-engine profile')
     text = config.read_text()
+    uses_eudev = requested or bool(re.search(
+        rf'^{re.escape(VP9_KEY)}=y$', config.read_text(), re.M))
     expected = (
         ('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV is not set',
-         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if requested else
+         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if uses_eudev else
         ('BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y',
          '# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV is not set'))
     if any(value not in text.splitlines() for value in expected):
@@ -60,9 +67,11 @@ def configure(config, requested):
     text, count = re.subn(old, new, config.read_text(), flags=re.M)
     if count != 1:
         raise ValueError('Missing or duplicate video-engine profile configuration')
+    use_eudev = requested or bool(re.search(
+        rf'^{re.escape(VP9_KEY)}=y$', text, re.M))
     settings = {
-        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not requested,
-        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': requested,
+        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not use_eudev,
+        'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': use_eudev,
     }
     for key, value in settings.items():
         pattern = r'^(?:' + key + r'=y|# ' + key + r' is not set)$'
@@ -73,8 +82,10 @@ def configure(config, requested):
     config.write_text(text)
 
 
-def _g2d_enabled(config):
-    return bool(re.search(r'^' + G2D_KEY + r'=y$', config.read_text(), re.M))
+def _peer_enabled(config):
+    text = config.read_text()
+    return any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
+               for key in (G2D_KEY, VP9_KEY, CE_KEY))
 
 
 def _get(fdtget, dtb, node, prop, kind='s', default=None):
@@ -119,18 +130,26 @@ def validate(fdtget, dtb, active, marker=False):
         if _status(fdtget, dtb, node) != expected:
             raise ValueError(f'{node} has unexpected status')
 
-    required = {'clocks', 'clock-names', 'resets', 'allwinner,sram', 'iommus'}
+    required = {DOMAIN_PROPERTY, 'allwinner,sram', 'iommus'}
     if not required <= _properties(fdtget, dtb, VE):
-        raise ValueError('video engine lacks clocks, reset, SRAM or IOMMU ownership')
-    if _get(fdtget, dtb, VE, 'clock-names').split() != ['ahb', 'mod', 'ram']:
-        raise ValueError('video engine clock roles do not match the A133 contract')
+        raise ValueError('video engine lacks shared-domain, SRAM or IOMMU ownership')
+    if {'clocks', 'clock-names', 'resets'} & _properties(fdtget, dtb, VE):
+        raise ValueError('video engine duplicates shared clock or reset ownership')
 
+    domain_props = _properties(fdtget, dtb, VE_DOMAIN)
+    if not {'compatible', 'clocks', 'clock-names', 'resets', 'phandle'} <= domain_props:
+        raise ValueError('shared video-engine domain lacks its reviewed resources')
+    if _get(fdtget, dtb, VE_DOMAIN, 'compatible') != \
+            'allwinner,sun50i-a133-video-engine-domain':
+        raise ValueError('shared video-engine domain has an unexpected compatible')
+    if _get(fdtget, dtb, VE_DOMAIN, 'clock-names').split() != ['ahb', 'mod', 'ram']:
+        raise ValueError('shared video-engine clock roles do not match A133')
     ccu_phandle = _cells(fdtget, dtb, CCU, 'phandle')[0]
-    if _cells(fdtget, dtb, VE, 'clocks') != [
+    if _cells(fdtget, dtb, VE_DOMAIN, 'clocks') != [
             ccu_phandle, 0x29, ccu_phandle, 0x28, ccu_phandle, 0x34]:
-        raise ValueError('video engine clocks do not match the A133 contract')
-    if _cells(fdtget, dtb, VE, 'resets') != [ccu_phandle, 5]:
-        raise ValueError('video engine reset does not match the A133 contract')
+        raise ValueError('shared video-engine clocks do not match A133')
+    if _cells(fdtget, dtb, VE_DOMAIN, 'resets') != [ccu_phandle, 5]:
+        raise ValueError('shared video-engine reset does not match A133')
     if _cells(fdtget, dtb, IOMMU, 'clocks') != [ccu_phandle, 0x32]:
         raise ValueError('IOMMU clock does not match the A133 contract')
     if _cells(fdtget, dtb, IOMMU, '#iommu-cells') != [1]:
@@ -144,8 +163,24 @@ def validate(fdtget, dtb, active, marker=False):
     if _cells(fdtget, dtb, VE, 'allwinner,sram') != [
             mm_sram_phandle, 1, ve_sram_phandle, 1]:
         raise ValueError('video engine SRAM selectors do not match stock')
+    domain_phandle = _cells(fdtget, dtb, VE_DOMAIN, 'phandle')[0]
+    if _cells(fdtget, dtb, VE, DOMAIN_PROPERTY) != [domain_phandle]:
+        raise ValueError('video engine references the wrong shared domain')
 
-    for node in (G2D, CE):
+    vp9_props = _properties(fdtget, dtb, VP9)
+    if not {'compatible', 'reg', 'interrupts', DOMAIN_PROPERTY, 'status'} <= vp9_props:
+        raise ValueError('VP9 peer lacks its reviewed disabled contract')
+    if _get(fdtget, dtb, VP9, 'compatible') != 'allwinner,sun50i-a133-vpu-g2':
+        raise ValueError('VP9 peer has an unexpected compatible')
+    if _cells(fdtget, dtb, VP9, 'reg') != [0x01c00000, 0x1000] or \
+            _cells(fdtget, dtb, VP9, 'interrupts') != [0, 90, 4]:
+        raise ValueError('VP9 peer has unexpected hardware resources')
+    if _cells(fdtget, dtb, VP9, DOMAIN_PROPERTY) != [domain_phandle]:
+        raise ValueError('VP9 peer references the wrong shared domain')
+    if {'clocks', 'clock-names', 'resets', 'iommus'} & vp9_props:
+        raise ValueError('VP9 peer violates the shared-domain no-IOMMU contract')
+
+    for node in (G2D, CE, VP9):
         if _status(fdtget, dtb, node) != 'disabled':
             raise ValueError('qualification image must isolate the video engine')
 
@@ -158,8 +193,10 @@ def validate(fdtget, dtb, active, marker=False):
 def install(images, config, fdtget, fdtput):
     if not enabled(config):
         raise ValueError('video-engine installation requires the qualification configuration')
-    if _g2d_enabled(config):
+    if bool(re.search(rf'^{re.escape(G2D_KEY)}=y$', config.read_text(), re.M)):
         raise ValueError('video-engine and G2D qualification must remain separate')
+    if _peer_enabled(config):
+        raise ValueError('video-engine and peer accelerator qualification must remain separate')
     if usb_profile(config) != 'peripheral':
         raise ValueError('video-engine qualification requires the USB gadget profile')
     if emmc_recovery_enabled(config):
