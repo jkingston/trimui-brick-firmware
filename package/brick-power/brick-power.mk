@@ -11,11 +11,14 @@ define BRICK_POWER_BUILD_CMDS
 		$(@D)/brick-suspend.c \
 		`$(PKG_CONFIG_HOST_BINARY) --cflags --libs alsa dbus-1` \
 		-o $(@D)/brick-suspend
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra \
+		$(@D)/brick-usb-current.c -o $(@D)/brick-usb-current
 endef
 
 define BRICK_POWER_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/brick-power-key $(TARGET_DIR)/usr/sbin/brick-power-key
 	$(INSTALL) -D -m 0755 $(@D)/brick-suspend $(TARGET_DIR)/usr/sbin/brick-suspend
+	$(INSTALL) -D -m 0755 $(@D)/brick-usb-current $(TARGET_DIR)/usr/sbin/brick-usb-current
 endef
 
 $(eval $(generic-package))
