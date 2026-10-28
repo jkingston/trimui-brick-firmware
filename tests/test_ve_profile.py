@@ -15,6 +15,22 @@ import usb_profile
 import ve_profile
 
 
+class VeProfileWiringTests(unittest.TestCase):
+    def test_fragment_contains_only_bounded_encoder_options(self):
+        fragment = (ROOT / 'board/trimui/brick/ve.fragment').read_text().splitlines()
+        self.assertEqual(fragment, [
+            'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE=y',
+            'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y',
+        ])
+
+    def test_kernel_verification_runs_for_default_and_qualification_profiles(self):
+        external = (ROOT / 'external.mk').read_text()
+        hook = 'LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_VE_KERNEL_PROFILE'
+        qualification = 'ifeq ($(BR2_BRICK_VE_QUALIFICATION),y)'
+        self.assertIn(hook, external)
+        self.assertLess(external.index(hook), external.index(qualification))
+
+
 class VeProfileTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -30,6 +46,7 @@ class VeProfileTests(unittest.TestCase):
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
             '# BR2_BRICK_VP9_QUALIFICATION is not set\n'
             '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set\n'
+            '# BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION is not set\n'
             'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y\n'
             '# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV is not set\n'
             '# BR2_BRICK_VE_QUALIFICATION is not set\n')
@@ -98,6 +115,7 @@ class VeProfileTests(unittest.TestCase):
         self.assertFalse(ve_profile.enabled(self.config))
         ve_profile.configure(self.config, 'qualification')
         self.assertTrue(ve_profile.enabled(self.config))
+        self.assertEqual(ve_profile._fragment(self.config), ve_profile.FRAGMENT)
         self.assertIn('BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y',
                       self.config.read_text())
         ve_profile.configure(self.config, 'disabled')
@@ -131,13 +149,24 @@ class VeProfileTests(unittest.TestCase):
 
     def test_kernel_verification_requires_bounded_encoder_and_shared_domain(self):
         kernel = self.root / 'kernel'
-        objects = (
+        common = (
             'drivers/staging/media/sunxi/cedrus/cedrus.o',
-            'drivers/staging/media/sunxi/cedrus/cedrus_a133_enc_backend.o',
-            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o',
             'drivers/soc/sunxi/sun50i-a133-ve-domain.o',
         )
-        for relative in objects:
+        qualification = (
+            'drivers/staging/media/sunxi/cedrus/cedrus_a133_enc_backend.o',
+            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o',
+        )
+        for relative in common:
+            path = kernel / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        (kernel / '.config').write_text(
+            'CONFIG_VIDEO_SUNXI_CEDRUS=y\n'
+            '# CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE is not set\n'
+            'CONFIG_SUN50I_A133_VE_DOMAIN=y\n')
+        ve_profile.verify_kernel(self.config, kernel)
+        for relative in qualification:
             path = kernel / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
@@ -159,6 +188,22 @@ class VeProfileTests(unittest.TestCase):
                 'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y',
                 '# CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION is not set'))
         with self.assertRaisesRegex(ValueError, 'not built'):
+            ve_profile.verify_kernel(self.config, kernel)
+
+    def test_default_kernel_rejects_qualification_code(self):
+        kernel = self.root / 'kernel'
+        for relative in (
+                'drivers/staging/media/sunxi/cedrus/cedrus.o',
+                'drivers/soc/sunxi/sun50i-a133-ve-domain.o'):
+            path = kernel / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        (kernel / '.config').write_text(
+            'CONFIG_VIDEO_SUNXI_CEDRUS=y\n'
+            'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE=y\n'
+            'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y\n'
+            'CONFIG_SUN50I_A133_VE_DOMAIN=y\n')
+        with self.assertRaisesRegex(ValueError, 'excluded from'):
             ve_profile.verify_kernel(self.config, kernel)
 
     def test_wrong_iommu_master_is_rejected_without_mutating_image(self):

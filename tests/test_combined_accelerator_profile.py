@@ -157,6 +157,14 @@ class CombinedAcceleratorProfileTests(unittest.TestCase):
 
 
 class CombinedAcceleratorWiringTests(unittest.TestCase):
+    def test_fragment_enables_every_qualification_only_kernel_feature(self):
+        fragment = (ROOT / 'board/trimui/brick/'
+                    'combined-accelerators.fragment').read_text().splitlines()
+        for option in (
+                'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE=y',
+                'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y'):
+            self.assertIn(option, fragment)
+
     def test_all_bounded_runners_accept_only_the_versioned_combined_marker(self):
         paths = (
             ROOT / 'package/brick-accelerator-qualification/brick-qualify-g2d',

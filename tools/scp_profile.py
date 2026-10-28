@@ -11,6 +11,7 @@ FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 WAKE_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment'
 DEEP_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-deep.fragment'
 NON_SCP_FRAGMENTS = {
+    '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ve.fragment',
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/vp9.fragment',
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ce-trng.fragment',
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/combined-accelerators.fragment',

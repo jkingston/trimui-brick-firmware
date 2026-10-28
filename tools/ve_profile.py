@@ -17,6 +17,8 @@ G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
+FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
+FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ve.fragment'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,ve-qualification'
@@ -45,12 +47,25 @@ def enabled(config):
     return bool(yes)
 
 
+def _fragment(config):
+    matches = re.findall(rf'^{re.escape(FRAGMENT_KEY)}="([^"]*)"$',
+                         config.read_text(), re.M)
+    if len(matches) != 1:
+        raise ValueError('Expected exactly one kernel fragment selection')
+    return matches[0]
+
+
 def check_output(config, requested):
     requested = requested == 'qualification'
     if not config.exists():
         return
     if enabled(config) != requested:
         raise ValueError('Use a fresh output directory when changing video-engine profile')
+    selected = _fragment(config)
+    if requested and selected != FRAGMENT:
+        raise ValueError('Video-engine qualification requires its exact kernel fragment')
+    if not requested and selected == FRAGMENT:
+        raise ValueError('Disabled video-engine profile retains its kernel fragment')
     text = config.read_text()
     uses_eudev = requested or any(re.search(
         rf'^{re.escape(key)}=y$', config.read_text(), re.M)
@@ -71,6 +86,20 @@ def configure(config, requested):
     text, count = re.subn(old, new, config.read_text(), flags=re.M)
     if count != 1:
         raise ValueError('Missing or duplicate video-engine profile configuration')
+    fragment = re.search(rf'^{re.escape(FRAGMENT_KEY)}="([^"]*)"$', text,
+                         re.M)
+    if not fragment:
+        raise ValueError('Missing or duplicate kernel fragment selection')
+    current = fragment.group(1)
+    if requested:
+        if current:
+            raise ValueError('Video-engine qualification cannot share a kernel fragment')
+        replacement = f'{FRAGMENT_KEY}="{FRAGMENT}"'
+    elif current == FRAGMENT:
+        replacement = f'{FRAGMENT_KEY}=""'
+    else:
+        replacement = fragment.group(0)
+    text = text[:fragment.start()] + replacement + text[fragment.end():]
     use_eudev = requested or any(re.search(
         rf'^{re.escape(key)}=y$', text, re.M)
         for key in (VP9_KEY, COMBINED_KEY))
@@ -117,14 +146,14 @@ def _config_value(config, key):
     text = config.read_text()
     yes = re.findall(rf'^{re.escape(key)}=y$', text, re.M)
     no = re.findall(rf'^# {re.escape(key)} is not set$', text, re.M)
-    if len(yes) + len(no) != 1:
-        raise ValueError(f'Expected exactly one {key} kernel configuration')
+    if len(yes) > 1 or len(no) > 1 or yes and no:
+        raise ValueError(f'Conflicting {key} kernel configuration')
     return bool(yes)
 
 
 def verify_kernel(config, kernel):
-    if not enabled(config):
-        raise ValueError('kernel verification requires video-engine qualification')
+    qualification = enabled(config) or bool(re.search(
+        rf'^{re.escape(COMBINED_KEY)}=y$', config.read_text(), re.M))
     kernel_config = kernel / '.config'
     if not kernel_config.is_file():
         raise FileNotFoundError(kernel_config)
@@ -132,15 +161,22 @@ def verify_kernel(config, kernel):
                 'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE',
                 'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION',
                 'CONFIG_SUN50I_A133_VE_DOMAIN'):
-        if not _config_value(kernel_config, key):
-            raise ValueError(f'{key} is not built into the qualification kernel')
+        expected = qualification or key in (
+            'CONFIG_VIDEO_SUNXI_CEDRUS', 'CONFIG_SUN50I_A133_VE_DOMAIN')
+        if _config_value(kernel_config, key) != expected:
+            state = 'built into' if expected else 'excluded from'
+            raise ValueError(f'{key} is not {state} the selected kernel profile')
     for relative in (
-            'drivers/staging/media/sunxi/cedrus/cedrus.o',
             'drivers/staging/media/sunxi/cedrus/cedrus_a133_enc_backend.o',
-            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o',
-            'drivers/soc/sunxi/sun50i-a133-ve-domain.o'):
+            'drivers/staging/media/sunxi/cedrus/cedrus_enc_video.o'):
+        if (kernel / relative).is_file() != qualification:
+            raise ValueError(f'{relative} does not match the selected kernel profile')
+    for relative in ('drivers/staging/media/sunxi/cedrus/cedrus.o',
+                     'drivers/soc/sunxi/sun50i-a133-ve-domain.o'):
         if not (kernel / relative).is_file():
             raise FileNotFoundError(kernel / relative)
+    if not qualification:
+        return
     cedrus = (kernel / 'drivers/staging/media/sunxi/cedrus/cedrus.c').read_text()
     hardware = (kernel / 'drivers/staging/media/sunxi/cedrus/cedrus_hw.c').read_text()
     if not re.search(
