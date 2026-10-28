@@ -13,6 +13,7 @@ from ve_profile import enabled as ve_qualification_enabled
 from vp9_profile import enabled as vp9_qualification_enabled
 from ce_trng_profile import enabled as ce_trng_qualification_enabled
 from combined_accelerator_profile import enabled as combined_accelerator_qualification_enabled
+from cpu_idle_profile import enabled as cpu_idle_qualification_enabled
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--rootfs', type=Path)
@@ -43,6 +44,7 @@ manifest = {'firmware': source(root), 'kernel': kernel, 'buildroot': '2026.08.1'
             'vp9_qualification': vp9_qualification_enabled(a.config),
             'ce_trng_qualification': ce_trng_qualification_enabled(a.config),
             'combined_accelerator_qualification': combined_accelerator_qualification_enabled(a.config),
+            'cpu_idle_qualification': cpu_idle_qualification_enabled(a.config),
             'config_sha256': hashlib.sha256(a.config.read_bytes()).hexdigest(), 'files': {}}
 selected_scp_profile = scp_profile(a.config)
 if selected_scp_profile != 'disabled':

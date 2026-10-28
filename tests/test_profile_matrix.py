@@ -26,6 +26,8 @@ class ProfileMatrixTests(unittest.TestCase):
             {'VP9_PROFILE': 'qualification'},
             {'CE_TRNG_PROFILE': 'qualification'},
             {'COMBINED_ACCELERATOR_PROFILE': 'qualification'},
+            {'CPU_IDLE_PROFILE': 'qualification'},
+            {'CPU_IDLE_PROFILE': 'qualification', 'SCP_PROFILE': 'deep'},
         )
         for settings in profiles:
             with self.subTest(settings=settings):
@@ -62,6 +64,11 @@ class ProfileMatrixTests(unittest.TestCase):
             ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'VE_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'VP9_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'CPU_IDLE_PROFILE': 'qualification', 'USB_ROLE': 'host'}, 'requires USB_ROLE'),
+            ({'CPU_IDLE_PROFILE': 'qualification', 'SCP_PROFILE': 'startup'}, 'disabled or deep'),
+            ({'CPU_IDLE_PROFILE': 'qualification', 'EMMC_RECOVERY': '1'}, 'mutually exclusive'),
+            ({'CPU_IDLE_PROFILE': 'qualification', 'G2D_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'CPU_IDLE_PROFILE': 'qualification', 'COMBINED_ACCELERATOR_PROFILE': 'qualification'}, 'mutually exclusive'),
         )
         for settings, message in cases:
             with self.subTest(settings=settings):

@@ -12,6 +12,7 @@ VE_PROFILE ?= disabled
 VP9_PROFILE ?= disabled
 CE_TRNG_PROFILE ?= disabled
 COMBINED_ACCELERATOR_PROFILE ?= disabled
+CPU_IDLE_PROFILE ?= disabled
 ifeq ($(filter $(USB_ROLE),peripheral host auto),)
 $(error USB_ROLE must be peripheral, host or auto)
 endif
@@ -38,12 +39,29 @@ endif
 ifeq ($(filter $(COMBINED_ACCELERATOR_PROFILE),disabled qualification),)
 $(error COMBINED_ACCELERATOR_PROFILE must be disabled or qualification)
 endif
+ifeq ($(filter $(CPU_IDLE_PROFILE),disabled qualification),)
+$(error CPU_IDLE_PROFILE must be disabled or qualification)
+endif
 ifneq ($(words $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE))),$(words $(sort $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)))))
 $(error Hardware qualification modes are mutually exclusive)
 endif
 ifneq ($(COMBINED_ACCELERATOR_PROFILE),disabled)
 ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled:disabled)
 $(error Combined and isolated accelerator qualification modes are mutually exclusive)
+endif
+endif
+ifneq ($(CPU_IDLE_PROFILE),disabled)
+ifneq ($(USB_ROLE),peripheral)
+$(error CPU_IDLE_PROFILE=$(CPU_IDLE_PROFILE) requires USB_ROLE=peripheral)
+endif
+ifeq ($(SCP_PROFILE),startup)
+$(error CPU idle qualification requires SCP_PROFILE=disabled or deep)
+endif
+ifneq ($(EMMC_RECOVERY),0)
+$(error CPU idle and eMMC qualification are mutually exclusive)
+endif
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled:disabled)
+$(error CPU idle and hardware qualification are mutually exclusive)
 endif
 endif
 ifeq ($(filter $(EMMC_RECOVERY),0 1),)
@@ -95,6 +113,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
+	python3 $(ROOT)/tools/cpu_idle_profile.py check-output $(O)/.config $(CPU_IDLE_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
@@ -104,6 +123,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/vp9_profile.py configure $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py configure $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py configure $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
+	python3 $(ROOT)/tools/cpu_idle_profile.py configure $(O)/.config $(CPU_IDLE_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
 	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
@@ -113,6 +133,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
+	python3 $(ROOT)/tools/cpu_idle_profile.py check-output $(O)/.config $(CPU_IDLE_PROFILE)
 
 $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure

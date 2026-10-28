@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import ce_trng_profile
 import vp9_profile
 import combined_accelerator_profile
+import cpu_idle_profile
 
 
 class ManifestProfileTests(unittest.TestCase):
@@ -45,6 +46,7 @@ class ManifestProfileTests(unittest.TestCase):
             'vp9_qualification': False,
             'ce_trng_qualification': False,
             'combined_accelerator_qualification': False,
+            'cpu_idle_qualification': False,
         }
         if selected:
             expected[selected] = True
@@ -64,6 +66,10 @@ class ManifestProfileTests(unittest.TestCase):
     def test_combined_manifest_has_exact_profile_identity(self):
         combined_accelerator_profile.configure(self.config, 'qualification')
         self.assert_qualification('combined_accelerator_qualification')
+
+    def test_cpu_idle_manifest_has_exact_profile_identity(self):
+        cpu_idle_profile.configure(self.config, 'qualification')
+        self.assert_qualification('cpu_idle_qualification')
 
 
 if __name__ == '__main__':

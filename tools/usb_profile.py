@@ -12,6 +12,8 @@ DTBS = {'peripheral': 'sun50i-a133-trimui-brick',
         'auto': 'sun50i-a133-trimui-brick-auto-usb'}
 NATIVE_WAKE_DTB = 'sun50i-a133-trimui-brick-native-wake'
 NATIVE_DEEP_DTB = 'sun50i-a133-trimui-brick-native-deep'
+NATIVE_IDLE_DTB = 'sun50i-a133-trimui-brick-native-idle'
+NATIVE_DEEP_IDLE_DTB = 'sun50i-a133-trimui-brick-native-deep-idle'
 WAKE_DTBS = {'startup': NATIVE_WAKE_DTB, 'deep': NATIVE_DEEP_DTB}
 KEY = 'BR2_LINUX_KERNEL_INTREE_DTS_NAME'
 
@@ -27,7 +29,8 @@ def expected_dtb(role, wake_profile):
 def selected_dtb(config):
     matches = re.findall(r'^' + KEY + r'="allwinner/([^"]+)"$',
                          config.read_text(), re.M)
-    allowed = set(DTBS.values()) | set(WAKE_DTBS.values())
+    allowed = set(DTBS.values()) | set(WAKE_DTBS.values()) | {
+        NATIVE_IDLE_DTB, NATIVE_DEEP_IDLE_DTB}
     if len(matches) != 1 or matches[0] not in allowed:
         raise ValueError('Expected exactly one supported Brick kernel DTB')
     return matches[0]
@@ -36,13 +39,23 @@ def selected_dtb(config):
 def profile(config):
     selected = selected_dtb(config)
     for role, name in DTBS.items():
-        if selected == name or (role == 'peripheral' and selected in WAKE_DTBS.values()):
+        if selected == name or (role == 'peripheral' and
+                                selected in set(WAKE_DTBS.values()) |
+                                {NATIVE_IDLE_DTB, NATIVE_DEEP_IDLE_DTB}):
             return role
     raise ValueError('Expected exactly one supported Brick USB profile DTB')
 
 
 def check_output(config, role, wake_profile='disabled'):
-    if config.exists() and selected_dtb(config) != expected_dtb(role, wake_profile):
+    if not config.exists():
+        return
+    selected = selected_dtb(config)
+    accepted = {expected_dtb(role, wake_profile)}
+    if role == 'peripheral' and wake_profile == 'disabled':
+        accepted.add(NATIVE_IDLE_DTB)
+    if role == 'peripheral' and wake_profile == 'deep':
+        accepted.add(NATIVE_DEEP_IDLE_DTB)
+    if selected not in accepted:
         raise ValueError('Use a fresh output directory when changing USB or SCP profile')
 
 
@@ -59,7 +72,12 @@ def install(images, config, fdtget):
     role = profile(config)
     wake_profile = scp_profile(config)
     selected = selected_dtb(config)
-    if selected != expected_dtb(role, wake_profile):
+    accepted = {expected_dtb(role, wake_profile)}
+    if role == 'peripheral' and wake_profile == 'disabled':
+        accepted.add(NATIVE_IDLE_DTB)
+    if role == 'peripheral' and wake_profile == 'deep':
+        accepted.add(NATIVE_DEEP_IDLE_DTB)
+    if selected not in accepted:
         raise ValueError('Kernel DTB does not match the combined USB and SCP profile')
     source = images / (selected + '.dtb')
     if not source.is_file():

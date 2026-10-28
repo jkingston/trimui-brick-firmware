@@ -1,0 +1,1202 @@
+From 6be4f64e36eee63ee4a66534b703948c7cd1da7c Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 05:30:00 +0000
+Subject: [PATCH] feat(allwinner): add native A133 CPU suspend
+
+Implement the stock-exact local CPU and cluster idle controller separately
+from the SCP-backed system suspend path.
+---
+ .../common/include/sunxi_a133_cpuidle.h       |  40 ++++
+ .../common/include/sunxi_a133_pm_dispatch.h   |  31 +++
+ .../allwinner/common/sunxi_a133_pm_dispatch.c |  85 +++++++
+ plat/allwinner/common/sunxi_native_pm.c       | 166 ++++++++++---
+ plat/allwinner/common/sunxi_pm.c              |   7 +
+ plat/allwinner/common/tests/Makefile          |  17 +-
+ .../common/tests/test_sunxi_a133_cpuidle.c    | 220 +++++++++++++++++
+ .../tests/test_sunxi_a133_pm_dispatch.c       | 177 ++++++++++++++
+ plat/allwinner/sun50i_a133/platform.mk        |  21 ++
+ plat/allwinner/sun50i_a133/sunxi_cpuidle.c    | 225 ++++++++++++++++++
+ plat/allwinner/sun50i_a133/sunxi_power.c      |   7 +
+ 11 files changed, 967 insertions(+), 29 deletions(-)
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_cpuidle.h
+ create mode 100644 plat/allwinner/common/include/sunxi_a133_pm_dispatch.h
+ create mode 100644 plat/allwinner/common/sunxi_a133_pm_dispatch.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_cpuidle.c
+ create mode 100644 plat/allwinner/common/tests/test_sunxi_a133_pm_dispatch.c
+ create mode 100644 plat/allwinner/sun50i_a133/sunxi_cpuidle.c
+
+diff --git a/plat/allwinner/common/include/sunxi_a133_cpuidle.h b/plat/allwinner/common/include/sunxi_a133_cpuidle.h
+new file mode 100644
+index 0000000..07d7436
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_cpuidle.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_CPUIDLE_H
++#define SUNXI_A133_CPUIDLE_H
++
++#include <stdint.h>
++
++#define SUNXI_A133_CPUIDLE_CORE_LEVEL	1U
++#define SUNXI_A133_CPUIDLE_CLUSTER_LEVEL	2U
++
++enum sunxi_a133_suspend_kind {
++	SUNXI_A133_SUSPEND_INVALID,
++	SUNXI_A133_SUSPEND_CORE,
++	SUNXI_A133_SUSPEND_CLUSTER,
++	SUNXI_A133_SUSPEND_SYSTEM,
++};
++
++struct sunxi_a133_cpuidle_backend {
++	void *cookie;
++	uint32_t (*read_32)(void *cookie, uintptr_t address);
++	void (*write_32)(void *cookie, uintptr_t address, uint32_t value);
++};
++
++int sunxi_a133_cpuidle_decode(uint32_t power_state, uint8_t states[3]);
++enum sunxi_a133_suspend_kind sunxi_a133_suspend_classify(
++	uint8_t cpu, uint8_t cluster, uint8_t system);
++int sunxi_a133_cpuidle_init(const struct sunxi_a133_cpuidle_backend *backend,
++			   unsigned int revision);
++int sunxi_a133_cpuidle_trigger(
++	const struct sunxi_a133_cpuidle_backend *backend,
++	unsigned int revision, unsigned int core, unsigned int hardware_level,
++	uint64_t secure_entrypoint);
++
++#if !defined(SUNXI_A133_CPUIDLE_HOST_TEST)
++void sunxi_a133_cpuidle_setup(uintptr_t secure_entrypoint);
++void sunxi_a133_cpuidle_power_off_self(unsigned int hardware_level);
++#endif
++
++#endif /* SUNXI_A133_CPUIDLE_H */
+diff --git a/plat/allwinner/common/include/sunxi_a133_pm_dispatch.h b/plat/allwinner/common/include/sunxi_a133_pm_dispatch.h
+new file mode 100644
+index 0000000..ea325ba
+--- /dev/null
++++ b/plat/allwinner/common/include/sunxi_a133_pm_dispatch.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: BSD-3-Clause */
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#ifndef SUNXI_A133_PM_DISPATCH_H
++#define SUNXI_A133_PM_DISPATCH_H
++
++#include <stdint.h>
++
++#include <sunxi_a133_cpuidle.h>
++
++struct sunxi_a133_pm_backend {
++	void *cookie;
++	int (*system_prepare)(void *cookie, const void *target_state,
++			      uintptr_t affinity);
++	int (*system_commit)(void *cookie);
++	int (*system_finish)(void *cookie);
++	void (*cpuif_disable)(void *cookie);
++	void (*local_power_off)(void *cookie, unsigned int hardware_level);
++	void (*pcpu_distif_init)(void *cookie);
++	void (*cpuif_enable)(void *cookie);
++};
++
++int sunxi_a133_pm_dispatch_early(const struct sunxi_a133_pm_backend *backend,
++				enum sunxi_a133_suspend_kind kind,
++				const void *target_state, uintptr_t affinity);
++int sunxi_a133_pm_dispatch_suspend(const struct sunxi_a133_pm_backend *backend,
++				  enum sunxi_a133_suspend_kind kind);
++int sunxi_a133_pm_dispatch_finish(const struct sunxi_a133_pm_backend *backend,
++				 enum sunxi_a133_suspend_kind kind);
++
++#endif /* SUNXI_A133_PM_DISPATCH_H */
+diff --git a/plat/allwinner/common/sunxi_a133_pm_dispatch.c b/plat/allwinner/common/sunxi_a133_pm_dispatch.c
+new file mode 100644
+index 0000000..789d84e
+--- /dev/null
++++ b/plat/allwinner/common/sunxi_a133_pm_dispatch.c
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stddef.h>
++
++#include <sunxi_a133_pm_dispatch.h>
++
++#define SUNXI_A133_DISPATCH_OK		0
++#define SUNXI_A133_DISPATCH_INVALID	(-1)
++
++static int backend_valid(const struct sunxi_a133_pm_backend *backend)
++{
++	return (backend != NULL) && (backend->cpuif_disable != NULL) &&
++	       (backend->local_power_off != NULL) &&
++	       (backend->pcpu_distif_init != NULL) &&
++	       (backend->cpuif_enable != NULL);
++}
++
++int sunxi_a133_pm_dispatch_early(const struct sunxi_a133_pm_backend *backend,
++				enum sunxi_a133_suspend_kind kind,
++				const void *target_state, uintptr_t affinity)
++{
++	if (!backend_valid(backend)) {
++		return SUNXI_A133_DISPATCH_INVALID;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_CORE) ||
++	    (kind == SUNXI_A133_SUSPEND_CLUSTER)) {
++		return SUNXI_A133_DISPATCH_OK;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_SYSTEM) &&
++	    (backend->system_prepare != NULL)) {
++		return backend->system_prepare(backend->cookie, target_state,
++					       affinity);
++	}
++	return SUNXI_A133_DISPATCH_INVALID;
++}
++
++int sunxi_a133_pm_dispatch_suspend(const struct sunxi_a133_pm_backend *backend,
++				  enum sunxi_a133_suspend_kind kind)
++{
++	unsigned int hardware_level;
++
++	if (!backend_valid(backend)) {
++		return SUNXI_A133_DISPATCH_INVALID;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_CORE) ||
++	    (kind == SUNXI_A133_SUSPEND_CLUSTER)) {
++		hardware_level = kind == SUNXI_A133_SUSPEND_CORE ?
++			SUNXI_A133_CPUIDLE_CORE_LEVEL :
++			SUNXI_A133_CPUIDLE_CLUSTER_LEVEL;
++		backend->cpuif_disable(backend->cookie);
++		backend->local_power_off(backend->cookie, hardware_level);
++		return SUNXI_A133_DISPATCH_OK;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_SYSTEM) &&
++	    (backend->system_commit != NULL)) {
++		return backend->system_commit(backend->cookie);
++	}
++	return SUNXI_A133_DISPATCH_INVALID;
++}
++
++int sunxi_a133_pm_dispatch_finish(const struct sunxi_a133_pm_backend *backend,
++				 enum sunxi_a133_suspend_kind kind)
++{
++	int ret;
++
++	if (!backend_valid(backend)) {
++		return SUNXI_A133_DISPATCH_INVALID;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_CORE) ||
++	    (kind == SUNXI_A133_SUSPEND_CLUSTER)) {
++		backend->pcpu_distif_init(backend->cookie);
++		backend->cpuif_enable(backend->cookie);
++		return SUNXI_A133_DISPATCH_OK;
++	}
++	if ((kind == SUNXI_A133_SUSPEND_SYSTEM) &&
++	    (backend->system_finish != NULL)) {
++		ret = backend->system_finish(backend->cookie);
++		if (ret == SUNXI_A133_DISPATCH_OK) {
++			backend->cpuif_enable(backend->cookie);
++		}
++		return ret;
++	}
++	return SUNXI_A133_DISPATCH_INVALID;
++}
+diff --git a/plat/allwinner/common/sunxi_native_pm.c b/plat/allwinner/common/sunxi_native_pm.c
+index 5c0f6c3..d59b9e5 100644
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -4,6 +4,8 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <assert.h>
++
+ #include <arch_helpers.h>
+ #include <common/debug.h>
+ #include <drivers/arm/gicv2.h>
+@@ -13,6 +15,11 @@
+ 
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
++#if defined(SUNXI_A133_NATIVE_CPU_SUSPEND) || \
++	defined(SUNXI_A133_SYSTEM_SUSPEND)
++#include <sunxi_a133_cpuidle.h>
++#include <sunxi_a133_pm_dispatch.h>
++#endif
+ #if defined(SUNXI_A133_SYSTEM_SUSPEND)
+ #include <sunxi_a133_secure_context.h>
+ #include <sunxi_a133_system_suspend.h>
+@@ -69,59 +76,161 @@ static void __dead2 sunxi_system_reset(void)
+ 	panic();
+ }
+ 
+-static const plat_psci_ops_t sunxi_native_psci_ops = {
+-	.pwr_domain_on			= sunxi_pwr_domain_on,
+-	.pwr_domain_off			= sunxi_pwr_domain_off,
+-	.pwr_domain_on_finish		= sunxi_pwr_domain_on_finish,
+-	.system_off			= sunxi_system_off,
+-	.system_reset			= sunxi_system_reset,
+-	.validate_ns_entrypoint		= sunxi_validate_ns_entrypoint,
+-};
++#if defined(SUNXI_A133_NATIVE_CPU_SUSPEND) || \
++	defined(SUNXI_A133_SYSTEM_SUSPEND)
++static enum sunxi_a133_suspend_kind sunxi_a133_target_kind(
++	const psci_power_state_t *target_state)
++{
++	return sunxi_a133_suspend_classify(
++		target_state->pwr_domain_state[MPIDR_AFFLVL0],
++		target_state->pwr_domain_state[MPIDR_AFFLVL1],
++		target_state->pwr_domain_state[MPIDR_AFFLVL2]);
++}
++
++#if defined(SUNXI_A133_NATIVE_CPU_SUSPEND)
++static int sunxi_a133_validate_power_state(unsigned int power_state,
++					   psci_power_state_t *target_state)
++{
++	uint8_t states[PLAT_MAX_PWR_LVL + 1U];
++	unsigned int level;
++
++	assert(target_state != NULL);
++	if (sunxi_a133_cpuidle_decode(power_state, states) != 0) {
++		return PSCI_E_INVALID_PARAMS;
++	}
++	for (level = 0U; level <= PLAT_MAX_PWR_LVL; level++) {
++		target_state->pwr_domain_state[level] = states[level];
++	}
++	return PSCI_E_SUCCESS;
++}
++#endif
++
++static void sunxi_a133_cpuif_disable(void *cookie)
++{
++	(void)cookie;
++	gicv2_cpuif_disable();
++}
++
++static void sunxi_a133_local_power_off(void *cookie,
++				      unsigned int hardware_level)
++{
++	(void)cookie;
++	sunxi_a133_cpuidle_power_off_self(hardware_level);
++}
++
++static void sunxi_a133_pcpu_distif_init(void *cookie)
++{
++	(void)cookie;
++	gicv2_pcpu_distif_init();
++}
++
++static void sunxi_a133_cpuif_enable(void *cookie)
++{
++	(void)cookie;
++	gicv2_cpuif_enable();
++}
+ 
+ #if defined(SUNXI_A133_SYSTEM_SUSPEND)
+-static void sunxi_a133_get_sys_suspend_power_state(
+-	psci_power_state_t *target_state)
++static int sunxi_a133_system_prepare(void *cookie, const void *target_state,
++				    uintptr_t affinity)
+ {
+-	sunxi_a133_system_suspend_state(target_state);
++	(void)cookie;
++	return sunxi_a133_system_suspend_prepare(target_state, affinity);
+ }
+ 
++static int sunxi_a133_system_commit(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_system_suspend_commit();
++}
++
++static int sunxi_a133_system_finish(void *cookie)
++{
++	(void)cookie;
++	return sunxi_a133_system_suspend_finish();
++}
++#endif
++
++static const struct sunxi_a133_pm_backend sunxi_a133_pm_backend = {
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++	.system_prepare = sunxi_a133_system_prepare,
++	.system_commit = sunxi_a133_system_commit,
++	.system_finish = sunxi_a133_system_finish,
++#endif
++	.cpuif_disable = sunxi_a133_cpuif_disable,
++	.local_power_off = sunxi_a133_local_power_off,
++	.pcpu_distif_init = sunxi_a133_pcpu_distif_init,
++	.cpuif_enable = sunxi_a133_cpuif_enable,
++};
++
+ static void sunxi_a133_pwr_domain_suspend_pwrdown_early(
+ 	const psci_power_state_t *target_state)
+ {
+-	int ret = sunxi_a133_system_suspend_prepare(target_state, read_mpidr());
++	enum sunxi_a133_suspend_kind kind = sunxi_a133_target_kind(target_state);
++	int ret;
+ 
+-	if (ret != SUNXI_A133_CONTEXT_OK) {
+-		ERROR("PSCI: A133 suspend prepare failed: %d\n", ret);
+-		panic();
++	ret = sunxi_a133_pm_dispatch_early(&sunxi_a133_pm_backend, kind,
++					   target_state, read_mpidr());
++	if (ret == PSCI_E_SUCCESS) {
++		return;
+ 	}
++	ERROR("PSCI: A133 suspend prepare rejected: kind=%u ret=%d\n",
++	      kind, ret);
++	panic();
+ }
+ 
+ static void sunxi_a133_pwr_domain_suspend(
+ 	const psci_power_state_t *target_state)
+ {
++	enum sunxi_a133_suspend_kind kind = sunxi_a133_target_kind(target_state);
+ 	int ret;
+ 
+-	(void)target_state;
+-	ret = sunxi_a133_system_suspend_commit();
+-	if (ret != SUNXI_A133_CONTEXT_OK) {
+-		ERROR("PSCI: A133 suspend commit failed: %d\n", ret);
+-		panic();
++	ret = sunxi_a133_pm_dispatch_suspend(&sunxi_a133_pm_backend, kind);
++	if (ret == PSCI_E_SUCCESS) {
++		return;
+ 	}
++	ERROR("PSCI: A133 suspend commit rejected: kind=%u ret=%d\n",
++	      kind, ret);
++	panic();
+ }
+ 
+ static void sunxi_a133_pwr_domain_suspend_finish(
+ 	const psci_power_state_t *target_state)
+ {
++	enum sunxi_a133_suspend_kind kind = sunxi_a133_target_kind(target_state);
+ 	int ret;
+ 
+-	(void)target_state;
+-	ret = sunxi_a133_system_suspend_finish();
+-	if (ret != SUNXI_A133_CONTEXT_OK) {
+-		ERROR("PSCI: A133 suspend restore failed: %d\n", ret);
+-		panic();
++	ret = sunxi_a133_pm_dispatch_finish(&sunxi_a133_pm_backend, kind);
++	if (ret == PSCI_E_SUCCESS) {
++		return;
+ 	}
+-	/* Generic Allwinner PSCI does not set USE_GIC_DRIVER. */
+-	gicv2_cpuif_enable();
++	ERROR("PSCI: A133 suspend finish rejected: kind=%u ret=%d\n",
++	      kind, ret);
++	panic();
++}
++#endif
++
++static const plat_psci_ops_t sunxi_native_psci_ops = {
++	.pwr_domain_on			= sunxi_pwr_domain_on,
++	.pwr_domain_off			= sunxi_pwr_domain_off,
++	.pwr_domain_on_finish		= sunxi_pwr_domain_on_finish,
++#if defined(SUNXI_A133_NATIVE_CPU_SUSPEND)
++	.pwr_domain_suspend_pwrdown_early =
++		sunxi_a133_pwr_domain_suspend_pwrdown_early,
++	.pwr_domain_suspend		= sunxi_a133_pwr_domain_suspend,
++	.pwr_domain_suspend_finish	= sunxi_a133_pwr_domain_suspend_finish,
++	.validate_power_state		= sunxi_a133_validate_power_state,
++#endif
++	.system_off			= sunxi_system_off,
++	.system_reset			= sunxi_system_reset,
++	.validate_ns_entrypoint		= sunxi_validate_ns_entrypoint,
++};
++
++#if defined(SUNXI_A133_SYSTEM_SUSPEND)
++static void sunxi_a133_get_sys_suspend_power_state(
++	psci_power_state_t *target_state)
++{
++	sunxi_a133_system_suspend_state(target_state);
+ }
+ 
+ static const plat_psci_ops_t sunxi_a133_system_suspend_psci_ops = {
+@@ -134,6 +243,9 @@ static const plat_psci_ops_t sunxi_a133_system_suspend_psci_ops = {
+ 	.pwr_domain_suspend_finish	= sunxi_a133_pwr_domain_suspend_finish,
+ 	.get_sys_suspend_power_state	=
+ 		sunxi_a133_get_sys_suspend_power_state,
++#if defined(SUNXI_A133_NATIVE_CPU_SUSPEND)
++	.validate_power_state		= sunxi_a133_validate_power_state,
++#endif
+ 	.system_off			= sunxi_system_off,
+ 	.system_reset			= sunxi_system_reset,
+ 	.validate_ns_entrypoint		= sunxi_validate_ns_entrypoint,
+diff --git a/plat/allwinner/common/sunxi_pm.c b/plat/allwinner/common/sunxi_pm.c
+index 84c789e..2686c40 100644
+--- a/plat/allwinner/common/sunxi_pm.c
++++ b/plat/allwinner/common/sunxi_pm.c
+@@ -15,6 +15,9 @@
+ 
+ #include <sunxi_cpucfg.h>
+ #include <sunxi_private.h>
++#if defined(SUNXI_A133_CPUIDLE)
++#include <sunxi_a133_cpuidle.h>
++#endif
+ #if defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
+ #include <sunxi_a133_psci_bridge.h>
+ #endif
+@@ -51,6 +54,10 @@ int plat_setup_psci_ops(uintptr_t sec_entrypoint,
+ {
+ 	assert(psci_ops);
+ 
++#if defined(SUNXI_A133_CPUIDLE)
++	sunxi_a133_cpuidle_setup(sec_entrypoint);
++#endif
++
+ #if defined(SUNXI_A133_SYSTEM_SUSPEND)
+ 	(void)sunxi_a133_system_suspend_runtime_setup(sec_entrypoint);
+ #elif defined(SUNXI_A133_PSCI_SUSPEND_PRECURSOR)
+diff --git a/plat/allwinner/common/tests/Makefile b/plat/allwinner/common/tests/Makefile
+index 2997dc8..0748d50 100644
+--- a/plat/allwinner/common/tests/Makefile
++++ b/plat/allwinner/common/tests/Makefile
+@@ -11,7 +11,8 @@ ROOT := ../../../../..
+ all: test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+ 	test_sunxi_a133_native_svc test_sunxi_a133_suspend \
+ 	test_sunxi_a133_psci_bridge test_sunxi_a133_secure_context \
+-	test_sunxi_a133_gic
++	test_sunxi_a133_gic test_sunxi_a133_cpuidle \
++	test_sunxi_a133_pm_dispatch
+ 
+ test_sunxi_vendor_scp: test_sunxi_vendor_scp.c ../sunxi_vendor_scp.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+@@ -41,6 +42,15 @@ test_sunxi_a133_secure_context: test_sunxi_a133_secure_context.c \
+ test_sunxi_a133_gic: test_sunxi_a133_gic.c ../sunxi_a133_gic.c
+ 	$(CC) $(CFLAGS) -I../include $^ -o $@
+ 
++test_sunxi_a133_cpuidle: test_sunxi_a133_cpuidle.c \
++		../../sun50i_a133/sunxi_cpuidle.c
++	$(CC) $(CFLAGS) -DSUNXI_A133_CPUIDLE_HOST_TEST \
++		-I../include $^ -o $@
++
++test_sunxi_a133_pm_dispatch: test_sunxi_a133_pm_dispatch.c \
++		../sunxi_a133_pm_dispatch.c
++	$(CC) $(CFLAGS) -I../include $^ -o $@
++
+ test: all
+ 	./test_sunxi_vendor_scp
+ 	./test_sunxi_a133_vendor_scp
+@@ -49,9 +59,12 @@ test: all
+ 	./test_sunxi_a133_psci_bridge
+ 	./test_sunxi_a133_secure_context
+ 	./test_sunxi_a133_gic
++	./test_sunxi_a133_cpuidle
++	./test_sunxi_a133_pm_dispatch
+ 
+ clean:
+ 	rm -f test_sunxi_vendor_scp test_sunxi_a133_vendor_scp \
+ 		test_sunxi_a133_native_svc test_sunxi_a133_suspend \
+ 		test_sunxi_a133_psci_bridge test_sunxi_a133_secure_context \
+-		test_sunxi_a133_gic
++		test_sunxi_a133_gic test_sunxi_a133_cpuidle \
++		test_sunxi_a133_pm_dispatch
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_cpuidle.c b/plat/allwinner/common/tests/test_sunxi_a133_cpuidle.c
+new file mode 100644
+index 0000000..be86f1e
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_cpuidle.c
+@@ -0,0 +1,220 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_cpuidle.h>
++
++#define MAX_REGS 64U
++#define MAX_WRITES 64U
++
++struct reg_value {
++	uintptr_t address;
++	uint32_t value;
++};
++
++struct fake_mmio {
++	struct reg_value registers[MAX_REGS];
++	struct reg_value writes[MAX_WRITES];
++	unsigned int register_count;
++	unsigned int write_count;
++};
++
++static uint32_t fake_read(void *cookie, uintptr_t address)
++{
++	struct fake_mmio *fake = cookie;
++	unsigned int index;
++
++	for (index = 0U; index < fake->register_count; index++) {
++		if (fake->registers[index].address == address) {
++			return fake->registers[index].value;
++		}
++	}
++	return 0U;
++}
++
++static void fake_write(void *cookie, uintptr_t address, uint32_t value)
++{
++	struct fake_mmio *fake = cookie;
++	unsigned int index;
++
++	assert(fake->write_count < MAX_WRITES);
++	fake->writes[fake->write_count++] = (struct reg_value){address, value};
++	for (index = 0U; index < fake->register_count; index++) {
++		if (fake->registers[index].address == address) {
++			fake->registers[index].value = value;
++			return;
++		}
++	}
++	assert(fake->register_count < MAX_REGS);
++	fake->registers[fake->register_count++] =
++		(struct reg_value){address, value};
++}
++
++static struct sunxi_a133_cpuidle_backend backend(struct fake_mmio *fake)
++{
++	return (struct sunxi_a133_cpuidle_backend){
++		.cookie = fake,
++		.read_32 = fake_read,
++		.write_32 = fake_write,
++	};
++}
++
++static void expect_write(const struct fake_mmio *fake, unsigned int index,
++			 uintptr_t address, uint32_t value)
++{
++	assert(index < fake->write_count);
++	assert(fake->writes[index].address == address);
++	assert(fake->writes[index].value == value);
++}
++
++static void test_decoder_and_classifier(void)
++{
++	uint8_t states[3] = {9U, 9U, 9U};
++	static const uint32_t rejected[] = {
++		0x00000000U, 0x00010001U, 0x02010000U,
++		0x03010000U, 0x00030000U, 0x80010000U,
++	};
++	unsigned int index;
++
++	assert(sunxi_a133_cpuidle_decode(0x00010000U, states) == 0);
++	assert((states[0] == 3U) && (states[1] == 0U) && (states[2] == 0U));
++	assert(sunxi_a133_cpuidle_decode(0x01010000U, states) == 0);
++	assert((states[0] == 3U) && (states[1] == 3U) && (states[2] == 0U));
++	for (index = 0U; index < sizeof(rejected) / sizeof(rejected[0]); index++) {
++		assert(sunxi_a133_cpuidle_decode(rejected[index], states) != 0);
++	}
++	assert(sunxi_a133_cpuidle_decode(0x00010000U, NULL) != 0);
++
++	assert(sunxi_a133_suspend_classify(3U, 0U, 0U) ==
++	       SUNXI_A133_SUSPEND_CORE);
++	assert(sunxi_a133_suspend_classify(3U, 3U, 0U) ==
++	       SUNXI_A133_SUSPEND_CLUSTER);
++	assert(sunxi_a133_suspend_classify(3U, 3U, 3U) ==
++	       SUNXI_A133_SUSPEND_SYSTEM);
++	assert(sunxi_a133_suspend_classify(0U, 0U, 0U) ==
++	       SUNXI_A133_SUSPEND_INVALID);
++	assert(sunxi_a133_suspend_classify(0U, 3U, 0U) ==
++	       SUNXI_A133_SUSPEND_INVALID);
++	assert(sunxi_a133_suspend_classify(3U, 0U, 3U) ==
++	       SUNXI_A133_SUSPEND_INVALID);
++}
++
++static void test_v1_initialization(void)
++{
++	static const unsigned int revisions[] = {0U, 3U, 4U};
++	unsigned int revision;
++
++	for (revision = 0U;
++	     revision < sizeof(revisions) / sizeof(revisions[0]); revision++) {
++		struct fake_mmio fake = {0};
++		struct sunxi_a133_cpuidle_backend ops = backend(&fake);
++
++		fake_write(&fake, 0x08100000U, 0x80000000U);
++		fake.write_count = 0U;
++		assert(sunxi_a133_cpuidle_init(&ops, revisions[revision]) == 0);
++		assert(fake.write_count == 7U);
++		expect_write(&fake, 0U, 0x08100000U, 0x80000010U);
++		expect_write(&fake, 1U, 0x0700050cU, 0x0000000fU);
++		expect_write(&fake, 2U, 0x07000544U, 0x00000018U);
++		expect_write(&fake, 3U, 0x07000540U, 0x00000018U);
++		expect_write(&fake, 4U, 0x07000500U, 0x16aa0000U);
++		expect_write(&fake, 5U, 0x07000500U, 0xaa160001U);
++		expect_write(&fake, 6U, 0x09010014U, 0x00000002U);
++	}
++}
++
++static void test_v2_initialization(void)
++{
++	static const unsigned int revisions[] = {1U, 2U, 5U, 6U, 7U};
++	unsigned int revision;
++
++	for (revision = 0U;
++	     revision < sizeof(revisions) / sizeof(revisions[0]); revision++) {
++		struct fake_mmio fake = {0};
++		struct sunxi_a133_cpuidle_backend ops = backend(&fake);
++		unsigned int core;
++
++		fake_write(&fake, 0x08100020U, 0x40000000U);
++		for (core = 0U; core < 4U; core++) {
++			fake_write(&fake, 0x07000470U + core * 4U,
++				   0x10000000U + core);
++		}
++		fake.write_count = 0U;
++		assert(sunxi_a133_cpuidle_init(&ops, revisions[revision]) == 0);
++		assert(fake.write_count == 10U);
++		expect_write(&fake, 0U, 0x08100020U, 0x40000001U);
++		for (core = 0U; core < 4U; core++) {
++			expect_write(&fake, core + 1U,
++				     0x07000470U + core * 4U,
++				     (0x10000000U + core) | 0x10U);
++		}
++		expect_write(&fake, 5U, 0x07000544U, 0x18U);
++		expect_write(&fake, 6U, 0x07000540U, 0x18U);
++		expect_write(&fake, 7U, 0x07000500U, 0x16aa0000U);
++		expect_write(&fake, 8U, 0x07000500U, 0xaa160001U);
++		expect_write(&fake, 9U, 0x09010014U, 2U);
++	}
++}
++
++static void test_triggers(void)
++{
++	const uint64_t entrypoint = UINT64_C(0x1234567887654321);
++	unsigned int core;
++	unsigned int level;
++
++	for (core = 0U; core < 4U; core++) {
++		for (level = SUNXI_A133_CPUIDLE_CORE_LEVEL;
++		     level <= SUNXI_A133_CPUIDLE_CLUSTER_LEVEL; level++) {
++			struct fake_mmio v1 = {0};
++			struct sunxi_a133_cpuidle_backend v1_ops = backend(&v1);
++			struct fake_mmio v2 = {0};
++			struct sunxi_a133_cpuidle_backend v2_ops = backend(&v2);
++			uintptr_t rvbar = 0x08100040U + core * 8U;
++			uintptr_t v2_control = 0x07000470U + core * 4U;
++			uint32_t initial = 0x80000010U + core;
++
++			assert(sunxi_a133_cpuidle_trigger(&v1_ops, 3U, core,
++				level, entrypoint) == 0);
++			assert(v1.write_count == 3U);
++			expect_write(&v1, 0U, rvbar, 0x87654321U);
++			expect_write(&v1, 1U, rvbar + 4U, 0x12345678U);
++			expect_write(&v1, 2U, 0x07000504U,
++				     1U << (core + 16U * (level - 1U)));
++
++			fake_write(&v2, v2_control, initial);
++			v2.write_count = 0U;
++			assert(sunxi_a133_cpuidle_trigger(&v2_ops, 6U, core,
++				level, entrypoint) == 0);
++			assert(v2.write_count == 3U);
++			expect_write(&v2, 0U, rvbar, 0x87654321U);
++			expect_write(&v2, 1U, rvbar + 4U, 0x12345678U);
++			expect_write(&v2, 2U, v2_control,
++				     initial | (1U << (8U * level)));
++		}
++	}
++
++	{
++		struct fake_mmio fake = {0};
++		struct sunxi_a133_cpuidle_backend ops = backend(&fake);
++
++		assert(sunxi_a133_cpuidle_trigger(&ops, 6U, 4U,
++			SUNXI_A133_CPUIDLE_CORE_LEVEL, entrypoint) != 0);
++		assert(sunxi_a133_cpuidle_trigger(&ops, 6U, 0U, 0U,
++			entrypoint) != 0);
++		assert(fake.write_count == 0U);
++	}
++}
++
++int main(void)
++{
++	test_decoder_and_classifier();
++	test_v1_initialization();
++	test_v2_initialization();
++	test_triggers();
++	puts("PASS A133 native CPUIDLE contract");
++	return 0;
++}
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_pm_dispatch.c b/plat/allwinner/common/tests/test_sunxi_a133_pm_dispatch.c
+new file mode 100644
+index 0000000..067984a
+--- /dev/null
++++ b/plat/allwinner/common/tests/test_sunxi_a133_pm_dispatch.c
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <sunxi_a133_pm_dispatch.h>
++
++struct calls {
++	unsigned int system_prepare;
++	unsigned int system_commit;
++	unsigned int system_finish;
++	unsigned int cpuif_disable;
++	unsigned int local_power_off;
++	unsigned int pcpu_distif_init;
++	unsigned int cpuif_enable;
++	unsigned int hardware_level;
++	const void *target_state;
++	uintptr_t affinity;
++};
++
++static int system_prepare(void *cookie, const void *target_state,
++			  uintptr_t affinity)
++{
++	struct calls *calls = cookie;
++
++	calls->system_prepare++;
++	calls->target_state = target_state;
++	calls->affinity = affinity;
++	return 0;
++}
++
++static int system_commit(void *cookie)
++{
++	struct calls *calls = cookie;
++
++	calls->system_commit++;
++	return 0;
++}
++
++static int system_finish(void *cookie)
++{
++	struct calls *calls = cookie;
++
++	calls->system_finish++;
++	return 0;
++}
++
++static void cpuif_disable(void *cookie)
++{
++	struct calls *calls = cookie;
++
++	calls->cpuif_disable++;
++}
++
++static void local_power_off(void *cookie, unsigned int hardware_level)
++{
++	struct calls *calls = cookie;
++
++	calls->local_power_off++;
++	calls->hardware_level = hardware_level;
++}
++
++static void pcpu_distif_init(void *cookie)
++{
++	struct calls *calls = cookie;
++
++	calls->pcpu_distif_init++;
++}
++
++static void cpuif_enable(void *cookie)
++{
++	struct calls *calls = cookie;
++
++	calls->cpuif_enable++;
++}
++
++static struct sunxi_a133_pm_backend backend(struct calls *calls)
++{
++	return (struct sunxi_a133_pm_backend){
++		.cookie = calls,
++		.system_prepare = system_prepare,
++		.system_commit = system_commit,
++		.system_finish = system_finish,
++		.cpuif_disable = cpuif_disable,
++		.local_power_off = local_power_off,
++		.pcpu_distif_init = pcpu_distif_init,
++		.cpuif_enable = cpuif_enable,
++	};
++}
++
++static void assert_no_system_path(const struct calls *calls)
++{
++	assert(calls->system_prepare == 0U);
++	assert(calls->system_commit == 0U);
++	assert(calls->system_finish == 0U);
++}
++
++static void test_local(enum sunxi_a133_suspend_kind kind,
++		       unsigned int expected_level)
++{
++	struct calls calls = {0};
++	struct sunxi_a133_pm_backend ops = backend(&calls);
++	uint32_t target = 0x12345678U;
++
++	assert(sunxi_a133_pm_dispatch_early(&ops, kind, &target,
++		UINT32_C(0x80000100)) == 0);
++	assert_no_system_path(&calls);
++	assert(calls.cpuif_disable == 0U);
++	assert(calls.local_power_off == 0U);
++
++	assert(sunxi_a133_pm_dispatch_suspend(&ops, kind) == 0);
++	assert_no_system_path(&calls);
++	assert(calls.cpuif_disable == 1U);
++	assert(calls.local_power_off == 1U);
++	assert(calls.hardware_level == expected_level);
++	assert(calls.pcpu_distif_init == 0U);
++
++	assert(sunxi_a133_pm_dispatch_finish(&ops, kind) == 0);
++	assert_no_system_path(&calls);
++	assert(calls.pcpu_distif_init == 1U);
++	assert(calls.cpuif_enable == 1U);
++}
++
++static void test_system(void)
++{
++	struct calls calls = {0};
++	struct sunxi_a133_pm_backend ops = backend(&calls);
++	uint32_t target = 0x87654321U;
++
++	assert(sunxi_a133_pm_dispatch_early(&ops, SUNXI_A133_SUSPEND_SYSTEM,
++		&target, UINT32_C(0x80000200)) == 0);
++	assert(calls.system_prepare == 1U);
++	assert(calls.target_state == &target);
++	assert(calls.affinity == UINT32_C(0x80000200));
++	assert(sunxi_a133_pm_dispatch_suspend(
++		&ops, SUNXI_A133_SUSPEND_SYSTEM) == 0);
++	assert(calls.system_commit == 1U);
++	assert(sunxi_a133_pm_dispatch_finish(
++		&ops, SUNXI_A133_SUSPEND_SYSTEM) == 0);
++	assert(calls.system_finish == 1U);
++
++	/* The system gateway owns SCP, DRAM/PMIC and distributor restoration. */
++	assert(calls.cpuif_disable == 0U);
++	assert(calls.local_power_off == 0U);
++	assert(calls.pcpu_distif_init == 0U);
++	assert(calls.cpuif_enable == 1U);
++}
++
++static void test_invalid(void)
++{
++	struct calls calls = {0};
++	struct sunxi_a133_pm_backend ops = backend(&calls);
++	struct calls empty = {0};
++
++	assert(sunxi_a133_pm_dispatch_early(&ops, SUNXI_A133_SUSPEND_INVALID,
++		NULL, 0U) != 0);
++	assert(sunxi_a133_pm_dispatch_suspend(
++		&ops, SUNXI_A133_SUSPEND_INVALID) != 0);
++	assert(sunxi_a133_pm_dispatch_finish(
++		&ops, SUNXI_A133_SUSPEND_INVALID) != 0);
++	assert(memcmp(&calls, &empty, sizeof(calls)) == 0);
++}
++
++int main(void)
++{
++	test_local(SUNXI_A133_SUSPEND_CORE,
++		   SUNXI_A133_CPUIDLE_CORE_LEVEL);
++	test_local(SUNXI_A133_SUSPEND_CLUSTER,
++		   SUNXI_A133_CPUIDLE_CLUSTER_LEVEL);
++	test_system();
++	test_invalid();
++	puts("PASS A133 CPU/system suspend callback separation");
++	return 0;
++}
+diff --git a/plat/allwinner/sun50i_a133/platform.mk b/plat/allwinner/sun50i_a133/platform.mk
+index 76d1277..f7dfed7 100644
+--- a/plat/allwinner/sun50i_a133/platform.mk
++++ b/plat/allwinner/sun50i_a133/platform.mk
+@@ -10,6 +10,18 @@ SUNXI_BL31_IN_DRAM	:=	1
+ SUNXI_PSCI_USE_SCPI	:=	0
+ SUNXI_PSCI_USE_NATIVE	:=	1
+ 
++SUNXI_A133_NATIVE_CPU_SUSPEND	?=	0
++$(call assert_boolean,SUNXI_A133_NATIVE_CPU_SUSPEND)
++ifeq (${SUNXI_A133_NATIVE_CPU_SUSPEND},1)
++ifneq (${ARCH},aarch64)
++$(error SUNXI_A133_NATIVE_CPU_SUSPEND requires ARCH=aarch64)
++endif
++ifneq (${HW_ASSISTED_COHERENCY},0)
++$(error SUNXI_A133_NATIVE_CPU_SUSPEND requires HW_ASSISTED_COHERENCY=0)
++endif
++$(eval $(call add_define,SUNXI_A133_NATIVE_CPU_SUSPEND))
++endif
++
+ # Build only the dormant vendor SCP protocol core. This does not load or start
+ # an SCP and does not advertise SYSTEM_SUSPEND.
+ SUNXI_VENDOR_SCP_TRANSPORT	?=	0
+@@ -139,3 +151,12 @@ BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_secure_context.c \
+ 				${AW_PLAT}/common/sunxi_a133_gic.c \
+ 				${AW_PLAT}/common/sunxi_a133_system_suspend.c
+ endif
++
++# Use the exact stock revision-aware local CPUIDLE controller when either
++# native CPU idle or the composed suspend dispatcher is selected. The ordinary
++# default artifact remains unchanged until one of those features is requested.
++ifneq ($(filter 1,${SUNXI_A133_NATIVE_CPU_SUSPEND} ${SUNXI_A133_SYSTEM_SUSPEND}),)
++$(eval $(call add_define,SUNXI_A133_CPUIDLE))
++BL31_SOURCES		+=	${AW_PLAT}/sun50i_a133/sunxi_cpuidle.c
++BL31_SOURCES		+=	${AW_PLAT}/common/sunxi_a133_pm_dispatch.c
++endif
+diff --git a/plat/allwinner/sun50i_a133/sunxi_cpuidle.c b/plat/allwinner/sun50i_a133/sunxi_cpuidle.c
+new file mode 100644
+index 0000000..9026fbf
+--- /dev/null
++++ b/plat/allwinner/sun50i_a133/sunxi_cpuidle.c
+@@ -0,0 +1,225 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/* Copyright (c) 2026, The Trusted Firmware Project Contributors. */
++
++#include <stddef.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++#if !defined(SUNXI_A133_CPUIDLE_HOST_TEST)
++#include <arch_helpers.h>
++#include <common/debug.h>
++#include <lib/mmio.h>
++#include <plat/common/platform.h>
++#endif
++
++#include <sunxi_a133_cpuidle.h>
++
++#define A133_SOC_REVISION_MASK		0x7U
++#define A133_MAX_CORES			4U
++
++#define A133_CPUSUBSYS_BASE		0x08100000U
++#define A133_R_CPUCFG_BASE		0x07000400U
++#define A133_CPU_IDLE_CONTROL_BASE	0x07000500U
++#define A133_CPU_IDLE_STATUS_BASE	0x09010000U
++
++#define A133_V1_CLUSTER_CONTROL		(A133_CPUSUBSYS_BASE + 0x000U)
++#define A133_V2_CLUSTER_CONTROL		(A133_CPUSUBSYS_BASE + 0x020U)
++#define A133_RVBAR_LO(core)		(A133_CPUSUBSYS_BASE + 0x040U + \
++					 ((core) * 8U))
++#define A133_RVBAR_HI(core)		(A133_CPUSUBSYS_BASE + 0x044U + \
++					 ((core) * 8U))
++#define A133_V2_CORE_CONTROL(core)	(A133_R_CPUCFG_BASE + 0x070U + \
++					 ((core) * 4U))
++#define A133_CPUIDLE_ENABLE		(A133_CPU_IDLE_CONTROL_BASE + 0x000U)
++#define A133_V1_CLOSE_TRIGGER		(A133_CPU_IDLE_CONTROL_BASE + 0x004U)
++#define A133_V1_CORE_VALID		(A133_CPU_IDLE_CONTROL_BASE + 0x00cU)
++#define A133_CPUIDLE_CFG0		(A133_CPU_IDLE_CONTROL_BASE + 0x040U)
++#define A133_CPUIDLE_CFG1		(A133_CPU_IDLE_CONTROL_BASE + 0x044U)
++#define A133_CPUIDLE_STATUS_CFG		(A133_CPU_IDLE_STATUS_BASE + 0x014U)
++
++#define A133_CPUIDLE_UNLOCK0		0x16aa0000U
++#define A133_CPUIDLE_UNLOCK1		0xaa160001U
++
++#define PSCI_ORIGINAL_VALID_MASK	0xfcfe0000U
++#define PSCI_STATE_ID_MASK		0xffffU
++#define PSCI_TYPE_SHIFT		16U
++#define PSCI_LEVEL_SHIFT		24U
++#define PSCI_LEVEL_MASK		0x3U
++#define PSCI_TYPE_POWERDOWN		1U
++
++#define A133_LOCAL_STATE_RUN		0U
++#define A133_LOCAL_STATE_OFF		3U
++
++static uint32_t read_32(const struct sunxi_a133_cpuidle_backend *backend,
++			uintptr_t address)
++{
++	return backend->read_32(backend->cookie, address);
++}
++
++static void write_32(const struct sunxi_a133_cpuidle_backend *backend,
++			 uintptr_t address, uint32_t value)
++{
++	backend->write_32(backend->cookie, address, value);
++}
++
++static void setbits_32(const struct sunxi_a133_cpuidle_backend *backend,
++			   uintptr_t address, uint32_t bits)
++{
++	write_32(backend, address, read_32(backend, address) | bits);
++}
++
++static bool revision_uses_v1(unsigned int revision)
++{
++	revision &= A133_SOC_REVISION_MASK;
++	return (revision == 0U) || (revision == 3U) || (revision == 4U);
++}
++
++static bool backend_valid(const struct sunxi_a133_cpuidle_backend *backend)
++{
++	return (backend != NULL) && (backend->read_32 != NULL) &&
++	       (backend->write_32 != NULL);
++}
++
++int sunxi_a133_cpuidle_decode(uint32_t power_state, uint8_t states[3])
++{
++	unsigned int level;
++
++	if ((states == NULL) ||
++	    ((power_state & PSCI_ORIGINAL_VALID_MASK) != 0U) ||
++	    (((power_state >> PSCI_TYPE_SHIFT) & 1U) !=
++	     PSCI_TYPE_POWERDOWN) ||
++	    ((power_state & PSCI_STATE_ID_MASK) != 0U)) {
++		return -1;
++	}
++
++	level = (power_state >> PSCI_LEVEL_SHIFT) & PSCI_LEVEL_MASK;
++	if (level > 1U) {
++		return -1;
++	}
++	states[0] = A133_LOCAL_STATE_OFF;
++	states[1] = level == 1U ? A133_LOCAL_STATE_OFF : A133_LOCAL_STATE_RUN;
++	states[2] = A133_LOCAL_STATE_RUN;
++
++	return 0;
++}
++
++enum sunxi_a133_suspend_kind sunxi_a133_suspend_classify(
++	uint8_t cpu, uint8_t cluster, uint8_t system)
++{
++	if ((cpu == A133_LOCAL_STATE_OFF) &&
++	    (cluster == A133_LOCAL_STATE_RUN) &&
++	    (system == A133_LOCAL_STATE_RUN)) {
++		return SUNXI_A133_SUSPEND_CORE;
++	}
++	if ((cpu == A133_LOCAL_STATE_OFF) &&
++	    (cluster == A133_LOCAL_STATE_OFF) &&
++	    (system == A133_LOCAL_STATE_RUN)) {
++		return SUNXI_A133_SUSPEND_CLUSTER;
++	}
++	if ((cpu == A133_LOCAL_STATE_OFF) &&
++	    (cluster == A133_LOCAL_STATE_OFF) &&
++	    (system == A133_LOCAL_STATE_OFF)) {
++		return SUNXI_A133_SUSPEND_SYSTEM;
++	}
++	return SUNXI_A133_SUSPEND_INVALID;
++}
++
++int sunxi_a133_cpuidle_init(const struct sunxi_a133_cpuidle_backend *backend,
++			   unsigned int revision)
++{
++	unsigned int core;
++
++	if (!backend_valid(backend)) {
++		return -1;
++	}
++
++	if (revision_uses_v1(revision)) {
++		setbits_32(backend, A133_V1_CLUSTER_CONTROL, 1U << 4);
++		write_32(backend, A133_V1_CORE_VALID, 0xfU);
++	} else {
++		setbits_32(backend, A133_V2_CLUSTER_CONTROL, 1U);
++		for (core = 0U; core < A133_MAX_CORES; core++) {
++			setbits_32(backend, A133_V2_CORE_CONTROL(core), 1U << 4);
++		}
++	}
++
++	write_32(backend, A133_CPUIDLE_CFG1, 0x18U);
++	write_32(backend, A133_CPUIDLE_CFG0, 0x18U);
++	write_32(backend, A133_CPUIDLE_ENABLE, A133_CPUIDLE_UNLOCK0);
++	write_32(backend, A133_CPUIDLE_ENABLE, A133_CPUIDLE_UNLOCK1);
++	write_32(backend, A133_CPUIDLE_STATUS_CFG, 2U);
++	return 0;
++}
++
++int sunxi_a133_cpuidle_trigger(
++	const struct sunxi_a133_cpuidle_backend *backend,
++	unsigned int revision, unsigned int core, unsigned int hardware_level,
++	uint64_t secure_entrypoint)
++{
++	uint32_t bit;
++	uintptr_t address;
++
++	if (!backend_valid(backend) || (core >= A133_MAX_CORES) ||
++	    ((hardware_level != SUNXI_A133_CPUIDLE_CORE_LEVEL) &&
++	     (hardware_level != SUNXI_A133_CPUIDLE_CLUSTER_LEVEL))) {
++		return -1;
++	}
++
++	write_32(backend, A133_RVBAR_LO(core), (uint32_t)secure_entrypoint);
++	write_32(backend, A133_RVBAR_HI(core),
++		 (uint32_t)(secure_entrypoint >> 32));
++
++	if (revision_uses_v1(revision)) {
++		bit = core + 16U * (hardware_level - 1U);
++		write_32(backend, A133_V1_CLOSE_TRIGGER, 1U << bit);
++	} else {
++		address = A133_V2_CORE_CONTROL(core);
++		setbits_32(backend, address, 1U << (8U * hardware_level));
++	}
++	return 0;
++}
++
++#if !defined(SUNXI_A133_CPUIDLE_HOST_TEST)
++static uintptr_t secure_entrypoint;
++
++static uint32_t runtime_read_32(void *cookie, uintptr_t address)
++{
++	(void)cookie;
++	return mmio_read_32(address);
++}
++
++static void runtime_write_32(void *cookie, uintptr_t address, uint32_t value)
++{
++	(void)cookie;
++	mmio_write_32(address, value);
++}
++
++static const struct sunxi_a133_cpuidle_backend runtime_backend = {
++	.read_32 = runtime_read_32,
++	.write_32 = runtime_write_32,
++};
++
++void sunxi_a133_cpuidle_setup(uintptr_t entrypoint)
++{
++	secure_entrypoint = entrypoint;
++	if (sunxi_a133_cpuidle_init(&runtime_backend,
++				    plat_get_soc_revision()) != 0) {
++		ERROR("PSCI: A133 CPUIDLE setup failed\n");
++		panic();
++	}
++}
++
++void sunxi_a133_cpuidle_power_off_self(unsigned int hardware_level)
++{
++	u_register_t mpidr = read_mpidr();
++	unsigned int core = MPIDR_AFFLVL0_VAL(mpidr);
++
++	if ((secure_entrypoint == 0U) ||
++	    (sunxi_a133_cpuidle_trigger(&runtime_backend,
++		plat_get_soc_revision(), core, hardware_level,
++		secure_entrypoint) != 0)) {
++		ERROR("PSCI: A133 CPUIDLE trigger rejected\n");
++		panic();
++	}
++}
++#endif
+diff --git a/plat/allwinner/sun50i_a133/sunxi_power.c b/plat/allwinner/sun50i_a133/sunxi_power.c
+index b65d3e8..06c1e58 100644
+--- a/plat/allwinner/sun50i_a133/sunxi_power.c
++++ b/plat/allwinner/sun50i_a133/sunxi_power.c
+@@ -17,6 +17,9 @@
+ #include <lib/mmio.h>
+ 
+ #include <sunxi_cpucfg.h>
++#if defined(SUNXI_A133_CPUIDLE)
++#include <sunxi_a133_cpuidle.h>
++#endif
+ #include <sunxi_def.h>
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
+@@ -169,6 +172,9 @@ void sunxi_power_down(void)
+ 
+ void sunxi_cpu_power_off_self(void)
+ {
++#if defined(SUNXI_A133_CPUIDLE)
++	sunxi_a133_cpuidle_power_off_self(SUNXI_A133_CPUIDLE_CORE_LEVEL);
++#else
+ 	u_register_t mpidr = read_mpidr();
+ 	unsigned int core  = MPIDR_AFFLVL0_VAL(mpidr);
+ 
+@@ -178,4 +184,5 @@ void sunxi_cpu_power_off_self(void)
+ 
+ 	/* Trigger power off for this core. */
+ 	mmio_write_32(SUNXI_CORE_CLOSE_REG, BIT_32(core));
++#endif
+ }
+-- 
+2.55.0
