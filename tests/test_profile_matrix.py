@@ -25,6 +25,7 @@ class ProfileMatrixTests(unittest.TestCase):
             {'VE_PROFILE': 'qualification'},
             {'VP9_PROFILE': 'qualification'},
             {'CE_TRNG_PROFILE': 'qualification'},
+            {'COMBINED_ACCELERATOR_PROFILE': 'qualification'},
         )
         for settings in profiles:
             with self.subTest(settings=settings):
@@ -40,20 +41,27 @@ class ProfileMatrixTests(unittest.TestCase):
             ({'EMMC_RECOVERY': '1', 'VE_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'EMMC_RECOVERY': '1', 'VP9_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'EMMC_RECOVERY': '1', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'EMMC_RECOVERY': '1', 'COMBINED_ACCELERATOR_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'G2D_PROFILE': 'qualification', 'USB_ROLE': 'auto'}, 'requires USB_ROLE'),
             ({'VE_PROFILE': 'qualification', 'USB_ROLE': 'host'}, 'requires USB_ROLE'),
             ({'VP9_PROFILE': 'qualification', 'USB_ROLE': 'host'}, 'requires USB_ROLE'),
             ({'CE_TRNG_PROFILE': 'qualification', 'USB_ROLE': 'auto'}, 'requires USB_ROLE'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'USB_ROLE': 'host'}, 'requires USB_ROLE'),
             ({'G2D_PROFILE': 'qualification', 'SCP_PROFILE': 'deep'}, 'mutually exclusive'),
             ({'VE_PROFILE': 'qualification', 'SCP_PROFILE': 'startup'}, 'mutually exclusive'),
             ({'VP9_PROFILE': 'qualification', 'SCP_PROFILE': 'startup'}, 'mutually exclusive'),
             ({'CE_TRNG_PROFILE': 'qualification', 'SCP_PROFILE': 'deep'}, 'mutually exclusive'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'SCP_PROFILE': 'deep'}, 'mutually exclusive'),
             ({'G2D_PROFILE': 'qualification', 'VE_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'G2D_PROFILE': 'qualification', 'VP9_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'G2D_PROFILE': 'qualification', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'VE_PROFILE': 'qualification', 'VP9_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'VE_PROFILE': 'qualification', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
             ({'VP9_PROFILE': 'qualification', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'G2D_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'VE_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'VP9_PROFILE': 'qualification'}, 'mutually exclusive'),
+            ({'COMBINED_ACCELERATOR_PROFILE': 'qualification', 'CE_TRNG_PROFILE': 'qualification'}, 'mutually exclusive'),
         )
         for settings, message in cases:
             with self.subTest(settings=settings):

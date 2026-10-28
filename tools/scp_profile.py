@@ -13,6 +13,7 @@ DEEP_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-deep.fragm
 NON_SCP_FRAGMENTS = {
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/vp9.fragment',
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ce-trng.fragment',
+    '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/combined-accelerators.fragment',
 }
 LINES = {
     'disabled': (f'# {PACKAGE_KEY} is not set',

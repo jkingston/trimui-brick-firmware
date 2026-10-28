@@ -351,6 +351,17 @@ class BootIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.ProtocolError, 'CE/TRNG qualification'):
             deploy.verify_boot_manifest(actual, expected)
 
+    def test_combined_profile_cannot_be_mistaken_for_normal_image(self):
+        expected = {'firmware': {'commit': 'firmware-a'},
+                    'kernel': {'commit': 'kernel-a', 'release': '7.3.0'},
+                    'config_sha256': 'config-a',
+                    'combined_accelerator_qualification': True,
+                    'files': {'Image': {'sha256': 'image-a'},
+                              'sun50i-a133-trimui-brick.dtb': {'sha256': 'dtb-a'}}}
+        actual = dict(expected, combined_accelerator_qualification=False)
+        with self.assertRaisesRegex(deploy.ProtocolError, 'combined accelerator'):
+            deploy.verify_boot_manifest(actual, expected)
+
 
 class DeploymentLifecycleTests(unittest.TestCase):
     def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None,
@@ -471,10 +482,22 @@ class DeploymentLifecycleTests(unittest.TestCase):
                 deploy.main()
         console.assert_not_called()
 
+    def test_combined_qualification_requires_explicit_deployment_flag(self):
+        args = ['deploy.py', 'images']
+        manifest = {'combined_accelerator_qualification': True}
+        with patch.object(sys, 'argv', args), \
+             patch.object(deploy, 'package', return_value=(Path('archive'), manifest)), \
+             patch.object(deploy, 'Console') as console:
+            with self.assertRaisesRegex(ValueError, '--combined-accelerator-qualification'):
+                deploy.main()
+        console.assert_not_called()
+
     def test_new_qualification_flags_explicitly_admit_matching_profiles(self):
         cases = (
             ('vp9_qualification', '--vp9-qualification'),
             ('ce_trng_qualification', '--ce-trng-qualification'),
+            ('combined_accelerator_qualification',
+             '--combined-accelerator-qualification'),
         )
         for field, flag in cases:
             console = MagicMock()

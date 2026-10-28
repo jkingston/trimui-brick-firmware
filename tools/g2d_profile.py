@@ -14,6 +14,7 @@ KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
 VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
+COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,g2d-qualification'
@@ -131,7 +132,7 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('G2D installation requires the qualification configuration')
     text = config.read_text()
     if any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
-           for key in (VE_KEY, VP9_KEY, CE_KEY)):
+           for key in (VE_KEY, VP9_KEY, CE_KEY, COMBINED_KEY)):
         raise ValueError('G2D and peer accelerator qualification must remain separate')
     if usb_profile(config) != 'peripheral':
         raise ValueError('G2D qualification requires the USB gadget profile')

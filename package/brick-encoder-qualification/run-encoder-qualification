@@ -9,7 +9,16 @@ final=$root/$boot_id
 stay_awake=/tmp/stay_awake
 stay_alive=/tmp/stay_alive
 
-[ "$(tr -d '\000' </sys/firmware/devicetree/base/chosen/trimui,ve-qualification)" = isolated ]
+ve_marker=/sys/firmware/devicetree/base/chosen/trimui,ve-qualification
+combined_marker=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+if [ -f "$ve_marker" ] && [ "$(tr -d '\000' <"$ve_marker")" = isolated ]; then
+	:
+elif [ -f "$combined_marker" ] && [ "$(tr -d '\000' <"$combined_marker")" = combined-v1 ]; then
+	:
+else
+	echo 'not an encoder qualification image' >&2
+	exit 2
+fi
 [ "$(tr -d '\000' </sys/firmware/devicetree/base/soc/video-codec@1c0e000/allwinner,encoder-qualification)" = bounded-320x240-h264-qp30-jpeg-q95 ]
 [ ! -e "$work" ]
 [ ! -e "$final" ]

@@ -15,6 +15,7 @@ KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
 VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
+COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ce-trng.fragment'
 DTB = 'sun50i-a133-trimui-brick.dtb'
@@ -236,7 +237,8 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('CE/TRNG and eMMC qualification must remain separate')
     if _peer_enabled(config, 'BR2_PACKAGE_BRICK_SCP'):
         raise ValueError('CE/TRNG and SCP qualification must remain separate')
-    if any(_peer_enabled(config, key) for key in (G2D_KEY, VE_KEY, VP9_KEY)):
+    if any(_peer_enabled(config, key)
+           for key in (G2D_KEY, VE_KEY, VP9_KEY, COMBINED_KEY)):
         raise ValueError('CE/TRNG and peer accelerator qualification must remain separate')
     destination = images / DTB
     if not destination.is_file():

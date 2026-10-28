@@ -9,10 +9,15 @@ out=$2
 case "$mode" in probe|decode) ;; *) echo "$usage" >&2; exit 2;; esac
 [ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
 marker=/sys/firmware/devicetree/base/chosen/trimui,vp9-qualification
-[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-no-iommu ] || {
+combined=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+if [ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-no-iommu ]; then
+	:
+elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v1 ]; then
+	:
+else
 	echo "not a VP9 qualification image" >&2
 	exit 2
-}
+fi
 mkdir "$out"
 out=$(cd "$out" && pwd)
 assets=/usr/share/brick-qualification/vp9

@@ -5,10 +5,15 @@ set -eu
 usage="usage: $0 probe NEW-RESULT-DIRECTORY | decode CASE NEW-RESULT-DIRECTORY"
 [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
 marker=/sys/firmware/devicetree/base/chosen/trimui,ve-qualification
-[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ] || {
+combined=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+if [ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ]; then
+	:
+elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v1 ]; then
+	:
+else
 	echo "not a video-engine qualification image" >&2
 	exit 2
-}
+fi
 mode=$1
 shift
 assets=/usr/share/brick-qualification/ve

@@ -9,10 +9,15 @@ out=$2
 case "$mode" in core|lifecycle|suspend) ;; *) echo "$usage" >&2; exit 2;; esac
 [ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
 marker=/sys/firmware/devicetree/base/chosen/trimui,ce-trng-qualification
-[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-zero-credit ] || {
+combined=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+if [ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated-zero-credit ]; then
+	:
+elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v1 ]; then
+	:
+else
 	echo "not a CE/TRNG qualification image" >&2
 	exit 2
-}
+fi
 mkdir "$out"
 out=$(cd "$out" && pwd)
 tool=/usr/libexec/brick-qualification/brick-ce-kat

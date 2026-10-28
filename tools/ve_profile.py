@@ -16,6 +16,7 @@ KEY = 'BR2_BRICK_VE_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
+COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,ve-qualification'
@@ -51,8 +52,9 @@ def check_output(config, requested):
     if enabled(config) != requested:
         raise ValueError('Use a fresh output directory when changing video-engine profile')
     text = config.read_text()
-    uses_eudev = requested or bool(re.search(
-        rf'^{re.escape(VP9_KEY)}=y$', config.read_text(), re.M))
+    uses_eudev = requested or any(re.search(
+        rf'^{re.escape(key)}=y$', config.read_text(), re.M)
+        for key in (VP9_KEY, COMBINED_KEY))
     expected = (
         ('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV is not set',
          'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if uses_eudev else
@@ -69,8 +71,9 @@ def configure(config, requested):
     text, count = re.subn(old, new, config.read_text(), flags=re.M)
     if count != 1:
         raise ValueError('Missing or duplicate video-engine profile configuration')
-    use_eudev = requested or bool(re.search(
-        rf'^{re.escape(VP9_KEY)}=y$', text, re.M))
+    use_eudev = requested or any(re.search(
+        rf'^{re.escape(key)}=y$', text, re.M)
+        for key in (VP9_KEY, COMBINED_KEY))
     settings = {
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not use_eudev,
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': use_eudev,
@@ -87,7 +90,7 @@ def configure(config, requested):
 def _peer_enabled(config):
     text = config.read_text()
     return any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
-               for key in (G2D_KEY, VP9_KEY, CE_KEY))
+               for key in (G2D_KEY, VP9_KEY, CE_KEY, COMBINED_KEY))
 
 
 def _get(fdtget, dtb, node, prop, kind='s', default=None):

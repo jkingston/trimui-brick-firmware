@@ -36,5 +36,12 @@ config BR2_BRICK_CE_TRNG_QUALIFICATION
 	  TRNG transport in an isolated image. The ordinary image keeps the
 	  crypto node and TRNG transport disabled.
 
+config BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION
+	bool "Brick combined accelerator qualification profile"
+	help
+	  Enable the reviewed G2D, Cedrus, Hantro G2 VP9 and CE/TRNG contracts
+	  together. This profile verifies shared-domain and IOMMU coexistence;
+	  the ordinary image keeps every unqualified accelerator disabled.
+
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-accelerator-qualification/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-ce-trng-qualification/Config.in"

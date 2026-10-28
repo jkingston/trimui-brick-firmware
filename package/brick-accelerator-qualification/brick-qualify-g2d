@@ -7,10 +7,15 @@ if [ "$#" -ne 1 ] || [ -e "$1" ]; then
 	exit 2
 fi
 marker=/sys/firmware/devicetree/base/chosen/trimui,g2d-qualification
-[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ] || {
+combined=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+if [ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ]; then
+	:
+elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v1 ]; then
+	:
+else
 	echo "not a G2D qualification image" >&2
 	exit 2
-}
+fi
 mkdir "$1"
 out=$(cd "$1" && pwd)
 assets=/usr/share/brick-qualification/g2d

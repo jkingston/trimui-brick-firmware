@@ -11,6 +11,7 @@ G2D_PROFILE ?= disabled
 VE_PROFILE ?= disabled
 VP9_PROFILE ?= disabled
 CE_TRNG_PROFILE ?= disabled
+COMBINED_ACCELERATOR_PROFILE ?= disabled
 ifeq ($(filter $(USB_ROLE),peripheral host auto),)
 $(error USB_ROLE must be peripheral, host or auto)
 endif
@@ -34,8 +35,16 @@ endif
 ifeq ($(filter $(CE_TRNG_PROFILE),disabled qualification),)
 $(error CE_TRNG_PROFILE must be disabled or qualification)
 endif
+ifeq ($(filter $(COMBINED_ACCELERATOR_PROFILE),disabled qualification),)
+$(error COMBINED_ACCELERATOR_PROFILE must be disabled or qualification)
+endif
 ifneq ($(words $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE))),$(words $(sort $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)))))
 $(error Hardware qualification modes are mutually exclusive)
+endif
+ifneq ($(COMBINED_ACCELERATOR_PROFILE),disabled)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled:disabled)
+$(error Combined and isolated accelerator qualification modes are mutually exclusive)
+endif
 endif
 ifeq ($(filter $(EMMC_RECOVERY),0 1),)
 $(error EMMC_RECOVERY must be 0 or 1)
@@ -47,11 +56,11 @@ endif
 ifneq ($(SCP_PROFILE),disabled)
 $(error EMMC_RECOVERY=1 and SCP_PROFILE are mutually exclusive)
 endif
-ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled:disabled)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled:disabled)
 $(error EMMC_RECOVERY=1 and hardware qualification are mutually exclusive)
 endif
 endif
-ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)),)
+ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE) $(COMBINED_ACCELERATOR_PROFILE)),)
 ifneq ($(USB_ROLE),peripheral)
 $(error Hardware qualification requires USB_ROLE=peripheral)
 endif
@@ -85,6 +94,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
 	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
+	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
@@ -93,6 +103,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/ve_profile.py configure $(O)/.config $(VE_PROFILE)
 	python3 $(ROOT)/tools/vp9_profile.py configure $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py configure $(O)/.config $(CE_TRNG_PROFILE)
+	python3 $(ROOT)/tools/combined_accelerator_profile.py configure $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
 	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
@@ -101,6 +112,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
 	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
+	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 
 $(O)/.config: $(BUILDROOT)/.brick-extracted
 	$(MAKE) configure

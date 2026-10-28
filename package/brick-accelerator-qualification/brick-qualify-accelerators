@@ -1,0 +1,106 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+usage="usage: $0 NEW-RESULT-DIRECTORY"
+[ "$#" -eq 1 ] && [ ! -e "$1" ] || { echo "$usage" >&2; exit 2; }
+marker=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
+[ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = combined-v1 ] || {
+	echo "not a combined accelerator qualification image" >&2
+	exit 2
+}
+
+mkdir "$1"
+out=$(cd "$1" && pwd)
+before_lines=0
+children=
+stay_awake=/tmp/stay_awake
+stay_alive=/tmp/stay_alive
+touch "$stay_awake" "$stay_alive"
+
+capture_diagnostics()
+{
+	cat /proc/interrupts > "$out/interrupts-after" 2>&1 || true
+	dmesg > "$out/dmesg-after" 2>&1 || true
+	if [ "$before_lines" -gt 0 ]; then
+		sed -n "$((before_lines + 1)),\$p" "$out/dmesg-after" \
+			> "$out/dmesg-delta" || true
+	fi
+}
+
+finish()
+{
+	status=$?
+	trap - EXIT HUP INT TERM
+	for pid in $children; do
+		kill "$pid" 2>/dev/null || true
+	done
+	for pid in $children; do
+		wait "$pid" 2>/dev/null || true
+	done
+	rm -f "$stay_awake" "$stay_alive"
+	capture_diagnostics
+	if [ "$status" -ne 0 ] && [ ! -e "$out/RESULT" ]; then
+		printf 'FAIL status=%s\n' "$status" > "$out/RESULT"
+	fi
+	exit "$status"
+}
+trap finish EXIT HUP INT TERM
+
+dmesg > "$out/dmesg-before"
+before_lines=$(wc -l < "$out/dmesg-before")
+cat /proc/interrupts > "$out/interrupts-before"
+
+timeout 180 /usr/sbin/brick-qualify-g2d "$out/g2d"
+timeout 180 /usr/sbin/brick-qualify-ve probe "$out/ve-probe"
+for case_name in mpeg2-ipb h264-ip hevc-ip hevc-tiles hevc-wpp vp8-ip; do
+	timeout 120 /usr/sbin/brick-qualify-ve decode "$case_name" \
+		"$out/ve-$case_name"
+done
+timeout 180 /usr/sbin/brick-qualify-vp9 probe "$out/vp9-probe"
+timeout 120 /usr/sbin/brick-qualify-vp9 decode "$out/vp9-decode"
+timeout 300 /usr/libexec/run-encoder-qualification > "$out/encoder.log" 2>&1
+sed -n 's/^EVIDENCE=//p' "$out/encoder.log" > "$out/encoder-evidence"
+[ -s "$out/encoder-evidence" ] || {
+	echo "encoder qualification did not report its evidence directory" >&2
+	exit 1
+}
+timeout 300 /usr/sbin/brick-qualify-ce-trng core "$out/ce-core"
+timeout 300 /usr/sbin/brick-qualify-ce-trng lifecycle "$out/ce-lifecycle"
+
+# Exercise both IOMMU masters, both clients of the shared VE domain and CE at
+# once. Each child independently checks output hashes and its kernel log delta.
+timeout 180 /usr/sbin/brick-qualify-g2d "$out/coexist-g2d" \
+	> "$out/coexist-g2d.log" 2>&1 &
+g2d_pid=$!
+timeout 120 /usr/sbin/brick-qualify-ve decode h264-ip "$out/coexist-ve" \
+	> "$out/coexist-ve.log" 2>&1 &
+ve_pid=$!
+timeout 120 /usr/sbin/brick-qualify-vp9 decode "$out/coexist-vp9" \
+	> "$out/coexist-vp9.log" 2>&1 &
+vp9_pid=$!
+timeout 300 /usr/sbin/brick-qualify-ce-trng core "$out/coexist-ce" \
+	> "$out/coexist-ce.log" 2>&1 &
+ce_pid=$!
+children="$g2d_pid $ve_pid $vp9_pid $ce_pid"
+coexist_status=0
+for pid in $children; do
+	wait "$pid" || coexist_status=1
+done
+children=
+[ "$coexist_status" -eq 0 ] || {
+	echo "combined accelerator coexistence failed" >&2
+	exit 1
+}
+
+capture_diagnostics
+if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|(g2d|cedrus|hantro|crypto|video-engine-domain).*(timeout|fault|error|failed))' \
+	"$out/dmesg-delta" > "$out/kernel-errors"; then
+	echo "new accelerator kernel fault during combined qualification" >&2
+	exit 1
+fi
+printf 'PASS combined-v1 sequential-and-coexistence\n' > "$out/RESULT"
+find "$out" -type f ! -name SHA256SUMS | sort | while IFS= read -r file; do
+	sha256sum "$file"
+done > "$out/SHA256SUMS"
+cat "$out/RESULT"

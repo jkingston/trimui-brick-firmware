@@ -15,6 +15,7 @@ KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
+COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/vp9.fragment'
 DTB = 'sun50i-a133-trimui-brick.dtb'
@@ -56,7 +57,8 @@ def _fragment(config):
 
 
 def _uses_eudev(config):
-    return enabled(config) or _selected(config, VE_KEY)
+    return enabled(config) or any(_selected(config, key)
+                                  for key in (VE_KEY, COMBINED_KEY))
 
 
 def check_output(config, requested):
@@ -101,8 +103,9 @@ def configure(config, requested):
     else:
         replacement = fragment.group(0)
     text = text[:fragment.start()] + replacement + text[fragment.end():]
-    use_eudev = requested or bool(re.search(
-        rf'^{re.escape(VE_KEY)}=y$', text, re.M))
+    use_eudev = requested or any(re.search(
+        rf'^{re.escape(key)}=y$', text, re.M)
+        for key in (VE_KEY, COMBINED_KEY))
     settings = {
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not use_eudev,
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': use_eudev,
@@ -230,7 +233,8 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('VP9 and eMMC qualification must remain separate')
     if _selected(config, 'BR2_PACKAGE_BRICK_SCP'):
         raise ValueError('VP9 and SCP qualification must remain separate')
-    if any(_selected(config, key) for key in (G2D_KEY, VE_KEY, CE_KEY)):
+    if any(_selected(config, key)
+           for key in (G2D_KEY, VE_KEY, CE_KEY, COMBINED_KEY)):
         raise ValueError('VP9 and peer accelerator qualification must remain separate')
     destination = images / DTB
     if not destination.is_file():
