@@ -125,6 +125,20 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
     require(prop(f, '/images/uboot', 'load', 'x') == '4a000000', 'Unexpected U-Boot load address')
     if scp_enabled:
         scp_source = (a.uboot / 'arch/arm/mach-sunxi/a133_vendor_scp.c').read_text()
+        start = scp_source.find('static int a133_scp_start(void)')
+        enable = scp_source.find('ret = a133_scp_enable_msgbox();', start)
+        release = scp_source.find('ret = a133_scp_set_reset(false);', start)
+        require('#define A133_MSGBOX_BGR_REG\t\t0x0300171cUL' in scp_source,
+                'Unexpected A133 message-box clock register')
+        require('#define A133_MSGBOX_BGR_REQUIRED\t(BIT(16) | BIT(0))' in
+                scp_source, 'Unexpected A133 message-box clock/reset bits')
+        require('writel(readl(reg) | A133_MSGBOX_BGR_REQUIRED, reg);' in
+                scp_source, 'SCP startup does not preserve message-box BGR bits')
+        require('(readl(reg) & A133_MSGBOX_BGR_REQUIRED) !=\n'
+                '\t    A133_MSGBOX_BGR_REQUIRED' in scp_source,
+                'SCP startup does not verify the message-box BGR')
+        require(0 <= start < enable < release,
+                'Message-box clock/reset is not enabled before SCP release')
         require(c_byte_array(scp_source, 'a133_scp_sha256') ==
                 hashlib.sha256(a.scp.read_bytes()).digest(),
                 'Compiled SCP digest mismatch')

@@ -1,0 +1,51 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] sunxi: enable the A133 message box before the SCP
+
+Stock enables the A133 message-box bus gate and deasserts its reset before
+releasing the system-control processor. Preserve unrelated BGR bits, verify
+the write, and fail closed if the hardware does not accept it.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+diff --git a/arch/arm/mach-sunxi/a133_vendor_scp.c b/arch/arm/mach-sunxi/a133_vendor_scp.c
+--- a/arch/arm/mach-sunxi/a133_vendor_scp.c
++++ b/arch/arm/mach-sunxi/a133_vendor_scp.c
+@@ -44,6 +44,8 @@
+ #define A133_SCP_RESET_REG		SUNXI_R_CPUCFG_BASE
+ #define A133_SCP_RESET_BIT		BIT(0)
+ #define A133_SCP_RESET_POLLS		1000
++#define A133_MSGBOX_BGR_REG		0x0300171cUL
++#define A133_MSGBOX_BGR_REQUIRED	(BIT(16) | BIT(0))
+ 
+ #define A133_SCP_HAVE_IMAGE		BIT(0)
+ #define A133_SCP_HAVE_FDT		BIT(1)
+@@ -161,6 +163,19 @@
+ 	return -ETIMEDOUT;
+ }
+ 
++static int a133_scp_enable_msgbox(void)
++{
++	void __iomem *reg = (void __iomem *)A133_MSGBOX_BGR_REG;
++
++	writel(readl(reg) | A133_MSGBOX_BGR_REQUIRED, reg);
++	dsb();
++	if ((readl(reg) & A133_MSGBOX_BGR_REQUIRED) !=
++	    A133_MSGBOX_BGR_REQUIRED)
++		return -EIO;
++
++	return 0;
++}
++
+ static int a133_scp_start(void)
+ {
+ 	void *dram_dst, *fdt_dst, *fdt_src, *scp_dst, *scp_src;
+@@ -207,6 +222,9 @@
+ 	flush_dcache_range(A133_SCP_FDT_BASE,
+ 			   A133_SCP_FDT_BASE + A133_SCP_FDT_SIZE);
+ 	dsb();
++	ret = a133_scp_enable_msgbox();
++	if (ret)
++		goto out_unmap_dram;
+ 	ret = a133_scp_set_reset(false);
+ 
+ out_unmap_dram:

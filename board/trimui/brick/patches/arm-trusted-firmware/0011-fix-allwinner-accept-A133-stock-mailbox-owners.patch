@@ -1,0 +1,43 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] fix(allwinner): accept A133 stock mailbox owners
+
+Only the low twelve CTRL1 bits describe the q4 and q5 owners used by the
+transport. Stock also programs the unrelated q6 and q7 fields, producing
+0x10100110. Mask those fields while retaining the exact q4/q5 check.
+
+The host fixture now uses the observed stock value, while its mismatch test
+still changes a checked owner bit and proves the transport fails closed.
+---
+diff --git a/plat/allwinner/common/sunxi_a133_vendor_scp.c b/plat/allwinner/common/sunxi_a133_vendor_scp.c
+--- a/plat/allwinner/common/sunxi_a133_vendor_scp.c
++++ b/plat/allwinner/common/sunxi_a133_vendor_scp.c
+@@ -21,6 +21,7 @@
+ /* q0..q5 owner fields after the SCP initializes the old mailbox IP. */
+ #define A133_MSGBOX_CTRL0_OWNERS	0x10011001U
+ #define A133_MSGBOX_CTRL1_OWNERS	0x00000110U
++#define A133_MSGBOX_CTRL1_MASK		0x00000fffU
+ 
+ #ifdef SUNXI_A133_VENDOR_SCP_MMIO_HOST_TEST
+ static uint32_t msgbox_read(uintptr_t address)
+@@ -55,7 +56,8 @@
+ 	ctrl0 = msgbox_read(scp->msgbox_base + MSGBOX_CTRL0_REG);
+ 	ctrl1 = msgbox_read(scp->msgbox_base + MSGBOX_CTRL1_REG);
+ 	if ((ctrl0 != A133_MSGBOX_CTRL0_OWNERS) ||
+-	    (ctrl1 != A133_MSGBOX_CTRL1_OWNERS)) {
++	    ((ctrl1 & A133_MSGBOX_CTRL1_MASK) !=
++	     A133_MSGBOX_CTRL1_OWNERS)) {
+ 		scp->ownership_fault = true;
+ 		return false;
+ 	}
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+--- a/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_vendor_scp.c
+@@ -15,7 +15,7 @@
+ #define MSG_STAT(n)	(0x0140U + (4U * (n)))
+ #define MSG_DATA(n)	(0x0180U + (4U * (n)))
+ #define OWNER0		0x10011001U
+-#define OWNER1		0x00000110U
++#define OWNER1		0x10100110U
+ #define QUEUE_WORDS	64U
+ 
+ struct queue {
