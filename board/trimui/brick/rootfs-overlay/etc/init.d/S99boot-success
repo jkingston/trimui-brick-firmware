@@ -8,7 +8,9 @@ stop) exit 0 ;;
 esac
 
 case " $(cat /proc/cmdline) " in
-	*" brick.bootdir=brick-diag "*) ;;
+	*" brick.bootdir=brick-diag "*) bootdir=brick-diag ;;
+	*" brick.bootdir=brick-previous "*) bootdir=brick-previous ;;
+	*" brick.bootdir=brick-baseline "*) bootdir=brick-baseline ;;
 	*) exit 0 ;;
 esac
 
@@ -28,12 +30,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-(cd "$mountpoint/brick-diag" && sha256sum -c SHA256SUMS)
+(cd "$mountpoint/$bootdir" && sha256sum -c SHA256SUMS)
 
-# The candidate reached late init with an intact payload. Stop the handoff
-# watchdog before committing success so a later failure cannot repeatedly boot
-# a candidate already recorded as good.
+# Every selected slot inherits the handoff watchdog.  A verified recovery slot
+# must stop it too, but must leave the failed candidate rejected so the next
+# boot continues to use the recovery command.
 printf V > /dev/watchdog
+
+if [ "$bootdir" != brick-diag ]; then
+	umount "$mountpoint"
+	trap - EXIT
+	exit 0
+fi
 
 # U-Boot bootcount_fs: magic, version, count=0, upgrade_available=0.
 printf '\275\001\000\000' > "$temporary"
