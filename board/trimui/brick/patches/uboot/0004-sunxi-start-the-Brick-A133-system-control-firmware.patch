@@ -158,7 +158,7 @@ new file mode 100644
 index 00000000000..e0a21b6d55e
 --- /dev/null
 +++ b/arch/arm/mach-sunxi/a133_vendor_scp.c
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,330 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Fail-closed boot boundary for the exact A133 vendor SCP used by the Brick.
@@ -188,6 +188,12 @@ index 00000000000..e0a21b6d55e
 +#define A133_SCP_RUNTIME_BASE		0x00100000UL
 +#define A133_SCP_LOAD_SIZE		0x00014000UL
 +#define A133_SCP_FILE_SIZE		0x00014008UL
++#define A133_SCP_VECTOR_FIRST		0x00000100UL
++#define A133_SCP_VECTOR_LAST		0x00000e00UL
++#define A133_SCP_VECTOR_STRIDE		0x00000100UL
++#define A133_SCP_VECTOR_SIZE		0x00000008UL
++#define A133_SCP_SRAM_OFFSET		0x00004000UL
++#define A133_SCP_SRAM_SIZE		0x00010000UL
 +#define A133_SCP_DRAM_OFFSET		0x00004008UL
 +#define A133_SCP_DRAM_SIZE		0x00000080UL
 +
@@ -332,6 +338,51 @@ index 00000000000..e0a21b6d55e
 +	return -ETIMEDOUT;
 +}
 +
++/*
++ * The A133 CPU view exposes sparse OpenRISC vectors, then 64 KiB of SRAM.
++ * Match shipped Boot0's aligned word accesses without touching vector holes.
++ */
++static int a133_scp_copy_words(void *dst, const void *src, ulong size)
++{
++	ulong offset;
++
++	if (((ulong)dst | (ulong)src | size) & (sizeof(u32) - 1))
++		return -EINVAL;
++
++	for (offset = 0; offset < size; offset += sizeof(u32))
++		writel(*(const u32 *)((const u8 *)src + offset),
++		       (u8 *)dst + offset);
++	dsb();
++
++	for (offset = 0; offset < size; offset += sizeof(u32)) {
++		if (readl((u8 *)dst + offset) !=
++		    *(const u32 *)((const u8 *)src + offset))
++			return -EIO;
++	}
++
++	return 0;
++}
++
++static int a133_scp_copy_runtime(void *dst, const void *src)
++{
++	ulong offset;
++	int ret;
++
++	for (offset = A133_SCP_VECTOR_FIRST;
++	     offset <= A133_SCP_VECTOR_LAST;
++	     offset += A133_SCP_VECTOR_STRIDE) {
++		ret = a133_scp_copy_words((u8 *)dst + offset,
++					  (const u8 *)src + offset,
++					  A133_SCP_VECTOR_SIZE);
++		if (ret)
++			return ret;
++	}
++
++	return a133_scp_copy_words((u8 *)dst + A133_SCP_SRAM_OFFSET,
++				   (const u8 *)src + A133_SCP_SRAM_OFFSET,
++				   A133_SCP_SRAM_SIZE);
++}
++
 +static int a133_scp_start(void)
 +{
 +	void *dram_dst, *fdt_dst, *fdt_src, *scp_dst, *scp_src;
@@ -351,30 +402,23 @@ index 00000000000..e0a21b6d55e
 +
 +	scp_src = map_sysmem(A133_SCP_STAGING_BASE, A133_SCP_LOAD_SIZE);
 +	scp_dst = map_sysmem(A133_SCP_RUNTIME_BASE, A133_SCP_LOAD_SIZE);
-+	memcpy(scp_dst, scp_src, A133_SCP_LOAD_SIZE);
-+	if (memcmp(scp_dst, scp_src, A133_SCP_LOAD_SIZE)) {
-+		ret = -EIO;
++	ret = a133_scp_copy_runtime(scp_dst, scp_src);
++	if (ret)
 +		goto out_unmap_scp;
-+	}
 +
 +	fdt_src = map_sysmem(A133_SCP_FDT_STAGING_BASE, A133_SCP_FDT_SIZE);
 +	fdt_dst = map_sysmem(A133_SCP_FDT_BASE, A133_SCP_FDT_SIZE);
-+	memcpy(fdt_dst, fdt_src, A133_SCP_FDT_SIZE);
-+	if (memcmp(fdt_dst, fdt_src, A133_SCP_FDT_SIZE)) {
-+		ret = -EIO;
++	ret = a133_scp_copy_words(fdt_dst, fdt_src, A133_SCP_FDT_SIZE);
++	if (ret)
 +		goto out_unmap_fdt;
-+	}
 +
 +	dram_dst = map_sysmem(A133_SCP_RUNTIME_BASE + A133_SCP_DRAM_OFFSET,
 +			      A133_SCP_DRAM_SIZE);
-+	memcpy(dram_dst, a133_scp_dram_handoff.words, A133_SCP_DRAM_SIZE);
-+	if (memcmp(dram_dst, a133_scp_dram_handoff.words, A133_SCP_DRAM_SIZE)) {
-+		ret = -EIO;
++	ret = a133_scp_copy_words(dram_dst, a133_scp_dram_handoff.words,
++				  A133_SCP_DRAM_SIZE);
++	if (ret)
 +		goto out_unmap_dram;
-+	}
 +
-+	flush_dcache_range(A133_SCP_RUNTIME_BASE,
-+			   A133_SCP_RUNTIME_BASE + A133_SCP_LOAD_SIZE);
 +	flush_dcache_range(A133_SCP_FDT_BASE,
 +			   A133_SCP_FDT_BASE + A133_SCP_FDT_SIZE);
 +	dsb();

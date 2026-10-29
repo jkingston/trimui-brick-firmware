@@ -137,6 +137,13 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
                 'SCP DRAM handoff is not preserved across SPL BSS initialization')
         require(symbol_section(spl_symbols, 'a133_scp_loaded') == '.data',
                 'SCP FIT readiness is not preserved across SPL BSS initialization')
+        require('#define A133_SCP_VECTOR_FIRST\t\t0x00000100UL' in scp_source and
+                '#define A133_SCP_VECTOR_LAST\t\t0x00000e00UL' in scp_source and
+                '#define A133_SCP_SRAM_OFFSET\t\t0x00004000UL' in scp_source and
+                '#define A133_SCP_SRAM_SIZE\t\t0x00010000UL' in scp_source,
+                'Unexpected A133 sparse vector or SRAM layout')
+        require('ret = a133_scp_copy_runtime(scp_dst, scp_src);' in scp_source,
+                'SCP runtime image is not copied through its sparse aperture')
         start = scp_source.find('static int a133_scp_start(void)')
         enable = scp_source.find('ret = a133_scp_enable_msgbox();', start)
         release = scp_source.find('ret = a133_scp_set_reset(false);', start)
