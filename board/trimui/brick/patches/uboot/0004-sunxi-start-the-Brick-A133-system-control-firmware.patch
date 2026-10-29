@@ -231,7 +231,8 @@ index 00000000000..e0a21b6d55e
 +#define A133_SCP_DRAM_EMPTY_MAGIC	0x53435030U
 +#define A133_SCP_DRAM_VALID_MAGIC	0x53435044U
 +
-+static u8 a133_scp_loaded;
++/* FIT callbacks run before SPL relocation; retain their state with .data. */
++static u8 a133_scp_loaded = A133_SCP_HAVE_ALL + 1;
 +static struct {
 +	u32 magic;
 +	u32 words[A133_SCP_DRAM_SIZE / sizeof(u32)];

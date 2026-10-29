@@ -135,6 +135,8 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
         spl_symbols = (a.uboot / 'spl/u-boot-spl.sym').read_text()
         require(symbol_section(spl_symbols, 'a133_scp_dram_handoff') == '.data',
                 'SCP DRAM handoff is not preserved across SPL BSS initialization')
+        require(symbol_section(spl_symbols, 'a133_scp_loaded') == '.data',
+                'SCP FIT readiness is not preserved across SPL BSS initialization')
         start = scp_source.find('static int a133_scp_start(void)')
         enable = scp_source.find('ret = a133_scp_enable_msgbox();', start)
         release = scp_source.find('ret = a133_scp_set_reset(false);', start)
