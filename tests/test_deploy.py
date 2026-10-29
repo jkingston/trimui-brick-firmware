@@ -107,6 +107,11 @@ shift
 case "$command" in
  mount) rmdir "$2" && ln -s "$TEST_SD" "$2"; exit $? ;;
  umount) rm "$1" && mkdir "$1"; exit $? ;;
+ df)
+  if [ -n "${AVAILABLE_KIB:-}" ]; then
+   printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nmock 1 1 %s 1%% %s\n' "$AVAILABLE_KIB" "$TEST_SD"
+   exit 0
+  fi ;;
  dd)
   case " $*:${FAIL_ACTION:-}" in
    *" of="*:copy) : > "$DD_FAILURE_MARKER"; exit 1 ;;
@@ -223,6 +228,16 @@ exec "$REAL_BB" "$command" "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.dd_failure_marker.exists())
         self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assert_clean()
+
+    def test_insufficient_space_preserves_both_existing_payloads(self):
+        self.env['AVAILABLE_KIB'] = '0'
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Insufficient SD space', result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertFalse((self.sd / 'brick-bootcount').exists())
         self.assert_clean()
 
     def test_payload_copy_uses_large_writes_without_remounting(self):

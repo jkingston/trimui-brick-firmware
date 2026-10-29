@@ -106,11 +106,32 @@ mounted=1
 [ -f "$current/SHA256SUMS" ]
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
 [ ! -e "$stage" ]
-# Retire only a prior deployment's verified rollback directory.
+# Account for the verified rollback directory before deleting it.  Leave a
+# bounded margin for FAT allocation and directory updates so ENOSPC is rejected
+# before any slot or boot state is changed.
+payload_bytes=0
+for name in Image brick-usb.dtb initramfs.cpio.gz SHA256SUMS manifest.json; do
+ size=$($bb wc -c < "$work/payload/$name")
+ [ "$size" -gt 0 ]
+ payload_bytes=$((payload_bytes + size))
+done
+required_kib=$(( (payload_bytes + 1023) / 1024 + 1024 ))
+available_kib=$($bb df -Pk "$mountpoint" | $bb awk 'END {{ print $(NF - 2) }}')
+case "$available_kib" in *[!0-9]*|'') echo "Cannot determine SD free space" >&2; exit 1 ;; esac
+reclaimable_kib=0
 if [ -d "$previous" ]; then
  [ -f "$previous/manifest.json" ]
  [ -f "$previous/SHA256SUMS" ]
  (cd "$previous" && $bb sha256sum -c SHA256SUMS)
+ reclaimable_kib=$($bb du -sk "$previous" | $bb awk '{{ print $1 }}')
+ case "$reclaimable_kib" in *[!0-9]*|'') echo "Cannot determine rollback size" >&2; exit 1 ;; esac
+fi
+if [ $((available_kib + reclaimable_kib)) -lt "$required_kib" ]; then
+ echo "Insufficient SD space: need ${{required_kib}} KiB, have $((available_kib + reclaimable_kib)) KiB after rollback retirement" >&2
+ exit 1
+fi
+# Retire only a prior deployment's verified rollback directory.
+if [ -d "$previous" ]; then
  $bb rm -r "$previous"
 fi
 $bb mkdir "$stage"
