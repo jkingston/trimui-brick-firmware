@@ -1,0 +1,63 @@
+From 8dc707cb13a7562f8e1fca43ec90c49150cfbb93 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 23:30:00 +0000
+Subject: [PATCH] fix(allwinner): restart the A133 watchdog correctly
+
+The Brick's stock A133 restart handler keys its watchdog configuration and mode
+writes with 0x16aa and reloads the counter with 0x14af. Use that exact sequence
+for the native TF-A fallback while preserving the existing implementation for
+other Allwinner platforms. The Linux watchdog is the qualified normal restart
+path; direct runtime qualification of this TF-A fallback remains separate.
+---
+ plat/allwinner/common/sunxi_native_pm.c             | 14 ++++++++++++--
+ .../sun50i_a133/include/sunxi_mmap.h                |  2 ++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/plat/allwinner/common/sunxi_native_pm.c b/plat/allwinner/common/sunxi_native_pm.c
+index 597f9c8..3b6ae31 100644
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -30,6 +30,14 @@
+ #define SUNXI_WDOG0_CFG_REG		(SUNXI_R_WDOG_BASE + 0x0014)
+ #define SUNXI_WDOG0_MODE_REG		(SUNXI_R_WDOG_BASE + 0x0018)
+ 
++#ifndef SUNXI_WDOG_KEY
++#define SUNXI_WDOG_KEY			0U
++#endif
++
++#ifndef SUNXI_WDOG_RESTART
++#define SUNXI_WDOG_RESTART		0U
++#endif
++
+ static int sunxi_pwr_domain_on(u_register_t mpidr)
+ {
+ 	sunxi_cpu_on(mpidr);
+@@ -66,9 +74,11 @@ static void __dead2 sunxi_system_reset(void)
+ 	gicv2_cpuif_disable();
+ 
+ 	/* Reset the whole system when the watchdog times out */
+-	mmio_write_32(SUNXI_WDOG0_CFG_REG, 1);
++	mmio_write_32(SUNXI_WDOG0_CFG_REG, SUNXI_WDOG_KEY | 1U);
+ 	/* Enable the watchdog with the shortest timeout (0.5 seconds) */
+-	mmio_write_32(SUNXI_WDOG0_MODE_REG, (0 << 4) | 1);
++	mmio_write_32(SUNXI_WDOG0_MODE_REG, SUNXI_WDOG_KEY | 1U);
++	if (SUNXI_WDOG_RESTART != 0U)
++		mmio_write_32(SUNXI_WDOG0_CTRL_REG, SUNXI_WDOG_RESTART);
+ 	/* Wait for twice the watchdog timeout before panicking */
+ 	mdelay(1000);
+ 
+diff --git a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+index 4c15d91..4cecf6d 100644
+--- a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
++++ b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+@@ -60,6 +60,8 @@
+ #define SUNXI_R_PRCM_BASE		0x07010000
+ #define SUNXI_R_PIO_BASE		0x07022000
+ #define SUNXI_R_WDOG_BASE		SUNXI_WDOG_BASE
++#define SUNXI_WDOG_KEY			0x16aa0000U
++#define SUNXI_WDOG_RESTART		0x000014afU
+ #define SUNXI_R_I2C_BASE		0x07081400
+ #define SUNXI_CPUSUBSYS_BASE		0x08100000
+ #define SUNXI_CPUCFG_BASE		0x09010000
+-- 
+2.51.0
