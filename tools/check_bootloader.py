@@ -31,6 +31,13 @@ def c_byte_array(source, name):
             f'Unexpected {name} length')
     return values
 
+def symbol_section(symbols, name):
+    match = re.search(
+        rf'^\S+\s+\S+\s+O\s+(\.\S+)\s+\S+\s+{re.escape(name)}$',
+        symbols, re.M)
+    require(match is not None, f'Missing SPL symbol {name}')
+    return match.group(1)
+
 config = dict(line.split('=', 1) for line in (a.uboot / '.config').read_text().splitlines()
               if line.startswith('CONFIG_') and '=' in line)
 scp_enabled = config.get('CONFIG_SUNXI_A133_VENDOR_SCP') == 'y'
@@ -125,6 +132,9 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
     require(prop(f, '/images/uboot', 'load', 'x') == '4a000000', 'Unexpected U-Boot load address')
     if scp_enabled:
         scp_source = (a.uboot / 'arch/arm/mach-sunxi/a133_vendor_scp.c').read_text()
+        spl_symbols = (a.uboot / 'spl/u-boot-spl.sym').read_text()
+        require(symbol_section(spl_symbols, 'a133_scp_dram_handoff') == '.data',
+                'SCP DRAM handoff is not preserved across SPL BSS initialization')
         start = scp_source.find('static int a133_scp_start(void)')
         enable = scp_source.find('ret = a133_scp_enable_msgbox();', start)
         release = scp_source.find('ret = a133_scp_set_reset(false);', start)

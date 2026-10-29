@@ -158,7 +158,7 @@ new file mode 100644
 index 00000000000..e0a21b6d55e
 --- /dev/null
 +++ b/arch/arm/mach-sunxi/a133_vendor_scp.c
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,286 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Fail-closed boot boundary for the exact A133 vendor SCP used by the Brick.
@@ -228,20 +228,28 @@ index 00000000000..e0a21b6d55e
 +	0x1c, 0x36, 0x5a, 0xf6, 0x6a, 0x5c, 0xf7, 0xd8,
 +};
 +
++#define A133_SCP_DRAM_EMPTY_MAGIC	0x53435030U
++#define A133_SCP_DRAM_VALID_MAGIC	0x53435044U
++
 +static u8 a133_scp_loaded;
-+static u32 a133_scp_dram_handoff[A133_SCP_DRAM_SIZE / sizeof(u32)];
-+static bool a133_scp_dram_valid;
++static struct {
++	u32 magic;
++	u32 words[A133_SCP_DRAM_SIZE / sizeof(u32)];
++} a133_scp_dram_handoff = {
++	.magic = A133_SCP_DRAM_EMPTY_MAGIC,
++};
 +
 +static int a133_scp_set_reset(bool asserted);
 +
 +int sunxi_a133_vendor_scp_set_dram_handoff(const u32 *words,
 +					   unsigned int count)
 +{
-+	if (!words || count != ARRAY_SIZE(a133_scp_dram_handoff))
++	if (!words || count != ARRAY_SIZE(a133_scp_dram_handoff.words))
 +		return -EINVAL;
 +
-+	memcpy(a133_scp_dram_handoff, words, sizeof(a133_scp_dram_handoff));
-+	a133_scp_dram_valid = true;
++	memcpy(a133_scp_dram_handoff.words, words,
++	       sizeof(a133_scp_dram_handoff.words));
++	a133_scp_dram_handoff.magic = A133_SCP_DRAM_VALID_MAGIC;
 +
 +	return 0;
 +}
@@ -268,7 +276,8 @@ index 00000000000..e0a21b6d55e
 +
 +int board_spl_fit_prepare_loadables(void)
 +{
-+	a133_scp_loaded = a133_scp_dram_valid ? A133_SCP_HAVE_DRAM : 0;
++	a133_scp_loaded = a133_scp_dram_handoff.magic == A133_SCP_DRAM_VALID_MAGIC ?
++			  A133_SCP_HAVE_DRAM : 0;
 +
 +	return a133_scp_set_reset(true);
 +}
@@ -357,8 +366,8 @@ index 00000000000..e0a21b6d55e
 +
 +	dram_dst = map_sysmem(A133_SCP_RUNTIME_BASE + A133_SCP_DRAM_OFFSET,
 +			      A133_SCP_DRAM_SIZE);
-+	memcpy(dram_dst, a133_scp_dram_handoff, A133_SCP_DRAM_SIZE);
-+	if (memcmp(dram_dst, a133_scp_dram_handoff, A133_SCP_DRAM_SIZE)) {
++	memcpy(dram_dst, a133_scp_dram_handoff.words, A133_SCP_DRAM_SIZE);
++	if (memcmp(dram_dst, a133_scp_dram_handoff.words, A133_SCP_DRAM_SIZE)) {
 +		ret = -EIO;
 +		goto out_unmap_dram;
 +	}
