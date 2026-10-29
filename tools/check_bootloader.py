@@ -60,10 +60,15 @@ require('for brick_bootdir in brick-diag brick-previous brick-baseline;' in
         config.get('CONFIG_BOOTCOMMAND', ''), 'Missing SD payload fallback')
 require('brick.bootdir=${brick_bootdir}' in config.get('CONFIG_BOOTCOMMAND', ''),
         'Booted payload is not identified to userspace')
+boot_pulse = 'gpio set PH3; sleep 0.12; gpio clear PH3;'
+require(boot_pulse in config.get('CONFIG_BOOTCOMMAND', ''),
+        'Primary boot does not acknowledge power-on')
 altbootcmd = config.get('CONFIG_BOOTCOUNT_ALTBOOTCMD', '')
 require('for brick_bootdir in brick-previous brick-baseline;' in altbootcmd,
         'Missing retained-payload rollback')
 require('brick-diag' not in altbootcmd, 'Rollback must not retry the pending payload')
+require(boot_pulse in altbootcmd,
+        'Rollback boot does not acknowledge power-on')
 sunxi_boot = (a.uboot / 'arch/arm/mach-sunxi/board.c').read_text()
 function = sunxi_boot.find('uint32_t sunxi_get_boot_device(void)')
 dispatch = sunxi_boot.find('switch (boot_source)', function)
