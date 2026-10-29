@@ -11,11 +11,13 @@ from scp_profile import profile as scp_profile
 
 
 NATIVE_SYMBOLS = {
+    'sunxi_a133_validate_power_state',
+}
+SUSPEND_SYMBOLS = {
     'sunxi_a133_cpuidle_power_off_self',
     'sunxi_a133_pwr_domain_suspend',
     'sunxi_a133_pwr_domain_suspend_finish',
     'sunxi_a133_pwr_domain_suspend_pwrdown_early',
-    'sunxi_a133_validate_power_state',
 }
 SYSTEM_SYMBOLS = {
     'sunxi_a133_system_suspend_psci_ops',
@@ -41,12 +43,16 @@ def _complete(symbols, required, label):
 
 def verify_symbols(config, symbols):
     native = _complete(symbols, NATIVE_SYMBOLS, 'native CPU-suspend support')
+    suspend = _complete(symbols, SUSPEND_SYMBOLS, 'A133 suspend callbacks')
     system = _complete(symbols, SYSTEM_SYMBOLS, 'system-suspend support')
     idle = idle_enabled(config)
     dtb = selected_dtb(config)
     idle_dtb = dtb in {DTB, DEEP_DTB}
     deep = scp_profile(config) == 'deep'
 
+    if suspend != (idle or deep):
+        raise ValueError('Produced BL31 suspend callbacks do not match the '
+                         'selected CPU or system suspend profile')
     if native != idle or idle_dtb != idle or native != idle_dtb:
         raise ValueError('Produced BL31 and selected DTB violate the native '
                          'CPU-suspend all-or-none contract')

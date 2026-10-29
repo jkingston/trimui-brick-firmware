@@ -23,9 +23,12 @@ class CpuIdleArtifactTests(unittest.TestCase):
     def select_idle(self):
         cpu_idle_profile.configure(self.config, 'qualification')
 
-    def select_combined(self):
+    def select_deep(self):
         scp_profile.configure(self.config, 'deep')
         usb_profile.configure(self.config, 'peripheral', 'deep')
+
+    def select_combined(self):
+        self.select_deep()
         cpu_idle_profile.configure(self.config, 'qualification')
 
     def test_default_requires_both_features_absent(self):
@@ -40,22 +43,38 @@ class CpuIdleArtifactTests(unittest.TestCase):
     def test_isolated_idle_requires_complete_native_feature(self):
         self.select_idle()
         cpu_idle_artifact.verify_symbols(
-            self.config, cpu_idle_artifact.NATIVE_SYMBOLS)
-        with self.assertRaisesRegex(ValueError, 'all-or-none'):
+            self.config, cpu_idle_artifact.NATIVE_SYMBOLS |
+            cpu_idle_artifact.SUSPEND_SYMBOLS)
+        with self.assertRaisesRegex(ValueError, 'suspend callbacks'):
             cpu_idle_artifact.verify_symbols(self.config, set())
-        partial = set(cpu_idle_artifact.NATIVE_SYMBOLS)
+        partial = set(cpu_idle_artifact.SUSPEND_SYMBOLS)
         partial.pop()
-        with self.assertRaisesRegex(ValueError, 'partial native'):
-            cpu_idle_artifact.verify_symbols(self.config, partial)
+        with self.assertRaisesRegex(ValueError, 'partial A133 suspend'):
+            cpu_idle_artifact.verify_symbols(
+                self.config, cpu_idle_artifact.NATIVE_SYMBOLS | partial)
+
+    def test_deep_only_requires_shared_callbacks_without_cpu_idle(self):
+        self.select_deep()
+        deep = (cpu_idle_artifact.SUSPEND_SYMBOLS |
+                cpu_idle_artifact.SYSTEM_SYMBOLS)
+        cpu_idle_artifact.verify_symbols(self.config, deep)
+        with self.assertRaisesRegex(ValueError, 'CPU-suspend all-or-none'):
+            cpu_idle_artifact.verify_symbols(
+                self.config, deep | cpu_idle_artifact.NATIVE_SYMBOLS)
+        with self.assertRaisesRegex(ValueError, 'suspend callbacks'):
+            cpu_idle_artifact.verify_symbols(
+                self.config, cpu_idle_artifact.SYSTEM_SYMBOLS)
 
     def test_combined_requires_native_and_system_features(self):
         self.select_combined()
         both = (cpu_idle_artifact.NATIVE_SYMBOLS |
+                cpu_idle_artifact.SUSPEND_SYMBOLS |
                 cpu_idle_artifact.SYSTEM_SYMBOLS)
         cpu_idle_artifact.verify_symbols(self.config, both)
         with self.assertRaisesRegex(ValueError, 'system suspend'):
             cpu_idle_artifact.verify_symbols(
-                self.config, cpu_idle_artifact.NATIVE_SYMBOLS)
+                self.config, cpu_idle_artifact.NATIVE_SYMBOLS |
+                cpu_idle_artifact.SUSPEND_SYMBOLS)
         partial = both - {next(iter(cpu_idle_artifact.SYSTEM_SYMBOLS))}
         with self.assertRaisesRegex(ValueError, 'partial system'):
             cpu_idle_artifact.verify_symbols(self.config, partial)
