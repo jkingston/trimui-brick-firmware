@@ -65,6 +65,11 @@ current=$mountpoint/brick-diag
 bootstate_tmp=$mountpoint/.brick-bootcount.pending.{token}
 [ "$($bb cat /sys/class/block/mmcblk0/device/type)" = SD ]
 $bb grep -q 'trimui,brick' /sys/firmware/devicetree/base/compatible
+case " $($bb cat /proc/cmdline) " in
+ *' brick.bootdir=brick-diag '*) running=brick-diag ;;
+ *' brick.bootdir=brick-previous '*) running=brick-previous ;;
+ *) echo "Updater requires brick-diag or brick-previous" >&2; exit 1 ;;
+esac
 $bb mkdir /tmp/.brick-update-lock
 mounted=0
 staged=0
@@ -106,7 +111,7 @@ mounted=1
 [ -f "$current/SHA256SUMS" ]
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
 [ ! -e "$stage" ]
-# Account for the verified rollback directory before deleting it.  Leave a
+# Account for the verified retired directory before deleting it.  Leave a
 # bounded margin for FAT allocation and directory updates so ENOSPC is rejected
 # before any slot or boot state is changed.
 payload_bytes=0
@@ -118,21 +123,30 @@ done
 required_kib=$(( (payload_bytes + 1023) / 1024 + 1024 ))
 available_kib=$($bb df -Pk "$mountpoint" | $bb awk 'END {{ print $(NF - 2) }}')
 case "$available_kib" in *[!0-9]*|'') echo "Cannot determine SD free space" >&2; exit 1 ;; esac
+if [ "$running" = brick-previous ]; then
+ [ -d "$previous" ]
+ retire=$current
+else
+ retire=$previous
+fi
 reclaimable_kib=0
 if [ -d "$previous" ]; then
  [ -f "$previous/manifest.json" ]
  [ -f "$previous/SHA256SUMS" ]
  (cd "$previous" && $bb sha256sum -c SHA256SUMS)
- reclaimable_kib=$($bb du -sk "$previous" | $bb awk '{{ print $1 }}')
- case "$reclaimable_kib" in *[!0-9]*|'') echo "Cannot determine rollback size" >&2; exit 1 ;; esac
+fi
+if [ -d "$retire" ]; then
+ reclaimable_kib=$($bb du -sk "$retire" | $bb awk '{{ print $1 }}')
+ case "$reclaimable_kib" in *[!0-9]*|'') echo "Cannot determine retired slot size" >&2; exit 1 ;; esac
 fi
 if [ $((available_kib + reclaimable_kib)) -lt "$required_kib" ]; then
- echo "Insufficient SD space: need ${{required_kib}} KiB, have $((available_kib + reclaimable_kib)) KiB after rollback retirement" >&2
+ echo "Insufficient SD space: need ${{required_kib}} KiB, have $((available_kib + reclaimable_kib)) KiB after retiring the non-running slot" >&2
  exit 1
 fi
-# Retire only a prior deployment's verified rollback directory.
-if [ -d "$previous" ]; then
- $bb rm -r "$previous"
+# Retire the verified non-running slot. A fallback boot replaces the rejected
+# candidate in place and leaves the boot-working recovery untouched.
+if [ -d "$retire" ]; then
+ $bb rm -r "$retire"
 fi
 $bb mkdir "$stage"
 staged=1
@@ -151,20 +165,33 @@ for name in Image brick-usb.dtb initramfs.cpio.gz SHA256SUMS manifest.json; do
  copy_payload_file "$work/payload/$name" "$stage/$name"
 done
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
-# Arm rollback before publishing. This makes a power loss during either rename
-# recoverable even when the newly staged payload never starts.
-$bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
-$bb sync
-$bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
-$bb sync
-$bb mv "$current" "$previous"
-if ! $bb mv "$stage" "$current"; then
- if ! $bb mv "$previous" "$current"; then
-  # Preserve both complete copies if restoring the directory also fails.
-  staged=0
-  echo "Restore failed; retained brick-previous and brick-next" >&2
+if [ "$running" = brick-diag ]; then
+ # Arm rollback before rotating the running candidate. This makes a power loss
+ # during either rename recoverable even when the new payload never starts.
+ $bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
+ $bb sync
+ $bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
+ $bb sync
+ $bb mv "$current" "$previous"
+ if ! $bb mv "$stage" "$current"; then
+  if ! $bb mv "$previous" "$current"; then
+   # Preserve both complete copies if restoring the directory also fails.
+   staged=0
+   echo "Restore failed; retained brick-previous and brick-next" >&2
+  fi
+  exit 1
  fi
- exit 1
+else
+ # The old bootcount still selects brick-previous while the rejected candidate
+ # is absent or replaced. Publish and verify the new candidate before arming it.
+ $bb mv "$stage" "$current"
+ staged=0
+ (cd "$current" && $bb sha256sum -c SHA256SUMS)
+ $bb sync
+ $bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
+ $bb sync
+ $bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
+ $bb sync
 fi
 staged=0
 (cd "$current" && $bb sha256sum -c SHA256SUMS)

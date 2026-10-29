@@ -86,6 +86,7 @@ class InstallTests(unittest.TestCase):
         self.tmp.mkdir()
         (self.root / 'type').write_text('SD\n')
         (self.root / 'compatible').write_bytes(b'trimui,brick\0allwinner,sun50i-a133\0')
+        (self.root / 'cmdline').write_text('console=tty0 brick.bootdir=brick-diag quiet\n')
         (self.root / 'mounts').write_text('')
         (self.root / 'device').write_text('179:1\n')
         self.current = self.sd / 'brick-diag'
@@ -128,6 +129,7 @@ exec "$REAL_BB" "$command" "$@"
         replacements = {'/tmp/': str(self.tmp) + '/', '/bin/busybox': str(shim),
                         '/sys/class/block/mmcblk0/device/type': str(self.root / 'type'),
                         '/sys/firmware/devicetree/base/compatible': str(self.root / 'compatible'),
+                        '/proc/cmdline': str(self.root / 'cmdline'),
                         '/proc/self/mountinfo': str(self.root / 'mounts'),
                         '/sys/class/block/mmcblk0p1/dev': str(self.root / 'device'),
                         '/dev/mmcblk0': str(self.raw)}
@@ -177,6 +179,59 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
                          bytes((0xbd, 1, 0, 1)))
         self.assertFalse((self.current / deploy.BOOTLOADER).exists())
+        self.assert_clean()
+
+    def test_fallback_update_preserves_running_recovery(self):
+        (self.root / 'cmdline').write_text('brick.bootdir=brick-previous console=tty0\n')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'new')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
+                         bytes((0xbd, 1, 0, 1)))
+        self.assert_clean()
+
+    def test_fallback_copy_failure_preserves_running_recovery(self):
+        (self.root / 'cmdline').write_text('brick.bootdir=brick-previous\n')
+        old_bootcount = bytes((0xbd, 1, 2, 1))
+        (self.sd / 'brick-bootcount').write_bytes(old_bootcount)
+        result = self.run_installer('copy')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.current.exists())
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(), old_bootcount)
+        self.assert_clean()
+
+    def test_fallback_publish_failure_preserves_running_recovery(self):
+        (self.root / 'cmdline').write_text('brick.bootdir=brick-previous\n')
+        old_bootcount = bytes((0xbd, 1, 2, 1))
+        (self.sd / 'brick-bootcount').write_bytes(old_bootcount)
+        result = self.run_installer('publish')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.current.exists())
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(), old_bootcount)
+        self.assert_clean()
+
+    def test_fallback_insufficient_space_preserves_both_slots(self):
+        (self.root / 'cmdline').write_text('brick.bootdir=brick-previous\n')
+        old_bootcount = bytes((0xbd, 1, 2, 1))
+        (self.sd / 'brick-bootcount').write_bytes(old_bootcount)
+        self.env['AVAILABLE_KIB'] = '0'
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Insufficient SD space', result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(), old_bootcount)
+        self.assert_clean()
+
+    def test_unknown_running_slot_is_refused_before_sd_mutation(self):
+        (self.root / 'cmdline').write_text('brick.bootdir=brick-baseline\n')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
         self.assert_clean()
 
     def test_missing_current_manifest_preserves_existing_payloads(self):
