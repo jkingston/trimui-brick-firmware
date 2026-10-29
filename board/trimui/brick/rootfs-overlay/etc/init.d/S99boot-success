@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+case "${1:-}" in
+start) ;;
+stop) exit 0 ;;
+*) echo "Usage: $0 {start|stop}" >&2; exit 2 ;;
+esac
+
 case " $(cat /proc/cmdline) " in
 	*" brick.bootdir=brick-diag "*) ;;
 	*) exit 0 ;;
