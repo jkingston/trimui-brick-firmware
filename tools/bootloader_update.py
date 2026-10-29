@@ -18,6 +18,8 @@ import tempfile
 import time
 import uuid
 
+from serial_console import Console, DEFAULT_PORT as DEFAULT_CONSOLE_PORT, ProtocolError
+
 
 BOOT_START = 128 * 1024
 BOOT_END = 4 * 1024 * 1024
@@ -32,6 +34,7 @@ BLKGETSIZE64 = 0x80081272
 FDT_MAGIC = 0xD00DFEED
 ADB_COMMAND_TIMEOUT = 30
 ADB_TRANSFER_TIMEOUT = 120
+SERIAL_READ_CHUNK = 256 * 1024
 ADB_LOCK = "/tmp/.brick-bootloader-update-lock"
 ADB_PAYLOAD_RECORD = ADB_LOCK + "/payload"
 ADB_STATE_RECORD = ADB_LOCK + "/state"
@@ -410,8 +413,8 @@ class AdbCard:
                    "printf '%s\\n' brick-bootloader-update > /tmp/stay_alive")
         if self.shell(f"if test -e {ADB_LOCK}; then echo locked; fi").strip():
             raise UpgradeError(
-                "ADB bootloader lock exists; if a raw write was interrupted, run "
-                "recover-adb-lock before any update or restore"
+                "remote bootloader lock exists; recover the interrupted transport "
+                "before any update or restore"
             )
         self.shell(f"mkdir {ADB_LOCK}")
         self.locked = True
@@ -462,15 +465,15 @@ class AdbCard:
             f"cat {ADB_STATE_RECORD}"
         ).decode().split()
         if len(payload) != 2:
-            raise UpgradeError("ADB bootloader lock has incomplete recovery state")
+            raise UpgradeError("remote bootloader lock has incomplete recovery state")
         payload, state = payload
         prefix = "/tmp/.brick-bootloader-"
         token = payload.removeprefix(prefix)
         if (not payload.startswith(prefix) or len(token) != 32 or
                 any(character not in "0123456789abcdef" for character in token)):
-            raise UpgradeError("ADB bootloader lock has an invalid payload record")
+            raise UpgradeError("remote bootloader lock has an invalid payload record")
         if state not in ("writing", "complete"):
-            raise UpgradeError("ADB raw write was not recorded as started; lock preserved")
+            raise UpgradeError("remote raw write was not recorded as started; lock preserved")
         command = (
             f"set -e; test \"$(cat {ADB_PAYLOAD_RECORD})\" = {payload}; "
             f"state=$(cat {ADB_STATE_RECORD}); "
@@ -487,11 +490,11 @@ class AdbCard:
             output = self.shell(command, timeout=ADB_COMMAND_TIMEOUT)
         except UpgradeError as error:
             raise UpgradeError(
-                "uncertain ADB raw writer is still active or could not be disproved; "
+                "uncertain remote raw writer is still active or could not be disproved; "
                 "lock preserved"
             ) from error
         if output.strip() != b"recovered":
-            raise UpgradeError("ADB recovery did not return its exact completion marker")
+            raise UpgradeError("remote recovery did not return its exact completion marker")
 
     @property
     def identity(self):
@@ -573,11 +576,14 @@ class AdbCard:
         digest = sha256(data)
         self.shell(f"printf '%s\\n' {remote} > {ADB_PAYLOAD_RECORD}; "
                    f"printf '%s\\n' armed > {ADB_STATE_RECORD}")
+        # Keep validation outside the uncertain interval: it cannot write the
+        # card, so a validation failure needs no retained writer lock.
+        self.shell(f"test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
+                   f"test \"$(/bin/busybox sha256sum {remote} | "
+                   f"/bin/busybox awk '{{print $1}}')\" = {digest}",
+                   timeout=ADB_TRANSFER_TIMEOUT)
         try:
             self.shell(f"set -e; printf '%s\\n' writing > {ADB_STATE_RECORD}; "
-                       f"test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
-                       f"test \"$(/bin/busybox sha256sum {remote} | "
-                       f"/bin/busybox awk '{{print $1}}')\" = {digest}; "
                        f"/bin/busybox dd if={remote} of={self.path} bs=4096 "
                        f"seek={offset // 4096} conv=notrunc; /bin/busybox sync; "
                        f"printf '%s\\n' complete > {ADB_STATE_RECORD}",
@@ -598,6 +604,120 @@ class AdbCard:
     def validate_backup_destination(self, _path):
         # The path is on the ADB host, not on the remote SD block device.
         return
+
+
+class SerialCard(AdbCard):
+    """Operate on the running custom firmware's SD through its USB console."""
+
+    def __init__(self, device, writable, port=DEFAULT_CONSOLE_PORT,
+                 timeout=ADB_COMMAND_TIMEOUT):
+        super().__init__(device, writable)
+        self.console = Console(port, timeout=timeout)
+
+    def __enter__(self):
+        self.console.__enter__()
+        # AdbCard's entry checks are transport-independent. On failure it calls
+        # this class's __exit__, which also closes the console.
+        return super().__enter__()
+
+    def __exit__(self, exception_type=None, exception=None, traceback=None):
+        try:
+            return super().__exit__(exception_type, exception, traceback)
+        finally:
+            self.console.__exit__(exception_type, exception, traceback)
+
+    def shell(self, command, timeout=ADB_COMMAND_TIMEOUT):
+        try:
+            return self.console.checked(command, timeout=timeout)
+        except (OSError, TimeoutError, ProtocolError) as error:
+            raise UpgradeError(f"USB-console command failed: {error}") from error
+
+    def recover_uncertain_write(self):
+        # Recovery cannot use normal __enter__: the retained lock is precisely
+        # what that path must reject. Open only the transport around the common
+        # proof that no remote writer remains.
+        self.console.__enter__()
+        try:
+            return super().recover_uncertain_write()
+        finally:
+            self.console.__exit__(None, None, None)
+
+    def read(self, offset, size):
+        card_size = self.size()
+        if offset < 0 or size < 0 or offset + size > card_size:
+            raise UpgradeError("read is outside the card")
+        block = 4096
+        first = offset // block
+        inner = offset % block
+        total_blocks = (inner + size + block - 1) // block
+        blocks_per_chunk = SERIAL_READ_CHUNK // block
+        chunks = []
+        for consumed in range(0, total_blocks, blocks_per_chunk):
+            count = min(blocks_per_chunk, total_blocks - consumed)
+            expected = count * block
+            command = (f"/bin/busybox dd if={self.path} bs={block} "
+                       f"skip={first + consumed} count={count} 2>/dev/null | "
+                       f"/bin/busybox base64")
+            compact = b"".join(
+                self.shell(command, timeout=ADB_TRANSFER_TIMEOUT).split())
+            encoded_size = 4 * ((expected + 2) // 3)
+            if len(compact) != encoded_size:
+                raise UpgradeError(
+                    "invalid base64 USB-console card read length: "
+                    f"expected {encoded_size}, received {len(compact)}")
+            try:
+                chunk = base64.b64decode(compact, validate=True)
+            except binascii.Error as error:
+                raise UpgradeError("invalid base64 USB-console card read") from error
+            if len(chunk) != expected:
+                raise UpgradeError(
+                    "short USB-console card read: "
+                    f"expected {expected}, received {len(chunk)}")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        return data[inner:inner + size]
+
+    def write(self, offset, data):
+        if not self.writable:
+            raise UpgradeError("card was opened read-only")
+        if offset < BOOT_START or offset + len(data) > BOOT_END:
+            raise UpgradeError("refusing a write outside the reserved boot region")
+        if offset % 4096:
+            raise UpgradeError("USB-console writes must begin on a 4096-byte boundary")
+        remote = "/tmp/.brick-bootloader-" + uuid.uuid4().hex
+        self.remote_files.append(remote)
+        with tempfile.NamedTemporaryFile(prefix="brick-bootloader-write-", delete=False) as temporary:
+            temporary.write(data)
+            local = temporary.name
+        try:
+            try:
+                self.console.upload(local, remote, timeout=ADB_TRANSFER_TIMEOUT, raw=True)
+            except (OSError, TimeoutError, ProtocolError, ValueError) as error:
+                raise UpgradeError(f"USB-console upload failed: {error}") from error
+        finally:
+            os.unlink(local)
+        digest = sha256(data)
+        self.shell(f"printf '%s\\n' {remote} > {ADB_PAYLOAD_RECORD}; "
+                   f"printf '%s\\n' armed > {ADB_STATE_RECORD}")
+        # Split validation from the writer so every gadget-TTY command remains
+        # below the console's bounded input-line limit. A validation failure is
+        # known to precede the raw write and needs no retained writer lock.
+        self.shell(f"test \"$(/bin/busybox wc -c < {remote})\" = {len(data)}; "
+                   f"test \"$(/bin/busybox sha256sum {remote} | "
+                   f"/bin/busybox awk '{{print $1}}')\" = {digest}",
+                   timeout=ADB_TRANSFER_TIMEOUT)
+        try:
+            self.shell(f"set -e; printf '%s\\n' writing > {ADB_STATE_RECORD}; "
+                       f"/bin/busybox dd if={remote} of={self.path} bs=4096 "
+                       f"seek={offset // 4096} conv=notrunc; /bin/busybox sync; "
+                       f"printf '%s\\n' complete > {ADB_STATE_RECORD}",
+                       timeout=ADB_TRANSFER_TIMEOUT)
+        except BaseException as error:
+            self.uncertain_write = True
+            raise WriteUncertainError(
+                "USB-console raw-write completion is uncertain; reconnect, run "
+                "recover-console-lock, then use the saved backup with restore"
+            ) from error
 
 
 def authenticate(card, expected_cid):
@@ -715,7 +835,8 @@ def upgrade(card, candidate, candidate_identity, allowed, expected_cid, backup_p
         if isinstance(update_error, WriteUncertainError):
             raise RestoreError(
                 f"upgrade write state is uncertain; no automatic restore was started; "
-                f"reconnect, run recover-adb-lock, then restore from {backup_path}"
+                f"reconnect, recover the retained transport lock, then restore from "
+                f"{backup_path}"
             ) from update_error
         try:
             restore_region(card, original[BOOT_START:BOOT_END], expected_cid, card_layout)
@@ -787,6 +908,8 @@ def main(argv=None):
     update.add_argument("--dry-run", action="store_true")
     update.add_argument("--adb", metavar="PATH", help="operate through root stock ADB")
     update.add_argument("--serial", help="ADB device serial")
+    update.add_argument("--console-port", metavar="PATH",
+                        help="operate through running custom firmware USB console")
     recovery = subparsers.add_parser("restore", help="restore and verify a saved raw boot region")
     recovery.add_argument("device", type=Path)
     recovery.add_argument("backup", type=Path)
@@ -794,6 +917,8 @@ def main(argv=None):
     recovery.add_argument("--dry-run", action="store_true")
     recovery.add_argument("--adb", metavar="PATH", help="operate through root stock ADB")
     recovery.add_argument("--serial", help="ADB device serial")
+    recovery.add_argument("--console-port", metavar="PATH",
+                          help="operate through running custom firmware USB console")
     adb_recovery = subparsers.add_parser(
         "recover-adb-lock",
         help="prove an interrupted remote writer exited, then clear its retained lock",
@@ -801,6 +926,13 @@ def main(argv=None):
     adb_recovery.add_argument("device", type=Path)
     adb_recovery.add_argument("--adb", required=True, metavar="PATH")
     adb_recovery.add_argument("--serial", help="ADB device serial")
+    console_recovery = subparsers.add_parser(
+        "recover-console-lock",
+        help="prove an interrupted USB-console writer exited, then clear its retained lock",
+    )
+    console_recovery.add_argument("device", type=Path)
+    console_recovery.add_argument("--console-port", default=DEFAULT_CONSOLE_PORT,
+                                  metavar="PATH")
     args = parser.parse_args(argv)
 
     if args.action == "recover-adb-lock":
@@ -808,11 +940,23 @@ def main(argv=None):
                 serial=args.serial).recover_uncertain_write()
         print("ADB_WRITE_LOCK_RECOVERED")
         return
+    if args.action == "recover-console-lock":
+        SerialCard(str(args.device), writable=False,
+                   port=args.console_port).recover_uncertain_write()
+        print("CONSOLE_WRITE_LOCK_RECOVERED")
+        return
 
     writable = not args.dry_run
+    if args.adb and args.console_port:
+        parser.error("--adb and --console-port are mutually exclusive")
     if args.adb:
         card_context = AdbCard(str(args.device), writable=writable,
                                adb=args.adb, serial=args.serial)
+    elif args.console_port:
+        if args.serial:
+            parser.error("--serial requires --adb")
+        card_context = SerialCard(str(args.device), writable=writable,
+                                  port=args.console_port)
     else:
         if args.serial:
             parser.error("--serial requires --adb")

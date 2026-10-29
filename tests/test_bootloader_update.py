@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
 spec = importlib.util.spec_from_file_location("bootloader_update", TOOLS / "bootloader_update.py")
 boot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boot)
@@ -446,6 +448,35 @@ class FakeAdb:
         return self.completed(argv)
 
 
+class FakeSerialConsole:
+    def __init__(self, backend):
+        self.backend = backend
+        self.uploads = []
+        self.commands = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def checked(self, command, timeout=None):
+        self.commands.append(command)
+        try:
+            result = self.backend(["mock-adb", "shell", command], timeout=timeout)
+        except boot.subprocess.TimeoutExpired as error:
+            raise boot.ProtocolError("injected serial timeout") from error
+        if result.returncode:
+            raise boot.ProtocolError(result.stderr.decode(errors="replace"))
+        return result.stdout
+
+    def upload(self, local, destination, timeout=None, raw=False):
+        content = Path(local).read_bytes()
+        self.backend.remote[destination] = content
+        self.uploads.append((destination, timeout, raw))
+        return hashlib.sha256(content).hexdigest()
+
+
 class AdbBackendTests(unittest.TestCase):
     def fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="brick-adb-bootloader-")
@@ -610,6 +641,81 @@ class AdbBackendTests(unittest.TestCase):
                                  CID, backup)
                     fake.fail_cleanup = True
         self.assertTrue(fake.locked)
+
+
+class SerialBackendTests(unittest.TestCase):
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="brick-serial-bootloader-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        current = image(42001, 0x21)
+        candidate = image(56003, 0x37)
+        identity, _manifest = authorized(candidate)
+        original = current + bytes([0xA5] * (boot.BOOT_SIZE - len(current)))
+        disk = bytearray(boot.BOOT_END)
+        disk[:512] = mbr()
+        disk[boot.BOOT_START:boot.BOOT_END] = original
+        backend = FakeAdb(disk)
+        return root, current, candidate, identity, original, disk, backend
+
+    def open(self, backend, writable):
+        card = boot.SerialCard("/dev/mmcblk1", writable=writable, port="mock")
+        card.console = FakeSerialConsole(backend)
+        return card
+
+    def test_console_upgrade_uses_host_backup_and_bounded_raw_write(self):
+        root, current, candidate, identity, original, disk, backend = self.fixture()
+        backup = root / "backup.bin"
+        initial_prefix = bytes(disk[:boot.BOOT_START])
+        with self.open(backend, writable=True) as card:
+            boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                         CID, backup)
+
+        self.assertEqual(backup.read_bytes(), initial_prefix + original)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END],
+                         candidate + original[len(candidate):])
+        self.assertEqual(backend.destructive_calls, 1)
+        self.assertTrue(any(raw for _path, _timeout, raw in card.console.uploads))
+        reads = [command for command in card.console.commands
+                 if command.startswith("/bin/busybox dd if=/dev/mmcblk1")]
+        self.assertGreater(len(reads), 10)
+        counts = [int(command.split("count=", 1)[1].split()[0]) for command in reads]
+        self.assertTrue(all(1 <= count <= 64 for count in counts))
+        self.assertTrue(all(len(line.encode()) < 512
+                            for command in card.console.commands
+                            for line in command.splitlines()))
+
+    def test_console_dry_run_never_uploads_or_writes(self):
+        root, current, candidate, identity, original, disk, backend = self.fixture()
+        backup = root / "backup.bin"
+        with self.open(backend, writable=False) as card:
+            boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                         CID, backup, dry_run=True)
+        self.assertEqual(disk[boot.BOOT_START:boot.BOOT_END], original)
+        self.assertEqual(card.console.uploads, [])
+        self.assertEqual(backend.destructive_calls, 0)
+
+    def test_console_timeout_preserves_lock_and_never_overlaps_restore(self):
+        root, current, candidate, identity, _original, _disk, backend = self.fixture()
+        backend.fail_write = "timeout"
+        backup = root / "backup.bin"
+        with self.assertRaisesRegex(boot.RestoreError, "no automatic restore"):
+            with self.open(backend, writable=True) as card:
+                boot.upgrade(card, candidate, identity, [("known.bin", current)],
+                             CID, backup)
+        self.assertEqual(backend.destructive_calls, 1)
+        self.assertTrue(backend.locked)
+        self.assertIsNotNone(backend.payload_record)
+
+    def test_console_recovery_opens_transport_without_entering_update_lock(self):
+        _root, _current, _candidate, _identity, _original, _disk, backend = self.fixture()
+        backend.locked = True
+        backend.payload_record = "/tmp/.brick-bootloader-" + "a" * 32
+        backend.write_state = "complete"
+        card = self.open(backend, writable=False)
+        card.recover_uncertain_write()
+        self.assertFalse(backend.locked)
+        self.assertIsNone(backend.payload_record)
 
 
 if __name__ == "__main__":
