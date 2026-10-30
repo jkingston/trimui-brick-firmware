@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 20:35:00 +0000
+Subject: [PATCH] sunxi: initialize Brick radio reference clocks
+
+The stock boot chain selects hosc32k for the XR829 low-power output and
+enables both that output and the 24 MHz DCXO reference.  Linux can gate both
+outputs after the final radio user releases them, so a subsequent direct SD
+boot must restore the stock boot state before handing the clocks back to the
+kernel.
+
+Change only the vendor clock driver's documented mux, divider and gate bits.
+Preserve the oscillator calibration and every unrelated RTC register field.
+---
+ arch/arm/mach-sunxi/clock_sun50i_h6.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/arch/arm/mach-sunxi/clock_sun50i_h6.c b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+index 741f865..e966e80 100644
+--- a/arch/arm/mach-sunxi/clock_sun50i_h6.c
++++ b/arch/arm/mach-sunxi/clock_sun50i_h6.c
+@@ -10,6 +10,12 @@
+ #define SUNXI_CPU_PLL_CFG_BASE 0
+ #endif
+ 
++#define A133_RTC_BUS_GATE	0x20c
++#define A133_RTC_LOSC_OUT	0x60
++#define A133_RTC_DCXO_OUT	0x160
++#define A133_RTC_LOSC_SOURCE	GENMASK(2, 1)
++#define A133_RTC_LOSC_HOSC32K	(2 << 1)
++
+ #ifdef CONFIG_XPL_BUILD
+ void clock_init_safe(void)
+ {
+@@ -47,6 +53,22 @@ void clock_init_safe(void)
+ 		clrsetbits_le32(prcm + CCU_PRCM_PLL_LDO_CFG, 0x70000,
+ 				0xA7000000 | 0x40005);
+ 	}
++
++	if (IS_ENABLED(CONFIG_MACH_SUN50I_A133)) {
++		void *const rtc = (void *)SUNXI_RTC_BASE;
++
++		/*
++		 * Match the Brick stock boot state.  The A133 vendor clock driver
++		 * uses RTC+0x60 bits 2:1 for the LOSC output parent, bit 16 for
++		 * hosc32k and bit 0 for the output gate.  RTC+0x160 bit 31 is the
++		 * active-low DCXO output gate.  Retain all calibration fields.
++		 */
++		setbits_le32(prcm + A133_RTC_BUS_GATE, BIT(16) | BIT(0));
++		clrsetbits_le32(rtc + A133_RTC_LOSC_OUT,
++				A133_RTC_LOSC_SOURCE,
++				A133_RTC_LOSC_HOSC32K | BIT(16) | BIT(0));
++		clrbits_le32(rtc + A133_RTC_DCXO_OUT, BIT(31));
++	}
+ 
+ 	clock_set_pll1(408000000);
+ 
+-- 
+2.53.0
