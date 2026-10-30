@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,16 @@ class CpuIdleProfileTests(unittest.TestCase):
         scp_profile.configure(self.config, 'disabled')
         usb_profile.configure(self.config, 'peripheral', 'disabled')
         self.assertEqual(self.config.read_text(), before)
+
+    def test_product_deep_profile_reaches_product_validator(self):
+        scp_profile.configure(self.config, 'deep')
+        usb_profile.configure(self.config, 'peripheral', 'deep')
+        dtb = self.root / f'{usb_profile.NATIVE_DEEP_DTB}.dtb'
+        dtb.touch()
+        with mock.patch.object(cpu_idle_profile, 'validate') as validate:
+            cpu_idle_profile.install(self.root, self.config, self.root / 'fdtget')
+        validate.assert_called_once_with(self.root / 'fdtget', dtb,
+                                         qualification=False)
 
     def test_startup_scp_is_not_a_complete_idle_pair(self):
         scp_profile.configure(self.config, 'startup')

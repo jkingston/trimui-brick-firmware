@@ -7,7 +7,7 @@ import subprocess
 
 from emmc_recovery import enabled as emmc_recovery_enabled
 from scp_profile import profile as scp_profile
-from usb_profile import (NATIVE_DEEP_IDLE_DTB, NATIVE_IDLE_DTB,
+from usb_profile import (NATIVE_DEEP_DTB, NATIVE_DEEP_IDLE_DTB, NATIVE_IDLE_DTB,
                          expected_dtb as usb_expected_dtb,
                          profile as usb_profile)
 
