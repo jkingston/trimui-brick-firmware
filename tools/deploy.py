@@ -223,6 +223,8 @@ def verify_boot_manifest(actual, expected):
         raise ProtocolError('Boot CE/TRNG qualification profile does not match expected image')
     if actual.get('combined_accelerator_qualification', False) != expected.get('combined_accelerator_qualification', False):
         raise ProtocolError('Boot combined accelerator profile does not match expected image')
+    if actual.get('cpu_idle_qualification', False) != expected.get('cpu_idle_qualification', False):
+        raise ProtocolError('Boot CPU-idle qualification profile does not match expected image')
     for field in ('firmware', 'kernel', 'config_sha256'):
         if actual[field] != expected[field]:
             raise ProtocolError(f'Running rootfs has different {field} metadata')
@@ -271,6 +273,8 @@ def main():
                         help='explicitly permit deploying a CE/TRNG qualification profile')
     parser.add_argument('--combined-accelerator-qualification', action='store_true',
                         help='explicitly permit deploying the combined accelerator profile')
+    parser.add_argument('--cpu-idle-qualification', action='store_true',
+                        help='explicitly permit deploying the CPU-idle qualification profile')
     args = parser.parse_args()
     token = 'brick-update-' + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='brick-update-') as temporary:
@@ -289,6 +293,8 @@ def main():
         if (manifest.get('combined_accelerator_qualification', False) and
                 not args.combined_accelerator_qualification):
             raise ValueError('Use --combined-accelerator-qualification for the combined accelerator profile')
+        if manifest.get('cpu_idle_qualification', False) and not args.cpu_idle_qualification:
+            raise ValueError('Use --cpu-idle-qualification for the CPU-idle qualification profile')
         script = directory / 'install.sh'
         script.write_text(install_script(token))
         with Console(args.port) as console:
