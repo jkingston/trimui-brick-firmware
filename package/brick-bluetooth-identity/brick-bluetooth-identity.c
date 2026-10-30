@@ -22,15 +22,18 @@
 #define MGMT_INDEX_NONE 0xffff
 #define MGMT_OP_READ_INDEX_LIST 0x0003
 #define MGMT_OP_READ_INFO 0x0004
+#define MGMT_OP_READ_UNCONF_INDEX_LIST 0x0036
+#define MGMT_OP_READ_CONFIG_INFO 0x0037
 #define MGMT_OP_SET_PUBLIC_ADDRESS 0x0039
 #define MGMT_EV_CMD_COMPLETE 0x0001
 #define MGMT_EV_CMD_STATUS 0x0002
 #define MGMT_SETTING_POWERED (1U << 0)
 #define MGMT_SETTING_BREDR (1U << 7)
 #define MGMT_SETTING_LE (1U << 9)
+#define MGMT_OPTION_PUBLIC_ADDRESS (1U << 1)
 #define XR829_MANUFACTURER 1597
 #define COMMAND_TIMEOUT_MS 5000
-#define CONTROLLER_TIMEOUT_MS 25000
+#define APPLY_TIMEOUT_MS 15000
 #ifndef DATA_STATE
 #define DATA_STATE "/run/brick-data/state"
 #endif
@@ -67,6 +70,24 @@ struct __attribute__((packed)) mgmt_info {
 	uint8_t device_class[3];
 	uint8_t name[249];
 	uint8_t short_name[11];
+};
+
+struct __attribute__((packed)) mgmt_config_info {
+	uint16_t manufacturer;
+	uint32_t supported;
+	uint32_t missing;
+};
+
+enum controller_state {
+	CONTROLLER_NORMAL,
+	CONTROLLER_UNCONFIGURED,
+};
+
+struct controller {
+	uint16_t index;
+	enum controller_state state;
+	struct mgmt_info info;
+	struct mgmt_config_info config;
 };
 
 static int hex_digit(int c)
@@ -263,42 +284,79 @@ static int read_info(int fd, uint16_t index, struct mgmt_info *info)
 	return err ?: (size == sizeof(*info) ? 0 : -EPROTO);
 }
 
-static int find_xr829(int fd, uint16_t *selected, struct mgmt_info *selected_info)
+static int read_config_info(int fd, uint16_t index,
+			    struct mgmt_config_info *info)
+{
+	size_t size = sizeof(*info);
+	int err = mgmt_command(fd, MGMT_OP_READ_CONFIG_INFO, index, NULL, 0,
+			       info, &size);
+
+	return err ?: (size == sizeof(*info) ? 0 : -EPROTO);
+}
+
+static int find_in_list(int fd, uint16_t opcode, struct controller *selected,
+			int *found)
 {
 	uint8_t list[514];
-	int64_t end = milliseconds() + CONTROLLER_TIMEOUT_MS;
+	size_t size = sizeof(list);
+	uint16_t count;
+	int err = mgmt_command(fd, opcode, MGMT_INDEX_NONE, NULL, 0, list, &size);
+
+	if (err)
+		return err;
+	if (size < 2)
+		return -EPROTO;
+	memcpy(&count, list, sizeof(count));
+	count = le16toh(count);
+	if (size != 2 + (size_t)count * 2)
+		return -EPROTO;
+	for (uint16_t i = 0; i < count; i++) {
+		struct controller candidate = { 0 };
+
+		memcpy(&candidate.index, list + 2 + i * 2,
+		       sizeof(candidate.index));
+		candidate.index = le16toh(candidate.index);
+		if (opcode == MGMT_OP_READ_INDEX_LIST) {
+			candidate.state = CONTROLLER_NORMAL;
+			if (read_info(fd, candidate.index, &candidate.info) ||
+			    le16toh(candidate.info.manufacturer) != XR829_MANUFACTURER)
+				continue;
+		} else {
+			candidate.state = CONTROLLER_UNCONFIGURED;
+			if (read_config_info(fd, candidate.index, &candidate.config) ||
+			    le16toh(candidate.config.manufacturer) != XR829_MANUFACTURER ||
+			    !(le32toh(candidate.config.supported) &
+			      MGMT_OPTION_PUBLIC_ADDRESS))
+				continue;
+		}
+		if ((*found)++)
+			return -EEXIST;
+		*selected = candidate;
+	}
+	return 0;
+}
+
+static int find_xr829_once(int fd, struct controller *selected)
+{
+	int found = 0;
+	int err = find_in_list(fd, MGMT_OP_READ_INDEX_LIST, selected, &found);
+
+	if (!err)
+		err = find_in_list(fd, MGMT_OP_READ_UNCONF_INDEX_LIST,
+				   selected, &found);
+	return err ?: (found == 1 ? 0 : -ENOENT);
+}
+
+static int find_xr829(int fd, int64_t end, struct controller *selected)
+{
+	int err;
 
 	while (milliseconds() < end) {
-		size_t size = sizeof(list);
-		uint16_t count;
-		int found = 0;
-		int err = mgmt_command(fd, MGMT_OP_READ_INDEX_LIST,
-				       MGMT_INDEX_NONE, NULL, 0, list, &size);
-
-		if (err)
-			return err;
-		if (size < 2)
-			return -EPROTO;
-		memcpy(&count, list, sizeof(count));
-		count = le16toh(count);
-		if (size != 2 + (size_t)count * 2)
-			return -EPROTO;
-		for (uint16_t i = 0; i < count; i++) {
-			uint16_t index;
-			struct mgmt_info info;
-
-			memcpy(&index, list + 2 + i * 2, sizeof(index));
-			index = le16toh(index);
-			if (read_info(fd, index, &info) ||
-			    le16toh(info.manufacturer) != XR829_MANUFACTURER)
-				continue;
-			if (found++)
-				return -EEXIST;
-			*selected = index;
-			*selected_info = info;
-		}
-		if (found == 1)
+		err = find_xr829_once(fd, selected);
+		if (!err)
 			return 0;
+		if (err != -ENOENT)
+			return err;
 		usleep(100000);
 	}
 	return -ETIMEDOUT;
@@ -311,8 +369,8 @@ static int apply_address(const uint8_t address[6])
 		.dev = MGMT_INDEX_NONE,
 		.channel = HCI_CHANNEL_CONTROL,
 	};
-	struct mgmt_info info;
-	uint16_t index = 0;
+	struct controller controller;
+	int64_t end = milliseconds() + APPLY_TIMEOUT_MS;
 	int fd = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
 	int err;
 
@@ -323,55 +381,75 @@ static int apply_address(const uint8_t address[6])
 		err = -errno;
 		goto out;
 	}
-	err = find_xr829(fd, &index, &info);
+	err = find_xr829(fd, end, &controller);
 	if (err)
 		goto out;
-	if ((le32toh(info.supported) & (MGMT_SETTING_BREDR | MGMT_SETTING_LE)) !=
+	if (controller.state == CONTROLLER_NORMAL &&
+	    (le32toh(controller.info.supported) &
+	     (MGMT_SETTING_BREDR | MGMT_SETTING_LE)) !=
 	    (MGMT_SETTING_BREDR | MGMT_SETTING_LE)) {
 		err = -ENOTSUP;
+		goto out;
+	}
+	if (controller.state == CONTROLLER_UNCONFIGURED &&
+	    !(le32toh(controller.config.missing) &
+	      MGMT_OPTION_PUBLIC_ADDRESS)) {
+		err = -EBUSY;
 		goto out;
 	}
 	/* Registration briefly powers the controller.  S39 runs before any
 	 * Bluetooth consumer, so wait for the core's automatic power-off rather
 	 * than turning a legitimate boot-time race into a permanent boot failure.
 	 */
-	int64_t end = milliseconds() + CONTROLLER_TIMEOUT_MS;
-	while (le32toh(info.current) & MGMT_SETTING_POWERED) {
+	while (controller.state == CONTROLLER_NORMAL &&
+	       (le32toh(controller.info.current) & MGMT_SETTING_POWERED)) {
 		if (milliseconds() >= end) {
 			err = -EBUSY;
 			goto out;
 		}
 		usleep(100000);
-		err = read_info(fd, index, &info);
+		err = read_info(fd, controller.index, &controller.info);
 		if (err)
 			goto out;
-		if (le16toh(info.manufacturer) != XR829_MANUFACTURER) {
+		if (le16toh(controller.info.manufacturer) != XR829_MANUFACTURER) {
 			err = -ENODEV;
 			goto out;
 		}
 	}
-	if (!memcmp(info.address, address, 6)) {
+	if (controller.state == CONTROLLER_NORMAL &&
+	    !memcmp(controller.info.address, address, 6)) {
 		err = 0;
 		goto out;
 	}
 	size_t size = sizeof(uint32_t);
 	uint32_t options;
 
-	err = mgmt_command(fd, MGMT_OP_SET_PUBLIC_ADDRESS, index, address, 6,
+	err = mgmt_command(fd, MGMT_OP_SET_PUBLIC_ADDRESS, controller.index,
+			   address, 6,
 			   &options, &size);
 	if (err || size != sizeof(options)) {
 		err = err ?: -EPROTO;
 		goto out;
 	}
-	end = milliseconds() + CONTROLLER_TIMEOUT_MS;
 	while (milliseconds() < end) {
-		if (!read_info(fd, index, &info) &&
-		    le16toh(info.manufacturer) == XR829_MANUFACTURER &&
-		    !memcmp(info.address, address, 6) &&
-		    !(le32toh(info.current) & MGMT_SETTING_POWERED)) {
+		err = find_xr829_once(fd, &controller);
+		if (!err && controller.state == CONTROLLER_NORMAL &&
+		    !memcmp(controller.info.address, address, 6) &&
+		    !(le32toh(controller.info.current) & MGMT_SETTING_POWERED)) {
 			err = 0;
 			goto out;
 		}
+		if (!err && controller.state == CONTROLLER_NORMAL &&
+		    memcmp(controller.info.address, address, 6)) {
+			err = -EADDRNOTAVAIL;
+			goto out;
+		}
+		if (!err && controller.state == CONTROLLER_UNCONFIGURED) {
+			err = -EIO;
+			goto out;
+		}
+		if (err != -ENOENT)
+			goto out;
 		usleep(100000);
 	}
 	err = -ETIMEDOUT;
