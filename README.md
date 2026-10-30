@@ -41,10 +41,8 @@ Import the preserved stock Bluetooth address once after the new image boots:
 python3 tools/provision_bluetooth_identity.py /path/to/xr_bt.conf
 ```
 
-The default image uses the bottom port as a USB peripheral and leaves internal
-eMMC, video/G2D/crypto accelerator nodes, and the experimental deep-sleep
-profile disabled until they pass device qualification. Run `make check` for the
-host test suite.
+The bottom port defaults to USB peripheral mode. Internal eMMC remains disabled
+to protect the stock installation. Run `make check` for the host test suite.
 
 Build scripts and tools are GPL-2.0-only. Third-party components retain their
 own licenses.
