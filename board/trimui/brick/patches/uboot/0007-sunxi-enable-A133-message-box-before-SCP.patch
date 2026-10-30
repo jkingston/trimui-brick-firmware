@@ -19,7 +19,7 @@ diff --git a/arch/arm/mach-sunxi/a133_vendor_scp.c b/arch/arm/mach-sunxi/a133_ve
  
  #define A133_SCP_HAVE_IMAGE		BIT(0)
  #define A133_SCP_HAVE_FDT		BIT(1)
-@@ -161,6 +163,19 @@
+@@ -177,6 +179,19 @@ static int a133_scp_set_reset(bool asserted)
  	return -ETIMEDOUT;
  }
  
@@ -36,9 +36,9 @@ diff --git a/arch/arm/mach-sunxi/a133_vendor_scp.c b/arch/arm/mach-sunxi/a133_ve
 +	return 0;
 +}
 +
- static int a133_scp_start(void)
- {
- 	void *dram_dst, *fdt_dst, *fdt_src, *scp_dst, *scp_src;
+ /*
+  * The A133 CPU view exposes sparse OpenRISC vectors, then 64 KiB of SRAM.
+  * Match shipped Boot0's aligned word accesses without touching vector holes.
 @@ -207,6 +222,9 @@
  	flush_dcache_range(A133_SCP_FDT_BASE,
  			   A133_SCP_FDT_BASE + A133_SCP_FDT_SIZE);

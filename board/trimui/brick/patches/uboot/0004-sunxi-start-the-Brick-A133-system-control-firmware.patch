@@ -158,7 +158,7 @@ new file mode 100644
 index 00000000000..e0a21b6d55e
 --- /dev/null
 +++ b/arch/arm/mach-sunxi/a133_vendor_scp.c
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,333 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Fail-closed boot boundary for the exact A133 vendor SCP used by the Brick.
