@@ -1,0 +1,229 @@
+From 2035e47c6448adfc426f233f72f981ddfd5e9f31 Mon Sep 17 00:00:00 2001
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 13:12:36 +0000
+Subject: [PATCH] fix(allwinner): restore A133 secondary CPUs after suspend
+
+Keep the retained context coherent for the cache-off commit phase, accept the
+Brick's 192-interrupt GIC, and re-arm each secondary RVBAR immediately before
+releasing that CPU from reset. Avoid writing RVBAR through the sleeping CPU
+subsystem during the primary resume path.
+---
+ plat/allwinner/common/include/sunxi_private.h |  1 +
+ plat/allwinner/common/sunxi_a133_gic.c        |  5 ++--
+ .../common/sunxi_a133_secure_context.c        | 26 +++++--------------
+ .../common/sunxi_a133_system_suspend.c        |  6 +++++
+ plat/allwinner/common/sunxi_cpu_ops.c         | 26 +++++++++++++++++++
+ plat/allwinner/common/sunxi_pm.c              |  1 +
+ .../common/tests/test_sunxi_a133_gic.c        |  7 +++++
+ .../tests/test_sunxi_a133_secure_context.c    | 15 +++++------
+ 8 files changed, 56 insertions(+), 31 deletions(-)
+
+diff --git a/plat/allwinner/common/include/sunxi_private.h b/plat/allwinner/common/include/sunxi_private.h
+index b9ca3f600..feec2e788 100644
+--- a/plat/allwinner/common/include/sunxi_private.h
++++ b/plat/allwinner/common/include/sunxi_private.h
+@@ -16,6 +16,7 @@ extern const struct psci_cpu_idle_state sunxi_idle_states[];
+ void sunxi_configure_mmu_el3(int flags);
+ 
+ void sunxi_cpu_on(u_register_t mpidr);
++void sunxi_cpu_set_entrypoint(uintptr_t entrypoint);
+ void sunxi_cpu_power_off_others(void);
+ void sunxi_cpu_power_off_self(void);
+ void sunxi_power_down(void);
+diff --git a/plat/allwinner/common/sunxi_a133_gic.c b/plat/allwinner/common/sunxi_a133_gic.c
+index bcbb81a97..ff70e27a1 100644
+--- a/plat/allwinner/common/sunxi_a133_gic.c
++++ b/plat/allwinner/common/sunxi_a133_gic.c
+@@ -47,10 +47,9 @@ bool sunxi_a133_gic_reset(const struct sunxi_a133_gic_backend *backend)
+ 		A133_GICD_BASE + GICD_TYPER) & 0x1fU) + 1U) * 32U;
+ 	/*
+ 	 * Stock rejects fewer than 160 interrupts, then executes fixed A133
+-	 * loops. Requiring the exact known implementation fails closed if this
+-	 * platform code is ever used on a different GIC.
++	 * loops. The Brick reports 192 implemented interrupts at runtime.
+ 	 */
+-	if (num_interrupts != A133_GIC_NUM_INTERRUPTS) {
++	if (num_interrupts < A133_GIC_NUM_INTERRUPTS) {
+ 		return false;
+ 	}
+ 
+diff --git a/plat/allwinner/common/sunxi_a133_secure_context.c b/plat/allwinner/common/sunxi_a133_secure_context.c
+index 090b662e8..e8d28de40 100644
+--- a/plat/allwinner/common/sunxi_a133_secure_context.c
++++ b/plat/allwinner/common/sunxi_a133_secure_context.c
+@@ -8,8 +8,6 @@
+ 
+ #include <sunxi_a133_secure_context.h>
+ 
+-#define A133_CPU_COUNT			4U
+-
+ #define A133_SYSCON_RESUME_REG		0x03000004U
+ #define A133_PLL_COM_REG		0x03001060U
+ #define A133_CCU_SEC_SWITCH_REG		0x03001f00U
+@@ -22,8 +20,6 @@
+ #define A133_GICC_CTLR_REG		0x03022000U
+ #define A133_NSI_BASE			0x03100000U
+ #define A133_R_PRCM_SEC_SWITCH_REG	0x07010290U
+-#define A133_CPU_RVBAR_LO_REG(cpu)	(0x08100040U + (cpu) * 8U)
+-#define A133_CPU_RVBAR_HI_REG(cpu)	(0x08100044U + (cpu) * 8U)
+ #define A133_COUNTER_LOW_REG		0x08110000U
+ #define A133_COUNTER_HIGH_REG		0x08110004U
+ #define A133_COUNTER_CTRL_REG		0x08120000U
+@@ -92,17 +88,6 @@ static void write_32(struct sunxi_a133_secure_context *context,
+ 	context->backend.write_32(context->backend.cookie, address, value);
+ }
+ 
+-static void restore_trusted_rvbar(struct sunxi_a133_secure_context *context)
+-{
+-	unsigned int cpu;
+-
+-	for (cpu = 0U; cpu < A133_CPU_COUNT; ++cpu) {
+-		write_32(context, A133_CPU_RVBAR_LO_REG(cpu),
+-			 context->trusted_warm_entry);
+-		write_32(context, A133_CPU_RVBAR_HI_REG(cpu), 0U);
+-	}
+-}
+-
+ static void restore_security_policy(
+ 	struct sunxi_a133_secure_context *context)
+ {
+@@ -268,11 +253,14 @@ int sunxi_a133_secure_context_restore_early(
+ 		return SUNXI_A133_CONTEXT_ESTATE;
+ 	}
+ 
+-	restore_trusted_rvbar(context);
+ 	/*
+-	 * Stock resets the complete distributor before RESTORE_NOTIFY. Linux's
+-	 * CPU-PM syscore notifier has already saved all normal-world Group-1
+-	 * state and restores it after PSCI returns.
++	 * The SCP has already installed CPU0's secure resume vector before it
++	 * releases the core. Match stock's callback: reset the distributor, then
++	 * send RESTORE_NOTIFY without replaying RVBAR through the sleeping CPU
++	 * subsystem.
++	 *
++	 * Linux's CPU-PM syscore notifier has already saved all normal-world
++	 * Group-1 state and restores it after PSCI returns.
+ 	 */
+ 	if (!context->backend.gic_reset(context->backend.cookie)) {
+ 		context->phase = SUNXI_A133_CONTEXT_FAILED;
+diff --git a/plat/allwinner/common/sunxi_a133_system_suspend.c b/plat/allwinner/common/sunxi_a133_system_suspend.c
+index 181f0c4e9..15784ac93 100644
+--- a/plat/allwinner/common/sunxi_a133_system_suspend.c
++++ b/plat/allwinner/common/sunxi_a133_system_suspend.c
+@@ -127,6 +127,12 @@ int sunxi_a133_system_suspend_prepare(
+ 	if (ret != SUNXI_A133_CONTEXT_OK) {
+ 		return ret;
+ 	}
++	/*
++	 * The commit callback runs after PSCI has disabled the data cache.
++	 * Publish the retained context to DRAM before entering that phase.
++	 */
++	clean_dcache_range((uintptr_t)&a133_secure_context,
++			   sizeof(a133_secure_context));
+ 
+ 	ret = sunxi_a133_psci_bridge_runtime_prepare(target_state, mpidr);
+ 	if (ret != SUNXI_A133_SUSPEND_OK) {
+diff --git a/plat/allwinner/common/sunxi_cpu_ops.c b/plat/allwinner/common/sunxi_cpu_ops.c
+index 30841e2ea..544e7cd86 100644
+--- a/plat/allwinner/common/sunxi_cpu_ops.c
++++ b/plat/allwinner/common/sunxi_cpu_ops.c
+@@ -25,6 +25,14 @@
+ #define SUNXI_CPU_CTRL_REG(n)		0
+ #endif
+ 
++static uintptr_t sunxi_cpu_entrypoint;
++
++void sunxi_cpu_set_entrypoint(uintptr_t entrypoint)
++{
++	assert(entrypoint != 0U);
++	sunxi_cpu_entrypoint = entrypoint;
++}
++
+ static void sunxi_cpu_disable_power(unsigned int cluster, unsigned int core)
+ {
+ 	if (mmio_read_32(SUNXI_CPU_POWER_CLAMP_REG(cluster, core)) == 0xff)
+@@ -91,6 +99,24 @@ void sunxi_cpu_on(u_register_t mpidr)
+ 	unsigned int core    = MPIDR_AFFLVL0_VAL(mpidr);
+ 
+ 	VERBOSE("PSCI: Powering on cluster %d core %d\n", cluster, core);
++	assert(sunxi_cpu_entrypoint != 0U);
++
++	/*
++	 * System suspend clears the secondary RVBARs. Program the requested
++	 * core immediately before releasing reset, as the cold-boot value is no
++	 * longer present when Linux brings secondary CPUs back online.
++	 */
++	if (sunxi_cpucfg_has_per_cluster_regs()) {
++		mmio_write_32(SUNXI_CPUCFG_RVBAR_LO_REG(core),
++			      (uint32_t)sunxi_cpu_entrypoint);
++		mmio_write_32(SUNXI_CPUCFG_RVBAR_HI_REG(core),
++			      (uint32_t)(sunxi_cpu_entrypoint >> 32));
++	} else {
++		mmio_write_32(SUNXI_ALT_RVBAR_LO_REG(core),
++			      (uint32_t)sunxi_cpu_entrypoint);
++		mmio_write_32(SUNXI_ALT_RVBAR_HI_REG(core),
++			      (uint32_t)(sunxi_cpu_entrypoint >> 32));
++	}
+ 
+ 	if (sunxi_cpucfg_has_per_cluster_regs()) {
+ 		/* Assert CPU core reset */
+diff --git a/plat/allwinner/common/sunxi_pm.c b/plat/allwinner/common/sunxi_pm.c
+index 2686c400b..a8e1b818a 100644
+--- a/plat/allwinner/common/sunxi_pm.c
++++ b/plat/allwinner/common/sunxi_pm.c
+@@ -53,6 +53,7 @@ int plat_setup_psci_ops(uintptr_t sec_entrypoint,
+ 			const plat_psci_ops_t **psci_ops)
+ {
+ 	assert(psci_ops);
++	sunxi_cpu_set_entrypoint(sec_entrypoint);
+ 
+ #if defined(SUNXI_A133_CPUIDLE)
+ 	sunxi_a133_cpuidle_setup(sec_entrypoint);
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_gic.c b/plat/allwinner/common/tests/test_sunxi_a133_gic.c
+index a60e342e4..f7a8e91cc 100644
+--- a/plat/allwinner/common/tests/test_sunxi_a133_gic.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_gic.c
+@@ -86,6 +86,13 @@ int main(void)
+ 	}
+ 	expect(&fake, pos++, GICD + 0x000U, 3U);
+ 	assert(pos == fake.count);
++
++	/* The Brick's GICD_TYPER reports six banks (192 interrupts). */
++	fake.count = 0U;
++	fake.typer = 5U;
++	assert(sunxi_a133_gic_reset(&backend));
++	assert(fake.count == pos);
++
+ 	fake.count = 0U;
+ 	fake.typer = 3U;
+ 	assert(!sunxi_a133_gic_reset(&backend));
+diff --git a/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c b/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
+index 1f2e0f913..e7aa352fe 100644
+--- a/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
++++ b/plat/allwinner/common/tests/test_sunxi_a133_secure_context.c
+@@ -225,17 +225,14 @@ static void test_stock_order_and_exact_values(void)
+ 	restore_start = fake.event_count;
+ 	assert(sunxi_a133_secure_context_restore_early(&context) ==
+ 	       SUNXI_A133_CONTEXT_OK);
++	assert(fake.events[restore_start].kind == EVENT_GIC_RESET);
++	assert(fake.events[restore_start + 1U].kind == EVENT_FINISH);
+ 	for (cpu = 0U; cpu < 4U; ++cpu) {
+-		assert(fake.events[restore_start + cpu * 2U].kind == EVENT_WRITE);
+-		assert(fake.events[restore_start + cpu * 2U].address ==
+-		       RVBAR_LO(cpu));
+-		assert(fake.events[restore_start + cpu * 2U].value ==
+-		       0x40000100U);
+-		assert(fake.events[restore_start + cpu * 2U + 1U].address ==
+-		       RVBAR_HI(cpu));
+-		assert(fake.events[restore_start + cpu * 2U + 1U].value == 0U);
++		assert(find_event(&fake, restore_start, EVENT_WRITE,
++				  RVBAR_LO(cpu)) == fake.event_count);
++		assert(find_event(&fake, restore_start, EVENT_WRITE,
++				  RVBAR_HI(cpu)) == fake.event_count);
+ 	}
+-	assert(fake.events[restore_start + 8U].kind == EVENT_GIC_RESET);
+ 
+ 	finish = find_event(&fake, restore_start, EVENT_FINISH, 0U);
+ 	security = find_event(&fake, finish + 1U, EVENT_WRITE,
+-- 
+2.55.0
