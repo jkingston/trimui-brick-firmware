@@ -83,6 +83,7 @@ class CpuIdleProfileTests(unittest.TestCase):
         source_dts = ROOT.parent / 'kernel/arch/arm64/boot/dts/allwinner'
         for name in ('sun50i-a133-trimui-brick-native-idle.dts',
                      'sun50i-a133-trimui-brick-native-deep-idle.dts',
+                     'sun50i-a133-trimui-brick-native-deep.dts',
                      'sun50i-a133-stock-psci-idle.dtsi', 'Makefile'):
             (dts / name).write_bytes((source_dts / name).read_bytes())
         cpu_idle_profile.verify_kernel(self.config, kernel)
@@ -141,6 +142,18 @@ class CpuIdleProfileTests(unittest.TestCase):
         scp_profile.configure(self.config, 'deep')
         usb_profile.configure(self.config, 'peripheral', 'deep')
         cpu_idle_profile.configure(self.config, 'qualification')
+        cpu_idle_profile.install(self.root, self.config, fdtget)
+
+    def test_product_deep_compiled_idle_contract_is_accepted(self):
+        dtb, fdtget = self.compile_dtb()
+        fdtput = shutil.which('fdtput')
+        if not fdtput:
+            self.skipTest('fdtput is required')
+        subprocess.run([fdtput, '-d', dtb, '/chosen',
+                        cpu_idle_profile.MARKER], check=True)
+        dtb.rename(self.root / f'{usb_profile.NATIVE_DEEP_DTB}.dtb')
+        scp_profile.configure(self.config, 'deep')
+        usb_profile.configure(self.config, 'peripheral', 'deep')
         cpu_idle_profile.install(self.root, self.config, fdtget)
 
     def test_disabled_profile_verifies_compiled_payload_is_idle_free(self):

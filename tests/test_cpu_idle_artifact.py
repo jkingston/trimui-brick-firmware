@@ -55,14 +55,15 @@ class CpuIdleArtifactTests(unittest.TestCase):
             cpu_idle_artifact.verify_symbols(
                 self.config, cpu_idle_artifact.NATIVE_SYMBOLS | partial)
 
-    def test_deep_only_requires_shared_callbacks_without_cpu_idle(self):
+    def test_product_deep_requires_native_and_system_features(self):
         self.select_deep()
-        deep = (cpu_idle_artifact.SUSPEND_SYMBOLS |
+        deep = (cpu_idle_artifact.NATIVE_SYMBOLS |
+                cpu_idle_artifact.SUSPEND_SYMBOLS |
                 cpu_idle_artifact.SYSTEM_SYMBOLS)
         cpu_idle_artifact.verify_symbols(self.config, deep)
         with self.assertRaisesRegex(ValueError, 'CPU-suspend all-or-none'):
             cpu_idle_artifact.verify_symbols(
-                self.config, deep | cpu_idle_artifact.NATIVE_SYMBOLS)
+                self.config, deep - cpu_idle_artifact.NATIVE_SYMBOLS)
         with self.assertRaisesRegex(ValueError, 'suspend callbacks'):
             cpu_idle_artifact.verify_symbols(
                 self.config, cpu_idle_artifact.SYSTEM_SYMBOLS)

@@ -8,6 +8,7 @@ import subprocess
 from cpu_idle_profile import (DEEP_DTB, DTB, enabled as idle_enabled,
                               selected_dtb)
 from scp_profile import profile as scp_profile
+from usb_profile import NATIVE_DEEP_DTB
 
 
 NATIVE_SYMBOLS = {
@@ -45,10 +46,11 @@ def verify_symbols(config, symbols):
     native = _complete(symbols, NATIVE_SYMBOLS, 'native CPU-suspend support')
     suspend = _complete(symbols, SUSPEND_SYMBOLS, 'A133 suspend callbacks')
     system = _complete(symbols, SYSTEM_SYMBOLS, 'system-suspend support')
-    idle = idle_enabled(config)
+    qualification = idle_enabled(config)
     dtb = selected_dtb(config)
-    idle_dtb = dtb in {DTB, DEEP_DTB}
     deep = scp_profile(config) == 'deep'
+    idle = qualification or deep
+    idle_dtb = dtb in {DTB, DEEP_DTB, NATIVE_DEEP_DTB}
 
     if suspend != (idle or deep):
         raise ValueError('Produced BL31 suspend callbacks do not match the '
@@ -59,8 +61,8 @@ def verify_symbols(config, symbols):
     if system != deep:
         raise ValueError('Produced BL31 does not match the selected system '
                          'suspend profile')
-    if idle and deep and dtb != DEEP_DTB:
-        raise ValueError('Combined CPU and system suspend require the combined DTB')
+    if deep and dtb != (DEEP_DTB if qualification else NATIVE_DEEP_DTB):
+        raise ValueError('CPU and system suspend require the matching deep DTB')
     if idle and not deep and dtb != DTB:
         raise ValueError('Isolated CPU suspend requires the isolated idle DTB')
 

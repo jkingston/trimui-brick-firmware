@@ -127,10 +127,12 @@ def verify_kernel(config, kernel):
                     'sun50i-a133-trimui-brick-native-deep-idle.dts').read_text()
     if deep_wrapper.count(
             '#include "sun50i-a133-trimui-brick-native-deep.dts"') != 1 or \
-            deep_wrapper.count(
-                '#include "sun50i-a133-stock-psci-idle.dtsi"') != 1 or \
+            '#include "sun50i-a133-stock-psci-idle.dtsi"' in deep_wrapper or \
             MARKER not in deep_wrapper:
         raise ValueError('combined deep-idle wrapper lacks either exact contract')
+    product = (dts / 'sun50i-a133-trimui-brick-native-deep.dts').read_text()
+    if product.count('#include "sun50i-a133-stock-psci-idle.dtsi"') != 1:
+        raise ValueError('deep-sleep product lacks the qualified CPU-idle contract')
     idle = (dts / 'sun50i-a133-stock-psci-idle.dtsi').read_text()
     contracts = (
         'arm,psci-suspend-param = <0x00010000>;',
@@ -167,9 +169,12 @@ def _has_node(fdtget, dtb, node):
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def validate(fdtget, dtb):
-    if MARKER not in _properties(fdtget, dtb, '/chosen'):
+def validate(fdtget, dtb, qualification=True):
+    marked = MARKER in _properties(fdtget, dtb, '/chosen')
+    if qualification and not marked:
         raise ValueError('native CPU-idle payload lacks its qualification marker')
+    if not qualification and marked:
+        raise ValueError('product CPU-idle payload retains a qualification marker')
     if _get(fdtget, dtb, '/cpus/idle-states', 'entry-method') != 'psci':
         raise ValueError('native CPU-idle payload uses the wrong entry method')
     states = (
@@ -220,6 +225,11 @@ def install(images, config, fdtget):
     if not active:
         if selected in {DTB, DEEP_DTB}:
             raise ValueError('disabled CPU-idle profile selected an idle DTB')
+        if selected == NATIVE_DEEP_IDLE_DTB:
+            raise ValueError('disabled CPU-idle profile selected a qualification DTB')
+        if selected == NATIVE_DEEP_DTB:
+            validate(fdtget, dtb, qualification=False)
+            return
         validate_disabled(fdtget, dtb)
         return
     if selected_dtb(config) != expected_dtb(config) or \

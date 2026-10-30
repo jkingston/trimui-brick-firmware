@@ -46,9 +46,9 @@ config BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION
 config BR2_BRICK_CPU_IDLE_QUALIFICATION
 	bool "Brick native CPU-idle qualification profile"
 	help
-	  Build the matching TF-A and DT contracts for the stock A133 CPU and
-	  cluster idle states. The ordinary image does not advertise these
-	  states until on-device wake and coherency qualification is complete.
+	  Mark an isolated build of the matching TF-A and DT contracts for the
+	  stock A133 CPU and cluster idle states. The normal deep-sleep product
+	  profile includes the same qualified hardware contract.
 
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-accelerator-qualification/Config.in"
 source "$BR2_EXTERNAL_BRICK_PATH/package/brick-ce-trng-qualification/Config.in"
