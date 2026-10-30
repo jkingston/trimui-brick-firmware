@@ -14,6 +14,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import emmc_recovery
+import scp_profile
+import usb_profile
 
 
 class RecoveryProfileTests(unittest.TestCase):
@@ -23,6 +25,8 @@ class RecoveryProfileTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.config = self.root / 'config'
         self.config.write_bytes((ROOT / 'configs/brick_defconfig').read_bytes())
+        scp_profile.configure(self.config, 'disabled')
+        usb_profile.configure(self.config, 'peripheral', 'disabled')
 
     def compile_dtb(self, status='disabled', hs200=False):
         dtc = shutil.which('dtc')
