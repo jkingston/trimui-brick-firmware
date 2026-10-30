@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+release=/run/brick-boot-watchdog.release
+pidfile=/run/brick-boot-watchdog.pid
+
+managed_slot() {
+	case " $(cat /proc/cmdline) " in
+		*" brick.bootdir=brick-diag "*|*" brick.bootdir=brick-previous "*|*" brick.bootdir=brick-baseline "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+start() {
+	managed_slot || return 0
+	rm -f "$release" "$pidfile"
+	/usr/libexec/brick-boot-watchdog &
+	printf '%s\n' "$!" > "$pidfile"
+}
+
+stop() {
+	[ -f "$pidfile" ] || return 0
+	: > "$release"
+	lease=$(cat "$pidfile")
+	case "$lease" in *[!0-9]*|'') return 1 ;; esac
+	for ignored in 1 2 3 4 5; do
+		kill -0 "$lease" 2>/dev/null || return 0
+		sleep 1
+	done
+	! kill -0 "$lease" 2>/dev/null
+}
+
+case "${1:-}" in
+start|stop) "$1" ;;
+*) echo "Usage: $0 {start|stop}" >&2; exit 2 ;;
+esac

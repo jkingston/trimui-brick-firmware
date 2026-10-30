@@ -35,6 +35,16 @@ trap cleanup EXIT
 # Every selected slot inherits the handoff watchdog.  A verified recovery slot
 # must stop it too, but must leave the failed candidate rejected so the next
 # boot continues to use the recovery command.
+if [ -f /run/brick-boot-watchdog.pid ]; then
+	: > /run/brick-boot-watchdog.release
+	lease=$(cat /run/brick-boot-watchdog.pid)
+	case "$lease" in *[!0-9]*|'') exit 1 ;; esac
+	for ignored in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "$lease" 2>/dev/null || break
+		sleep 1
+	done
+	! kill -0 "$lease" 2>/dev/null
+fi
 printf V > /dev/watchdog
 
 if [ "$bootdir" != brick-diag ]; then

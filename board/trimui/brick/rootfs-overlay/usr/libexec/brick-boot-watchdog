@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+release=/run/brick-boot-watchdog.release
+start=$(cut -d. -f1 /proc/uptime)
+exec 8>/dev/watchdog
+
+while [ ! -e "$release" ]; do
+	now=$(cut -d. -f1 /proc/uptime)
+	if [ "$((now - start))" -ge 60 ]; then
+		# Keep the device open without servicing it. The hardware timeout then
+		# recovers a stalled init while preserving U-Boot's rollback decision.
+		while :; do sleep 3600; done
+	fi
+	printf x >&8
+	sleep 2
+done
+
+printf V >&8
