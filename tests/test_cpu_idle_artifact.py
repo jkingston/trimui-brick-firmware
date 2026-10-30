@@ -19,6 +19,8 @@ class CpuIdleArtifactTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.config = Path(directory.name) / '.config'
         self.config.write_bytes((ROOT / 'configs/brick_defconfig').read_bytes())
+        scp_profile.configure(self.config, 'disabled')
+        usb_profile.configure(self.config, 'peripheral', 'disabled')
 
     def select_idle(self):
         cpu_idle_profile.configure(self.config, 'qualification')

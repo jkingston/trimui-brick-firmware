@@ -12,6 +12,8 @@ import ce_trng_profile
 import vp9_profile
 import combined_accelerator_profile
 import cpu_idle_profile
+import scp_profile
+import usb_profile
 
 
 class ManifestProfileTests(unittest.TestCase):
@@ -23,6 +25,8 @@ class ManifestProfileTests(unittest.TestCase):
         self.images.mkdir()
         self.config = self.root / 'config'
         self.config.write_bytes((ROOT / 'configs/brick_defconfig').read_bytes())
+        scp_profile.configure(self.config, 'disabled')
+        usb_profile.configure(self.config, 'peripheral', 'disabled')
         with self.config.open('a') as config:
             config.write('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV is not set\n')
         (self.images / 'Image').write_bytes(b'kernel')

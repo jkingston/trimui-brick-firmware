@@ -21,6 +21,8 @@ class CpuIdleProfileTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.config = self.root / '.config'
         self.config.write_bytes((ROOT / 'configs/brick_defconfig').read_bytes())
+        scp_profile.configure(self.config, 'disabled')
+        usb_profile.configure(self.config, 'peripheral', 'disabled')
 
     def test_default_is_disabled_and_selection_is_reversible(self):
         before = self.config.read_text()
