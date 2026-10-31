@@ -1,0 +1,194 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] allwinner: persist A133 suspend trace phases
+
+Use RTC backup registers GP4 and GP5 to retain the last secure suspend or
+resume phase across a failed wake and subsequent hard reset. Preserve GP6,
+which stock reserves as its reboot flag, and GP7, which carries bootcount.
+
+This is bounded diagnostic instrumentation for localizing the A133 resume path.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+--- a/plat/allwinner/common/include/sunxi_a133_secure_context.h
++++ b/plat/allwinner/common/include/sunxi_a133_secure_context.h
+@@ -38,6 +38,7 @@
+ 	uint32_t (*read_32)(void *cookie, uintptr_t address);
+ 	void (*write_32)(void *cookie, uintptr_t address, uint32_t value);
+ 	void (*barrier)(void *cookie);
++	void (*trace)(void *cookie, uint32_t phase, uint32_t detail);
+ 	bool (*gic_reset)(void *cookie);
+ 	int (*transaction_commit)(void *cookie);
+ 	int (*transaction_finish)(void *cookie, uint32_t *wake_source);
+--- a/plat/allwinner/common/sunxi_a133_secure_context.c
++++ b/plat/allwinner/common/sunxi_a133_secure_context.c
+@@ -41,6 +41,26 @@
+ 	uint32_t value;
+ };
+ 
++enum a133_suspend_trace_phase {
++	A133_TRACE_CONTEXT_SAVED = 0x11U,
++	A133_TRACE_COMMIT_ENTER = 0x20U,
++	A133_TRACE_GICC_CONFIGURED = 0x21U,
++	A133_TRACE_SCP_COMMITTED = 0x22U,
++	A133_TRACE_COMMIT_COMPLETE = 0x23U,
++	A133_TRACE_RESTORE_ENTER = 0x31U,
++	A133_TRACE_GIC_RESTORED = 0x32U,
++	A133_TRACE_SCP_RESTORE_NOTIFIED = 0x33U,
++	A133_TRACE_SECURITY_RESTORED = 0x34U,
++	A133_TRACE_COUNTER_RESTORED = 0x35U,
++	A133_TRACE_NSI_RESTORED = 0x36U,
++	A133_TRACE_PLL_RESTORED = 0x37U,
++	A133_TRACE_RESTORE_COMPLETE = 0x38U,
++	A133_TRACE_COMMIT_FAILED = 0xe2U,
++	A133_TRACE_GIC_RESTORE_FAILED = 0xe3U,
++	A133_TRACE_SCP_RESTORE_FAILED = 0xe4U,
++	A133_TRACE_PLL_RESTORE_FAILED = 0xe5U,
++};
++
+ static const struct a133_register_value nsi_resume_values[] = {
+ 	{ A133_NSI_BASE + 0x1618U, 0x1U },
+ 	{ A133_NSI_BASE + 0x1818U, 0x1U },
+@@ -88,6 +108,14 @@
+ 	context->backend.write_32(context->backend.cookie, address, value);
+ }
+ 
++static void trace(struct sunxi_a133_secure_context *context,
++		  uint32_t phase, uint32_t detail)
++{
++	if (context->backend.trace != NULL) {
++		context->backend.trace(context->backend.cookie, phase, detail);
++	}
++}
++
+ static void restore_security_policy(
+ 	struct sunxi_a133_secure_context *context)
+ {
+@@ -206,6 +234,7 @@
+ 	context->wake_source = 0U;
+ 	context->last_transaction_status = SUNXI_A133_CONTEXT_TX_OK;
+ 	context->phase = SUNXI_A133_CONTEXT_SAVED;
++	trace(context, A133_TRACE_CONTEXT_SAVED, 0U);
+ 	return SUNXI_A133_CONTEXT_OK;
+ }
+ 
+@@ -221,16 +250,20 @@
+ 	if (context->phase != SUNXI_A133_CONTEXT_SAVED) {
+ 		return SUNXI_A133_CONTEXT_ESTATE;
+ 	}
++	trace(context, A133_TRACE_COMMIT_ENTER, 0U);
+ 
+ 	value = read_32(context, A133_GICC_CTLR_REG);
+ 	value = (value & ~A133_GICC_ENABLE_MASK) |
+ 		A133_GICC_STOCK_BYPASS_MASK;
+ 	write_32(context, A133_GICC_CTLR_REG, value);
++	trace(context, A133_TRACE_GICC_CONFIGURED, value);
+ 	status = context->backend.transaction_commit(context->backend.cookie);
+ 	context->last_transaction_status = status;
+ 	if (status == SUNXI_A133_CONTEXT_TX_OK) {
++		trace(context, A133_TRACE_SCP_COMMITTED, 0U);
+ 		context->phase = SUNXI_A133_CONTEXT_COMMITTED;
+ 		context->backend.barrier(context->backend.cookie);
++		trace(context, A133_TRACE_COMMIT_COMPLETE, 0U);
+ 		return SUNXI_A133_CONTEXT_OK;
+ 	}
+ 	if (status == SUNXI_A133_CONTEXT_TX_RETRY) {
+@@ -238,6 +271,7 @@
+ 	}
+ 
+ 	context->phase = SUNXI_A133_CONTEXT_FAILED;
++	trace(context, A133_TRACE_COMMIT_FAILED, (uint32_t)status);
+ 	return SUNXI_A133_CONTEXT_EFAILSTOP;
+ }
+ 
+@@ -252,6 +286,7 @@
+ 	if (context->phase != SUNXI_A133_CONTEXT_COMMITTED) {
+ 		return SUNXI_A133_CONTEXT_ESTATE;
+ 	}
++	trace(context, A133_TRACE_RESTORE_ENTER, 0U);
+ 
+ 	/*
+ 	 * The SCP has already installed CPU0's secure resume vector before it
+@@ -264,25 +299,34 @@
+ 	 */
+ 	if (!context->backend.gic_reset(context->backend.cookie)) {
+ 		context->phase = SUNXI_A133_CONTEXT_FAILED;
+-		return SUNXI_A133_CONTEXT_EFAILSTOP;
+-	}
++		trace(context, A133_TRACE_GIC_RESTORE_FAILED, 0U);
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	trace(context, A133_TRACE_GIC_RESTORED, 0U);
+ 	status = context->backend.transaction_finish(context->backend.cookie,
+ 						     &context->wake_source);
+ 	context->last_transaction_status = status;
+ 	if (status != SUNXI_A133_CONTEXT_TX_OK) {
+ 		context->phase = SUNXI_A133_CONTEXT_FAILED;
+-		return SUNXI_A133_CONTEXT_EFAILSTOP;
+-	}
++		trace(context, A133_TRACE_SCP_RESTORE_FAILED, (uint32_t)status);
++		return SUNXI_A133_CONTEXT_EFAILSTOP;
++	}
++	trace(context, A133_TRACE_SCP_RESTORE_NOTIFIED, context->wake_source);
+ 
+ 	restore_security_policy(context);
++	trace(context, A133_TRACE_SECURITY_RESTORED, 0U);
+ 	restore_counter(context);
++	trace(context, A133_TRACE_COUNTER_RESTORED, 0U);
+ 	/* Unknown stock resume prerequisite; keep it A133-specific. */
+ 	write_32(context, A133_SYSCON_RESUME_REG, 0U);
+ 	restore_nsi(context);
++	trace(context, A133_TRACE_NSI_RESTORED, 0U);
+ 	if (!restore_pll_com(context)) {
+ 		context->phase = SUNXI_A133_CONTEXT_FAILED;
++		trace(context, A133_TRACE_PLL_RESTORE_FAILED, 0U);
+ 		return SUNXI_A133_CONTEXT_ETIMEOUT;
+ 	}
++	trace(context, A133_TRACE_PLL_RESTORED, 0U);
+ 	write_32(context, A133_CPUCFG_CLUSTER_CTRL1_REG, 2U);
+ 	context->backend.barrier(context->backend.cookie);
+ 
+@@ -290,6 +334,7 @@
+ 	context->counter_high = 0U;
+ 	context->counter_frequency_id = 0U;
+ 	context->phase = SUNXI_A133_CONTEXT_IDLE;
++	trace(context, A133_TRACE_RESTORE_COMPLETE, context->wake_source);
+ 	return SUNXI_A133_CONTEXT_OK;
+ }
+ 
+--- a/plat/allwinner/common/sunxi_a133_system_suspend.c
++++ b/plat/allwinner/common/sunxi_a133_system_suspend.c
+@@ -15,6 +15,9 @@
+ #include <sunxi_a133_vendor_scp_runtime.h>
+ 
+ #define A133_PLL_LOCK_POLLS	100000U
++#define A133_RTC_GP4_REG	0x07000110U
++#define A133_RTC_GP5_REG	0x07000114U
++#define A133_TRACE_MAGIC	0x42530000U
+ 
+ static struct sunxi_a133_secure_context a133_secure_context;
+ static bool a133_system_suspend_ready;
+@@ -34,6 +37,16 @@
+ static void runtime_barrier(void *cookie)
+ {
+ 	(void)cookie;
++	dsbsy();
++}
++
++static void runtime_trace(void *cookie, uint32_t phase, uint32_t detail)
++{
++	(void)cookie;
++	/* GP6 is the stock reboot flag and GP7 is bootcount; preserve both. */
++	mmio_write_32(A133_RTC_GP5_REG, detail);
++	dsbsy();
++	mmio_write_32(A133_RTC_GP4_REG, A133_TRACE_MAGIC | (phase & 0xffffU));
+ 	dsbsy();
+ }
+ 
+@@ -79,6 +92,7 @@
+ 		.read_32 = runtime_read_32,
+ 		.write_32 = runtime_write_32,
+ 		.barrier = runtime_barrier,
++		.trace = runtime_trace,
+ 		.gic_reset = runtime_gic_reset,
+ 		.transaction_commit = runtime_commit,
+ 		.transaction_finish = runtime_finish,
