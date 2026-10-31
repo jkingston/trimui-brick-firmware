@@ -1,9 +1,13 @@
 include $(sort $(wildcard $(BR2_EXTERNAL_BRICK_PATH)/package/*/*.mk))
 
 # Record the selected source even when Buildroot uses a local checkout.
+BRICK_KERNEL_REVISION = $(LINUX_VERSION)
+ifeq ($(BR2_LINUX_KERNEL_CUSTOM_TARBALL),y)
+BRICK_KERNEL_REVISION = $(patsubst %.tar.gz,%,$(notdir $(call qstrip,$(BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION))))
+endif
 define BRICK_SOURCE_RECORD
 	cp $(LINUX_DIR)/include/config/kernel.release $(BINARIES_DIR)/kernel.release
-	printf '%s\n' '$(LINUX_VERSION)' '$(LINUX_OVERRIDE_SRCDIR)' > $(BINARIES_DIR)/kernel-source.txt
+	printf '%s\n' '$(BRICK_KERNEL_REVISION)' '$(LINUX_OVERRIDE_SRCDIR)' > $(BINARIES_DIR)/kernel-source.txt
 endef
 LINUX_POST_INSTALL_IMAGES_HOOKS += BRICK_SOURCE_RECORD
 
