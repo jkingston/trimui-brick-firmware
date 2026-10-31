@@ -44,7 +44,6 @@ class VeProfileTests(unittest.TestCase):
             '# BR2_PACKAGE_BRICK_SCP is not set\n'
             '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
-            '# BR2_BRICK_VP9_QUALIFICATION is not set\n'
             '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set\n'
             '# BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION is not set\n'
             'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y\n'
@@ -60,11 +59,8 @@ class VeProfileTests(unittest.TestCase):
             self.skipTest('dtc, fdtget and fdtput are required')
         return str(dtc), str(fdtget), str(fdtput)
 
-    def compile_dtb(self, master=2, iommu_cells=1, g2d='disabled',
-                    vp9_domain=True):
+    def compile_dtb(self, master=2, iommu_cells=1, g2d='disabled'):
         dtc, _, _ = self.tools()
-        vp9_owner = 'allwinner,video-engine-domain = <&ve_domain>;' \
-            if vp9_domain else ''
         source = f'''/dts-v1/;
 / {{ #address-cells = <1>; #size-cells = <1>; chosen {{ }};
  ve_domain: video-engine-domain {{
@@ -83,9 +79,6 @@ class VeProfileTests(unittest.TestCase):
    allwinner,video-engine-domain = <&ve_domain>;
    allwinner,sram = <&mm_sram 1>, <&ve_sram 1>; iommus = <&iommu {master}>;
    status = "disabled"; }};
-  video-codec@1c00000 {{ compatible = "allwinner,sun50i-a133-vpu-g2";
-   reg = <0x01c00000 0x1000>; interrupts = <0 90 4>;
-   {vp9_owner} status = "disabled"; }};
   g2d@6480000 {{ compatible = "allwinner,sun50i-a133-g2d";
    reg = <0x06480000 0x40000>; status = "{g2d}"; }};
   crypto@1904000 {{ compatible = "allwinner,sun50i-a133-crypto";
@@ -126,15 +119,6 @@ class VeProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'fresh output'):
             ve_profile.check_output(self.config, 'qualification')
         ve_profile.check_output(self.root / 'new-config', 'qualification')
-
-    def test_disabled_ve_preserves_vp9_device_manager(self):
-        self.config.write_text(self.config.read_text().replace(
-            '# BR2_BRICK_VP9_QUALIFICATION is not set',
-            'BR2_BRICK_VP9_QUALIFICATION=y'))
-        ve_profile.configure(self.config, 'disabled')
-        self.assertIn('BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y',
-                      self.config.read_text())
-        ve_profile.check_output(self.config, 'disabled')
 
     def test_install_enables_exact_ve_chain_and_marker(self):
         dtb = self.compile_dtb()
@@ -230,15 +214,6 @@ class VeProfileTests(unittest.TestCase):
         _, fdtget, fdtput = self.tools()
         ve_profile.configure(self.config, 'qualification')
         with self.assertRaisesRegex(ValueError, 'isolate'):
-            ve_profile.install(self.root, self.config, fdtget, fdtput)
-        self.assertEqual(dtb.read_bytes(), before)
-
-    def test_missing_vp9_shared_domain_is_rejected_without_mutating_image(self):
-        dtb = self.compile_dtb(vp9_domain=False)
-        before = dtb.read_bytes()
-        _, fdtget, fdtput = self.tools()
-        ve_profile.configure(self.config, 'qualification')
-        with self.assertRaisesRegex(ValueError, 'VP9 peer lacks'):
             ve_profile.install(self.root, self.config, fdtget, fdtput)
         self.assertEqual(dtb.read_bytes(), before)
 

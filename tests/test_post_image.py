@@ -7,10 +7,30 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 POST_IMAGE = ROOT / "board/trimui/brick/post-image.sh"
+POST_BUILD = ROOT / "board/trimui/brick/post-build.sh"
 GENIMAGE = ROOT / "board/trimui/brick/genimage.cfg"
 
 
 class PostImageTests(unittest.TestCase):
+    def test_combined_profile_is_installed_before_rootfs_manifest(self):
+        script = POST_BUILD.read_text()
+        usb_install = script.index('usb_profile.py" install')
+        combined = script.index('combined_accelerator_profile.py')
+        install = script.index('install "$BINARIES_DIR"', combined)
+        verify = script.index('verify-images')
+        manifest = script.index('"$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py"')
+        self.assertLess(usb_install, install)
+        self.assertLess(install, verify)
+        self.assertLess(verify, manifest)
+
+    def test_combined_profile_is_verified_before_manifest(self):
+        script = POST_IMAGE.read_text()
+        combined = script.index('combined_accelerator_profile.py')
+        verify = script.index('verify-images')
+        manifest = script.index('"$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py"')
+        self.assertLess(verify, manifest)
+        self.assertNotIn('install "$BINARIES_DIR"', script[combined:verify])
+
     def test_full_image_starts_with_rollback_disarmed(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)

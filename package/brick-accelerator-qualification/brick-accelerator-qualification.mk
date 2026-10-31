@@ -13,18 +13,16 @@ define BRICK_ACCELERATOR_QUALIFICATION_BUILD_CMDS
 		$(@D)/g2d-m2m.c -o $(@D)/brick-g2d-m2m
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 -Wall -Wextra -Werror \
 		$(@D)/g2d-compare.c -o $(@D)/brick-g2d-compare
-	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 -Wall -Wextra -Werror \
-		$(@D)/g2d-compose.c -o $(@D)/brick-g2d-compose
 	$(HOST_DIR)/bin/python3 $(@D)/generate-g2d-fixtures.py
 endef
 
 define BRICK_ACCELERATOR_QUALIFICATION_INSTALL_G2D
+	rm -f $(TARGET_DIR)/usr/libexec/brick-qualification/brick-g2d-compose
+	rm -rf $(TARGET_DIR)/usr/share/brick-qualification/g2d
 	$(INSTALL) -D -m 0755 $(@D)/brick-g2d-m2m \
 		$(TARGET_DIR)/usr/libexec/brick-qualification/brick-g2d-m2m
 	$(INSTALL) -D -m 0755 $(@D)/brick-g2d-compare \
 		$(TARGET_DIR)/usr/libexec/brick-qualification/brick-g2d-compare
-	$(INSTALL) -D -m 0755 $(@D)/brick-g2d-compose \
-		$(TARGET_DIR)/usr/libexec/brick-qualification/brick-g2d-compose
 	$(INSTALL) -D -m 0755 $(@D)/brick-qualify-g2d \
 		$(TARGET_DIR)/usr/sbin/brick-qualify-g2d
 	mkdir -p $(TARGET_DIR)/usr/share/brick-qualification/g2d/fixtures
@@ -44,16 +42,6 @@ define BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VE
 	cp -a $(@D)/fixtures/ve/. $(TARGET_DIR)/usr/share/brick-qualification/ve/
 endef
 BRICK_ACCELERATOR_QUALIFICATION_POST_INSTALL_TARGET_HOOKS += BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VE
-endif
-
-ifneq ($(filter y,$(BR2_BRICK_VP9_QUALIFICATION) $(BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION)),)
-define BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VP9
-	$(INSTALL) -D -m 0755 $(@D)/brick-qualify-vp9 \
-		$(TARGET_DIR)/usr/sbin/brick-qualify-vp9
-	mkdir -p $(TARGET_DIR)/usr/share/brick-qualification/vp9
-	cp -a $(@D)/fixtures/vp9/. $(TARGET_DIR)/usr/share/brick-qualification/vp9/
-endef
-BRICK_ACCELERATOR_QUALIFICATION_POST_INSTALL_TARGET_HOOKS += BRICK_ACCELERATOR_QUALIFICATION_INSTALL_VP9
 endif
 
 ifeq ($(BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION),y)

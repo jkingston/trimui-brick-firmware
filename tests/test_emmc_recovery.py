@@ -124,9 +124,6 @@ class RecoveryProfileTests(unittest.TestCase):
             '# BR2_BRICK_VE_QUALIFICATION is not set',
             'BR2_BRICK_VE_QUALIFICATION=y')))
         cases.append(('qualification', self.config.read_text().replace(
-            '# BR2_BRICK_VP9_QUALIFICATION is not set',
-            'BR2_BRICK_VP9_QUALIFICATION=y')))
-        cases.append(('qualification', self.config.read_text().replace(
             '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set',
             'BR2_BRICK_CE_TRNG_QUALIFICATION=y')))
         for message, text in cases:

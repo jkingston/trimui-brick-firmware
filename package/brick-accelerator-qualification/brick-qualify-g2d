@@ -10,7 +10,7 @@ marker=/sys/firmware/devicetree/base/chosen/trimui,g2d-qualification
 combined=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
 if [ -f "$marker" ] && [ "$(tr -d '\000' < "$marker")" = isolated ]; then
 	:
-elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v1 ]; then
+elif [ -f "$combined" ] && [ "$(tr -d '\000' < "$combined")" = combined-v2 ]; then
 	:
 else
 	echo "not a G2D qualification image" >&2
@@ -73,7 +73,11 @@ one_named()
 {
 	kind=$1
 	name=$2
-	set -- /sys/class/$kind/$kind*
+	case "$kind" in
+		video4linux) set -- /sys/class/$kind/video* ;;
+		media) set -- /sys/bus/media/devices/media* ;;
+		*) set -- /sys/class/$kind/$kind* ;;
+	esac
 	found=
 	for path do
 		[ -e "$path" ] || continue
@@ -87,10 +91,6 @@ one_named()
 }
 
 rotate=$(one_named video4linux sun8i-rotate)
-media=$(one_named media 'A133 G2D compositor')
-background=$(one_named video4linux g2d-background)
-foreground=$(one_named video4linux g2d-foreground)
-capture=$(one_named video4linux g2d-capture)
 
 cat /proc/interrupts > "$out/interrupts-before"
 find /sys/kernel/debug/clk -maxdepth 2 -type f \( -name clk_rate -o -name clk_parent \) \
@@ -109,8 +109,6 @@ while IFS="$(printf '\t')" read -r name inf outf iw ih ow oh rotate_angle hflip 
 		"$tolerance" > "$out/$name.compare"
 done < "$assets/cases.tsv"
 
-timeout 45 "$tools/brick-g2d-compose" "$media" "$background" "$foreground" \
-	"$capture" > "$out/compositor.log" 2>&1
 capture_diagnostics
 if grep -Ei '(BUG:|Oops:|Kernel panic|Call trace:|iommu.*fault|sun8i-rotate.*(timeout|fault|error|failed))' \
 	"$out/dmesg-delta" > "$out/kernel-errors"; then

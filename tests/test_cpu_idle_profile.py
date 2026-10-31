@@ -91,12 +91,40 @@ class CpuIdleProfileTests(unittest.TestCase):
         dts.mkdir(parents=True)
         (kernel / '.config').write_text(
             'CONFIG_CPU_IDLE=y\nCONFIG_ARM_PSCI_CPUIDLE=y\n')
-        source_dts = ROOT.parent / 'kernel/arch/arm64/boot/dts/allwinner'
-        for name in ('sun50i-a133-trimui-brick-native-idle.dts',
-                     'sun50i-a133-trimui-brick-native-deep-idle.dts',
-                     'sun50i-a133-trimui-brick-native-deep.dts',
-                     'sun50i-a133-stock-psci-idle.dtsi', 'Makefile'):
-            (dts / name).write_bytes((source_dts / name).read_bytes())
+        fixtures = {
+            'sun50i-a133-trimui-brick-native-idle.dts': '''
+#include "sun50i-a133-trimui-brick.dts"
+#include "sun50i-a133-stock-psci-idle.dtsi"
+/ { chosen { trimui,cpu-idle-qualification; }; };
+''',
+            'sun50i-a133-trimui-brick-native-deep-idle.dts': '''
+#include "sun50i-a133-trimui-brick-native-deep.dts"
+/ { chosen { trimui,cpu-idle-qualification; }; };
+''',
+            'sun50i-a133-trimui-brick-native-deep.dts': '''
+#include "sun50i-a133-stock-psci-idle.dtsi"
+''',
+            'sun50i-a133-stock-psci-idle.dtsi': '''
+arm,psci-suspend-param = <0x00010000>;
+entry-latency-us = <46>;
+exit-latency-us = <59>;
+min-residency-us = <3570>;
+arm,psci-suspend-param = <0x01010000>;
+entry-latency-us = <47>;
+exit-latency-us = <74>;
+min-residency-us = <5000>;
+&cpu0 {
+&cpu1 {
+&cpu2 {
+&cpu3 {
+''',
+            'Makefile': '''
+dtb-y += sun50i-a133-trimui-brick-native-idle.dtb
+dtb-y += sun50i-a133-trimui-brick-native-deep-idle.dtb
+''',
+        }
+        for name, text in fixtures.items():
+            (dts / name).write_text(text)
         cpu_idle_profile.verify_kernel(self.config, kernel)
         cpu_idle_profile.configure(self.config, 'qualification')
         cpu_idle_profile.verify_kernel(self.config, kernel)

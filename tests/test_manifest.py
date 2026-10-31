@@ -9,7 +9,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import ce_trng_profile
-import vp9_profile
 import combined_accelerator_profile
 import cpu_idle_profile
 import scp_profile
@@ -44,10 +43,10 @@ class ManifestProfileTests(unittest.TestCase):
 
     def assert_qualification(self, selected):
         manifest = self.manifest()
+        self.assertNotIn('vp9_qualification', manifest)
         expected = {
             'g2d_qualification': False,
             've_qualification': False,
-            'vp9_qualification': False,
             'ce_trng_qualification': False,
             'combined_accelerator_qualification': False,
             'cpu_idle_qualification': False,
@@ -58,10 +57,6 @@ class ManifestProfileTests(unittest.TestCase):
 
     def test_normal_manifest_disables_all_accelerator_qualification(self):
         self.assert_qualification(None)
-
-    def test_vp9_manifest_has_exact_profile_identity(self):
-        vp9_profile.configure(self.config, 'qualification')
-        self.assert_qualification('vp9_qualification')
 
     def test_ce_trng_manifest_has_exact_profile_identity(self):
         ce_trng_profile.configure(self.config, 'qualification')

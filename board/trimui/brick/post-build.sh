@@ -34,6 +34,13 @@ EOF
 fi
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/usb_profile.py" install \
 	"$BINARIES_DIR" "$BR2_CONFIG" "$HOST_DIR/bin/fdtget"
+if grep -q '^BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION=y$' "$BR2_CONFIG"; then
+	"$python" "$BR2_EXTERNAL_BRICK_PATH/tools/combined_accelerator_profile.py" \
+		install "$BINARIES_DIR" "$BR2_CONFIG" \
+		"$HOST_DIR/bin/fdtget" "$HOST_DIR/bin/fdtput"
+	"$python" "$BR2_EXTERNAL_BRICK_PATH/tools/combined_accelerator_profile.py" \
+		verify-images "$BINARIES_DIR" "$BR2_CONFIG" "$HOST_DIR/bin/fdtget"
+fi
 revision=$(sed -n '1p' "$BINARIES_DIR/kernel-source.txt")
 override=$(sed -n '2p' "$BINARIES_DIR/kernel-source.txt")
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py" \

@@ -4,6 +4,10 @@ board=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python=$(command -p -v python3)
 revision=$(sed -n '1p' "$BINARIES_DIR/kernel-source.txt")
 override=$(sed -n '2p' "$BINARIES_DIR/kernel-source.txt")
+if grep -q '^BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION=y$' "$BR2_CONFIG"; then
+	"$python" "$BR2_EXTERNAL_BRICK_PATH/tools/combined_accelerator_profile.py" \
+		verify-images "$BINARIES_DIR" "$BR2_CONFIG" "$HOST_DIR/bin/fdtget"
+fi
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py" \
 	--payload "$BINARIES_DIR" "$BR2_CONFIG" "$revision" "$override"
 (cd "$BINARIES_DIR" && sha256sum Image sun50i-a133-trimui-brick.dtb rootfs.cpio.gz | sed -e "s/sun50i-a133-trimui-brick.dtb/brick-usb.dtb/" -e "s/rootfs.cpio.gz/initramfs.cpio.gz/" > payload-SHA256SUMS)

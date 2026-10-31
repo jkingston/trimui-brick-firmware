@@ -14,7 +14,6 @@ from usb_profile import profile as usb_profile
 KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
-VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ce-trng.fragment'
@@ -25,7 +24,6 @@ CE = '/soc/crypto@1904000'
 IOMMU = '/soc/iommu@30f0000'
 G2D = '/soc/g2d@6480000'
 VE = '/soc/video-codec@1c0e000'
-VP9 = '/soc/video-codec@1c00000'
 CCU = '/soc/clock@3001000'
 
 
@@ -131,7 +129,7 @@ def validate(fdtget, dtb, active, marker=False):
     expected = 'okay' if active else 'disabled'
     if _status(fdtget, dtb, CE) != expected:
         raise ValueError('CE has unexpected status')
-    for node in (IOMMU, G2D, VE, VP9):
+    for node in (IOMMU, G2D, VE):
         if _status(fdtget, dtb, node) != 'disabled':
             raise ValueError('CE/TRNG qualification must isolate peer accelerators')
     actual_marker = _get(fdtget, dtb, MARKER_NODE, MARKER, default='absent')
@@ -161,7 +159,10 @@ def verify_kernel(config, kernel):
     for key in required:
         if not _config_value(kernel_config, key):
             raise ValueError(f'{key} is not built into the qualification kernel')
-    for relative in ('drivers/crypto/allwinner/sun50i-a133-ce/core.o',
+    if not re.search(r'^CONFIG_CRYPTO_BENCHMARK=m$', kernel_config.read_text(), re.M):
+        raise ValueError('CONFIG_CRYPTO_BENCHMARK must be a qualification module')
+    for relative in ('crypto/tcrypt.ko',
+                     'drivers/crypto/allwinner/sun50i-a133-ce/core.o',
                      'drivers/char/hw_random/core.o'):
         obj = kernel / relative
         if not obj.is_file():
@@ -238,7 +239,7 @@ def install(images, config, fdtget, fdtput):
     if _peer_enabled(config, 'BR2_PACKAGE_BRICK_SCP'):
         raise ValueError('CE/TRNG and SCP qualification must remain separate')
     if any(_peer_enabled(config, key)
-           for key in (G2D_KEY, VE_KEY, VP9_KEY, COMBINED_KEY)):
+           for key in (G2D_KEY, VE_KEY, COMBINED_KEY)):
         raise ValueError('CE/TRNG and peer accelerator qualification must remain separate')
     destination = images / DTB
     if not destination.is_file():

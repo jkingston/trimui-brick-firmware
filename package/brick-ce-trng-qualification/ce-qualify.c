@@ -145,7 +145,7 @@ static int hash(const uint8_t *input, size_t bytes, uint8_t output[32],
 	size_t offset = 0, i;
 	int tfm = -1, op = -1, ret = -1;
 
-	tfm = alg_socket("hash", "sha256-a133-ce");
+	tfm = alg_socket("hash", "sha256");
 	if (tfm < 0)
 		goto out;
 	op = accept4(tfm, NULL, NULL, SOCK_CLOEXEC);
@@ -238,10 +238,10 @@ static int aes_known_answers(void)
 		parse_hex(vectors[i].key, key, keylen);
 		parse_hex(vectors[i].plain, plain, sizeof(plain));
 		parse_hex(vectors[i].ecb, expected, sizeof(expected));
-		if (cipher("ecb-aes-a133-ce", key, keylen, NULL, 1,
+		if (cipher("ecb(aes)", key, keylen, NULL, 1,
 			   plain, actual, sizeof(actual), 0) ||
 		    memcmp(actual, expected, sizeof(actual)) ||
-		    cipher("ecb-aes-a133-ce", key, keylen, NULL, 0,
+		    cipher("ecb(aes)", key, keylen, NULL, 0,
 			   actual, roundtrip, sizeof(roundtrip), 0) ||
 		    memcmp(roundtrip, plain, sizeof(plain))) {
 			errno = EIO;
@@ -254,10 +254,10 @@ static int aes_known_answers(void)
 		parse_hex(cbc_vectors[i].key, key, keylen);
 		parse_hex(cbc_vectors[i].plain, plain, sizeof(plain));
 		parse_hex(cbc_vectors[i].cbc, expected, sizeof(expected));
-		if (cipher("cbc-aes-a133-ce", key, keylen, iv, 1,
+		if (cipher("cbc(aes)", key, keylen, iv, 1,
 			   plain, actual, sizeof(actual), 0) ||
 		    memcmp(actual, expected, sizeof(actual)) ||
-		    cipher("cbc-aes-a133-ce", key, keylen, iv, 0,
+		    cipher("cbc(aes)", key, keylen, iv, 0,
 			   actual, roundtrip, sizeof(roundtrip), 0) ||
 		    memcmp(roundtrip, plain, sizeof(plain))) {
 			errno = EIO;
@@ -343,7 +343,7 @@ static int aes_boundaries(void)
 		}
 		for (j = 0; j < bytes; j += sizeof(block))
 			memcpy(input + j, block, sizeof(block));
-		if (cipher("ecb-aes-a133-ce", key, sizeof(key), NULL, 1,
+		if (cipher("ecb(aes)", key, sizeof(key), NULL, 1,
 			   input, output, bytes, 1)) {
 			fail("AES boundary encrypt");
 			free(input); free(output); free(roundtrip);
@@ -356,7 +356,7 @@ static int aes_boundaries(void)
 				free(input); free(output); free(roundtrip);
 				return -1;
 			}
-		if (cipher("ecb-aes-a133-ce", key, sizeof(key), NULL, 0,
+		if (cipher("ecb(aes)", key, sizeof(key), NULL, 0,
 			   output, roundtrip, bytes, 1) || memcmp(input, roundtrip, bytes)) {
 			errno = EIO;
 			fail("AES boundary decrypt");
@@ -389,9 +389,9 @@ static void *concurrent_worker(void *opaque)
 	pthread_barrier_wait(worker->barrier);
 	for (i = 0; i < worker->iterations; i++) {
 		if ((i + worker->index) & 1) {
-			if (cipher("ecb-aes-a133-ce", key, sizeof(key), NULL, 1,
+			if (cipher("ecb(aes)", key, sizeof(key), NULL, 1,
 				   input, output, sizeof(input), 1) ||
-			    cipher("ecb-aes-a133-ce", key, sizeof(key), NULL, 0,
+			    cipher("ecb(aes)", key, sizeof(key), NULL, 0,
 				   output, roundtrip, sizeof(input), 1) ||
 			    memcmp(roundtrip, input, sizeof(input))) {
 				worker->result = errno ?: EIO;
@@ -472,6 +472,6 @@ int main(int argc, char **argv)
 	}
 	if (failures)
 		return 1;
-	printf("PASS CE AES/SHA mode=%s\n", argc < 2 ? "all" : argv[1]);
+	printf("PASS AF_ALG AES/SHA mode=%s\n", argc < 2 ? "all" : argv[1]);
 	return 0;
 }

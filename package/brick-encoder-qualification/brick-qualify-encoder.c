@@ -886,7 +886,14 @@ static void require_jpeg_payload(const uint8_t *data, size_t length,
 	if (length < 4 || length > capacity || data[0] != 0xff ||
 	    data[1] != 0xd8 || data[length - 2] != 0xff ||
 	    data[length - 1] != 0xd9) {
-		fprintf(stderr, "invalid bounded JPEG payload\n");
+		fprintf(stderr,
+			"invalid bounded JPEG payload: length=%zu capacity=%zu "
+			"head=%02x%02x tail=%02x%02x\n",
+			length, capacity,
+			length > 0 ? data[0] : 0,
+			length > 1 ? data[1] : 0,
+			length > 1 ? data[length - 2] : 0,
+			length > 0 ? data[length - 1] : 0);
 		exit(EXIT_FAILURE);
 	}
 	for (i = canary_start; i < capacity; i++) {
@@ -1090,7 +1097,15 @@ static void encode_jpeg_session(const char *device, const char *directory,
 		    seen[captured.sequence] || !captured.bytesused ||
 		    (captured.flags & V4L2_BUF_FLAG_ERROR) ||
 		    (consumed.flags & V4L2_BUF_FLAG_ERROR)) {
-			fprintf(stderr, "invalid JPEG completion\n");
+			fprintf(stderr,
+				"invalid JPEG completion: frame=%u "
+				"capture={index=%u sequence=%u bytesused=%u "
+				"flags=%#x} output={index=%u sequence=%u "
+				"bytesused=%u flags=%#x}\n",
+				i, captured.index, captured.sequence,
+				captured.bytesused, captured.flags,
+				consumed.index, consumed.sequence,
+				consumed.bytesused, consumed.flags);
 			exit(EXIT_FAILURE);
 		}
 		seen[captured.sequence] = true;
@@ -1172,12 +1187,19 @@ static void abort_jpeg_session(const char *device)
 
 static void record_decoder_interface(const char *directory)
 {
+	static const enum v4l2_buf_type types[] = {
+		V4L2_BUF_TYPE_VIDEO_CAPTURE,
+		V4L2_BUF_TYPE_VIDEO_OUTPUT,
+		V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+		V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+	};
 	struct v4l2_capability capability;
 	struct dirent *entry;
 	char path[512];
 	FILE *evidence;
 	DIR *devices = opendir("/sys/class/video4linux");
 	bool found = false;
+	unsigned int i;
 
 	if (!devices)
 		fail("opendir video4linux");
@@ -1208,8 +1230,8 @@ static void record_decoder_interface(const char *directory)
 			bool h264_slice = false;
 
 			fprintf(evidence, "device=%s card=%s\n", path, capability.card);
-			for (type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-			     type <= V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE; type++) {
+			for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+				type = types[i];
 				struct v4l2_fmtdesc format = { .type = type };
 
 				for (; xioctl(fd, VIDIOC_ENUM_FMT, &format) == 0;
@@ -1221,7 +1243,7 @@ static void record_decoder_interface(const char *directory)
 						(format.pixelformat >> 8) & 0xff,
 						(format.pixelformat >> 16) & 0xff,
 						(format.pixelformat >> 24) & 0xff);
-					if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+					if (V4L2_TYPE_IS_OUTPUT(type) &&
 					    format.pixelformat == V4L2_PIX_FMT_H264_SLICE)
 						h264_slice = true;
 				}
@@ -1243,8 +1265,16 @@ static void record_decoder_interface(const char *directory)
 
 int main(int argc, char **argv)
 {
-	if (argc != 3) {
-		fprintf(stderr, "Usage: %s DEVICE EVIDENCE_DIRECTORY\n", argv[0]);
+	bool suspend;
+
+	if (argc != 3 && argc != 4) {
+		fprintf(stderr, "Usage: %s DEVICE EVIDENCE_DIRECTORY [--suspend]\n",
+			argv[0]);
+		return EXIT_FAILURE;
+	}
+	suspend = argc == 4 && !strcmp(argv[3], "--suspend");
+	if (argc == 4 && !suspend) {
+		fprintf(stderr, "unknown qualification mode: %s\n", argv[3]);
 		return EXIT_FAILURE;
 	}
 	encode_session(argv[1], argv[2], "h264-baseline",
@@ -1255,7 +1285,7 @@ int main(int argc, char **argv)
 	encode_jpeg_session(argv[1], argv[2], "jpeg-mmap1", false, false);
 	abort_jpeg_session(argv[1]);
 	encode_jpeg_session(argv[1], argv[2], "jpeg-mmap2", false, false);
-	encode_jpeg_session(argv[1], argv[2], "jpeg-dmabuf", true, true);
+	encode_jpeg_session(argv[1], argv[2], "jpeg-dmabuf", true, suspend);
 	record_decoder_interface(argv[2]);
 	encode_session(argv[1], argv[2], "h264-after",
 		       H264_EXTENDED_FRAMES, H264_FORCE_FRAME);

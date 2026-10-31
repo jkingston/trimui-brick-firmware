@@ -14,7 +14,6 @@ from usb_profile import profile as usb_profile
 
 KEY = 'BR2_BRICK_VE_QUALIFICATION'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
-VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
@@ -26,7 +25,6 @@ ENCODER_MARKER = 'allwinner,encoder-qualification'
 ENCODER_CONTRACT = 'bounded-320x240-h264-qp30-jpeg-q95'
 IOMMU = '/soc/iommu@30f0000'
 VE = '/soc/video-codec@1c0e000'
-VP9 = '/soc/video-codec@1c00000'
 VE_DOMAIN = '/video-engine-domain'
 DOMAIN_PROPERTY = 'allwinner,video-engine-domain'
 MM_SRAM = '/soc/syscon@3000000/sram@24000/sram-section@0'
@@ -69,7 +67,7 @@ def check_output(config, requested):
     text = config.read_text()
     uses_eudev = requested or any(re.search(
         rf'^{re.escape(key)}=y$', config.read_text(), re.M)
-        for key in (VP9_KEY, COMBINED_KEY))
+        for key in (COMBINED_KEY,))
     expected = (
         ('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV is not set',
          'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if uses_eudev else
@@ -102,7 +100,7 @@ def configure(config, requested):
     text = text[:fragment.start()] + replacement + text[fragment.end():]
     use_eudev = requested or any(re.search(
         rf'^{re.escape(key)}=y$', text, re.M)
-        for key in (VP9_KEY, COMBINED_KEY))
+        for key in (COMBINED_KEY,))
     settings = {
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not use_eudev,
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': use_eudev,
@@ -119,7 +117,7 @@ def configure(config, requested):
 def _peer_enabled(config):
     text = config.read_text()
     return any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
-               for key in (G2D_KEY, VP9_KEY, CE_KEY, COMBINED_KEY))
+               for key in (G2D_KEY, CE_KEY, COMBINED_KEY))
 
 
 def _get(fdtget, dtb, node, prop, kind='s', default=None):
@@ -248,20 +246,7 @@ def validate(fdtget, dtb, active, marker=False):
     if _cells(fdtget, dtb, VE, DOMAIN_PROPERTY) != [domain_phandle]:
         raise ValueError('video engine references the wrong shared domain')
 
-    vp9_props = _properties(fdtget, dtb, VP9)
-    if not {'compatible', 'reg', 'interrupts', DOMAIN_PROPERTY, 'status'} <= vp9_props:
-        raise ValueError('VP9 peer lacks its reviewed disabled contract')
-    if _get(fdtget, dtb, VP9, 'compatible') != 'allwinner,sun50i-a133-vpu-g2':
-        raise ValueError('VP9 peer has an unexpected compatible')
-    if _cells(fdtget, dtb, VP9, 'reg') != [0x01c00000, 0x1000] or \
-            _cells(fdtget, dtb, VP9, 'interrupts') != [0, 90, 4]:
-        raise ValueError('VP9 peer has unexpected hardware resources')
-    if _cells(fdtget, dtb, VP9, DOMAIN_PROPERTY) != [domain_phandle]:
-        raise ValueError('VP9 peer references the wrong shared domain')
-    if {'clocks', 'clock-names', 'resets', 'iommus'} & vp9_props:
-        raise ValueError('VP9 peer violates the shared-domain no-IOMMU contract')
-
-    for node in (G2D, CE, VP9):
+    for node in (G2D, CE):
         if _status(fdtget, dtb, node) != 'disabled':
             raise ValueError('qualification image must isolate the video engine')
 

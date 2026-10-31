@@ -20,11 +20,15 @@ class AcceleratorQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             shutil.copy(PACKAGE / 'generate-g2d-fixtures.py', work)
+            stale = work / 'fixtures/g2d/scale-nearest.input'
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b'stale')
             subprocess.run([sys.executable, work / 'generate-g2d-fixtures.py'],
                            check=True, capture_output=True, text=True)
+            self.assertFalse(stale.exists())
             cases = (work / 'cases.tsv').read_text().splitlines()
-            self.assertEqual(len(cases), 30)
-            self.assertEqual(len({line.split('\t', 1)[0] for line in cases}), 30)
+            self.assertEqual(len(cases), 6)
+            self.assertEqual(len({line.split('\t', 1)[0] for line in cases}), 6)
             comparator = work / 'compare'
             subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
                             PACKAGE / 'g2d-compare.c', '-o', comparator], check=True)
@@ -50,10 +54,11 @@ class AcceleratorQualificationTests(unittest.TestCase):
         self.assertEqual({line.split()[1].split('.', 1)[0] for line in lines},
                          {line.split()[1].split('.', 1)[0] for line in
                           (fixture_dir / 'REFERENCE-SHA256').read_text().splitlines()})
-        vp9_fixture = fixture_dir.parent / 'vp9/vp9-ip.ivf'
-        self.assertEqual(hashlib.sha256(vp9_fixture.read_bytes()).hexdigest(),
-                         '6f9849001939af34e3d867a109289890c9585ca3eae802bd7ffb2143242ed70d')
-        for script in ('brick-qualify-g2d', 'brick-qualify-ve', 'brick-qualify-vp9'):
+        a133_digest, a133_name = (fixture_dir / 'A133-CEDRUS-SHA256').read_text().split()
+        self.assertEqual(a133_name, 'mpeg2-ipb.output.yuv')
+        self.assertEqual(a133_digest,
+                         '7b0d55ad757bbfea5fa0a331f4cbf1daf758f0b3816377d0c653d7f617a8bd06')
+        for script in ('brick-qualify-g2d', 'brick-qualify-ve'):
             subprocess.run(['/bin/sh', '-n', PACKAGE / script], check=True)
 
     def test_target_qualification_is_bounded_and_has_explicit_build_dependency(self):
@@ -61,22 +66,29 @@ class AcceleratorQualificationTests(unittest.TestCase):
         config = (PACKAGE / 'Config.in').read_text()
         g2d = (PACKAGE / 'brick-qualify-g2d').read_text()
         ve = (PACKAGE / 'brick-qualify-ve').read_text()
-        vp9 = (PACKAGE / 'brick-qualify-vp9').read_text()
         busybox = (ROOT / 'board/trimui/brick/busybox.fragment').read_text()
         self.assertIn('BRICK_ACCELERATOR_QUALIFICATION_DEPENDENCIES += host-python3',
                       package)
         self.assertIn('select BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_IVFPARSE', config)
         self.assertIn('timeout 120 v4l2-compliance', g2d)
         self.assertIn('timeout 15 "$tools/brick-g2d-m2m"', g2d)
+        self.assertIn('platform:sun8i-rotate', g2d)
         self.assertIn('G2D clock is not at stock 300 MHz', g2d)
+        self.assertIn('video4linux) set -- /sys/class/$kind/video*', g2d)
+        self.assertFalse((PACKAGE / 'g2d-compose.c').exists())
+        for obsolete in ('$(@D)/g2d-compose.c',
+                         '-o $(@D)/brick-g2d-compose',
+                         '$(INSTALL) -D -m 0755 $(@D)/brick-g2d-compose'):
+            self.assertNotIn(obsolete, package)
+        self.assertNotIn('"$tools/brick-g2d-compose"', g2d)
         self.assertIn('timeout 120 v4l2-compliance', ve)
         self.assertIn('VE clock is not at stock 432 MHz', ve)
         self.assertIn('v4l2slvp8dec', ve)
         self.assertIn('vp8-ip) suffix=ivf; parser=ivfparse', ve)
         self.assertIn('fixture changed during decode', ve)
-        self.assertIn('v4l2slvp9dec', vp9)
-        self.assertIn('isolated-no-iommu', vp9)
-        self.assertIn('timeout 120 v4l2-compliance', vp9)
+        self.assertIn('A133-CEDRUS-SHA256', ve)
+        self.assertLess(ve.index('check_new_diagnostics\nexpected='),
+                        ve.index('actual=$(sha256sum'))
         self.assertIn('trap finish EXIT', g2d)
         self.assertIn('trap finish EXIT', ve)
         self.assertIn('CONFIG_TIMEOUT=y', busybox.splitlines())

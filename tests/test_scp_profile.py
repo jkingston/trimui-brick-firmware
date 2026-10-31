@@ -73,6 +73,14 @@ class ScpProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'do not form'):
             scp_profile.profile(self.config)
 
+    def test_deep_scp_accepts_combined_accelerator_fragment(self):
+        scp_profile.configure(self.config, 'deep')
+        text = self.config.read_text().replace(
+            scp_profile.DEEP_FRAGMENT,
+            f'{scp_profile.DEEP_FRAGMENT} {scp_profile.COMBINED_FRAGMENT}')
+        self.config.write_text(text)
+        self.assertEqual(scp_profile.profile(self.config), 'deep')
+
     def test_kernel_verification_requires_config_and_object_as_a_pair(self):
         kernel = self.config.parent / 'linux'
         obj = kernel / 'drivers/irqchip/irq-sun50i-a133-wakeupgen.o'

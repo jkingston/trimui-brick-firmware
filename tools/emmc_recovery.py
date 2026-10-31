@@ -18,7 +18,6 @@ MARKER_NODE = '/chosen'
 MARKER = 'trimui,emmc-recovery'
 G2D_KEY = 'BR2_BRICK_G2D_QUALIFICATION'
 VE_KEY = 'BR2_BRICK_VE_QUALIFICATION'
-VP9_KEY = 'BR2_BRICK_VP9_QUALIFICATION'
 CE_KEY = 'BR2_BRICK_CE_TRNG_QUALIFICATION'
 COMBINED_KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 
@@ -95,7 +94,7 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('eMMC recovery and SCP qualification must remain separate')
     text = config.read_text()
     if any(re.search(rf'^{re.escape(key)}=y$', text, re.M)
-           for key in (G2D_KEY, VE_KEY, VP9_KEY, CE_KEY, COMBINED_KEY)):
+           for key in (G2D_KEY, VE_KEY, CE_KEY, COMBINED_KEY)):
         raise ValueError('eMMC and hardware qualification must remain separate')
     destination = images / DTB
     if not destination.is_file():

@@ -13,7 +13,7 @@ ve_marker=/sys/firmware/devicetree/base/chosen/trimui,ve-qualification
 combined_marker=/sys/firmware/devicetree/base/chosen/trimui,accelerator-qualification
 if [ -f "$ve_marker" ] && [ "$(tr -d '\000' <"$ve_marker")" = isolated ]; then
 	:
-elif [ -f "$combined_marker" ] && [ "$(tr -d '\000' <"$combined_marker")" = combined-v1 ]; then
+elif [ -f "$combined_marker" ] && [ "$(tr -d '\000' <"$combined_marker")" = combined-v2 ]; then
 	:
 else
 	echo 'not an encoder qualification image' >&2
@@ -86,8 +86,10 @@ if [ ! -e "$work/STATUS" ]; then
 		printf 'stage=runner result=fail code=%s\n' "$runner_rc" >"$work/STATUS"
 	fi
 fi
+final_rc=$runner_rc
 if $bb grep -Eqi 'iommu fault|frame processing timed out|oops|panic|reset failed' "$work/dmesg-delta"; then
 	printf 'kernel_fault=1\n' >>"$work/STATUS"
+	[ "$final_rc" -ne 0 ] || final_rc=1
 else
 	printf 'kernel_fault=0\n' >>"$work/STATUS"
 fi
@@ -101,3 +103,4 @@ trap - EXIT INT TERM
 cleanup
 printf 'EVIDENCE=%s\n' "$final"
 printf 'STATUS=%s\n' "$($bb cat "$final/STATUS")"
+exit "$final_rc"

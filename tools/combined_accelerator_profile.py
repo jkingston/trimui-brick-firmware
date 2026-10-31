@@ -13,39 +13,37 @@ import g2d_profile
 from scp_profile import profile as scp_profile
 from usb_profile import profile as usb_profile
 import ve_profile
-import vp9_profile
 
 
 KEY = 'BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION'
 PEER_KEYS = (
     'BR2_BRICK_G2D_QUALIFICATION',
     'BR2_BRICK_VE_QUALIFICATION',
-    'BR2_BRICK_VP9_QUALIFICATION',
     'BR2_BRICK_CE_TRNG_QUALIFICATION',
 )
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 FRAGMENT = ('$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/'
             'combined-accelerators.fragment')
+DEEP_FRAGMENT = ('$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/'
+                 'native-deep.fragment')
 DTB = 'sun50i-a133-trimui-brick.dtb'
 MARKER_NODE = '/chosen'
 MARKER = 'trimui,accelerator-qualification'
-CONTRACT = 'combined-v1'
+CONTRACT = 'combined-v2'
 ENCODER_MARKER = 'allwinner,encoder-qualification'
 ENCODER_CONTRACT = 'bounded-320x240-h264-qp30-jpeg-q95'
 IOMMU = '/soc/iommu@30f0000'
 G2D = '/soc/g2d@6480000'
 VE = '/soc/video-codec@1c0e000'
-VP9 = '/soc/video-codec@1c00000'
 CE = '/soc/crypto@1904000'
 MM_SRAM = '/soc/syscon@3000000/sram@24000/sram-section@0'
 VE_SRAM_PARENT = '/soc/syscon@3000000/sram@1a00000'
 VE_SRAM = VE_SRAM_PARENT + '/sram-section@0'
-ENABLED_NODES = (IOMMU, G2D, VE, VP9, CE, MM_SRAM,
+ENABLED_NODES = (IOMMU, G2D, VE, CE, MM_SRAM,
                  VE_SRAM_PARENT, VE_SRAM)
 ISOLATED_MARKERS = (
     g2d_profile.MARKER,
     ve_profile.MARKER,
-    vp9_profile.MARKER,
     ce_trng_profile.MARKER,
 )
 
@@ -80,13 +78,13 @@ def check_output(config, requested):
     if enabled(config) != requested:
         raise ValueError('Use a fresh output directory when changing the combined profile')
     selected = _fragment(config)
-    if requested and selected != FRAGMENT:
+    if requested and selected not in (FRAGMENT, f'{DEEP_FRAGMENT} {FRAGMENT}'):
         raise ValueError('Combined qualification requires its exact kernel fragment')
-    if not requested and selected == FRAGMENT:
+    if not requested and FRAGMENT in selected.split():
         raise ValueError('Disabled combined profile retains its kernel fragment')
     lines = config.read_text().splitlines()
     use_eudev = requested or any(_selected(config, key) for key in (
-        'BR2_BRICK_VE_QUALIFICATION', 'BR2_BRICK_VP9_QUALIFICATION'))
+        'BR2_BRICK_VE_QUALIFICATION',))
     expected = (
         ('# BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV is not set',
          'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y') if use_eudev else
@@ -110,19 +108,20 @@ def configure(config, requested):
         raise ValueError('Missing or duplicate kernel fragment selection')
     current = fragment.group(1)
     if requested:
-        if current:
+        if current not in ('', DEEP_FRAGMENT):
             raise ValueError('Combined qualification cannot share a kernel fragment')
-        replacement = f'{FRAGMENT_KEY}="{FRAGMENT}"'
-    elif current == FRAGMENT:
-        replacement = f'{FRAGMENT_KEY}=""'
+        fragments = ' '.join(filter(None, (current, FRAGMENT)))
+        replacement = f'{FRAGMENT_KEY}="{fragments}"'
+    elif FRAGMENT in current.split():
+        fragments = ' '.join(item for item in current.split() if item != FRAGMENT)
+        replacement = f'{FRAGMENT_KEY}="{fragments}"'
     else:
         replacement = fragment.group(0)
     text = text[:fragment.start()] + replacement + text[fragment.end():]
 
     use_eudev = requested or any(re.search(
         rf'^{re.escape(key)}=y$', text, re.M)
-        for key in ('BR2_BRICK_VE_QUALIFICATION',
-                    'BR2_BRICK_VP9_QUALIFICATION'))
+        for key in ('BR2_BRICK_VE_QUALIFICATION',))
     settings = {
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV': not use_eudev,
         'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV': use_eudev,
@@ -151,7 +150,6 @@ def validate_base(fdtget, dtb):
     """Require every independently reviewed contract before changing status."""
     g2d_profile.validate(fdtget, dtb, False)
     ve_profile.validate(fdtget, dtb, False)
-    vp9_profile.validate(fdtget, dtb, False)
     ce_trng_profile.validate(fdtget, dtb, False)
     if _get(fdtget, dtb, MARKER_NODE, MARKER, default='absent') != 'absent':
         raise ValueError('Unexpected combined accelerator marker')
@@ -195,7 +193,6 @@ def verify_kernel(config, kernel):
         raise ValueError('kernel verification requires combined qualification')
     for key, verifier in (
             ('BR2_BRICK_VE_QUALIFICATION', ve_profile.verify_kernel),
-            ('BR2_BRICK_VP9_QUALIFICATION', vp9_profile.verify_kernel),
             ('BR2_BRICK_CE_TRNG_QUALIFICATION', ce_trng_profile.verify_kernel)):
         with tempfile.NamedTemporaryFile(mode='w', delete=False) as temporary:
             temporary.write(_profile_config(config, key))
@@ -221,11 +218,15 @@ def install(images, config, fdtget, fdtput):
         raise ValueError('combined qualification requires the USB gadget profile')
     if emmc_recovery_enabled(config):
         raise ValueError('combined and eMMC qualification must remain separate')
-    if scp_profile(config) != 'disabled':
-        raise ValueError('combined and SCP qualification must remain separate')
+    if scp_profile(config) not in ('disabled', 'deep'):
+        raise ValueError('combined qualification requires SCP disabled or deep')
     destination = images / DTB
     if not destination.is_file():
         raise FileNotFoundError(destination)
+    if _get(fdtget, destination, MARKER_NODE, MARKER,
+            default='absent') == CONTRACT:
+        validate_active(fdtget, destination)
+        return
     validate_base(fdtget, destination)
     with tempfile.NamedTemporaryFile(dir=images, delete=False) as temporary:
         staged = Path(temporary.name)
@@ -244,6 +245,15 @@ def install(images, config, fdtget, fdtput):
         staged.unlink(missing_ok=True)
 
 
+def verify_images(images, config, fdtget):
+    if not enabled(config):
+        raise ValueError('image verification requires combined qualification')
+    destination = images / DTB
+    if not destination.is_file():
+        raise FileNotFoundError(destination)
+    validate_active(fdtget, destination)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -256,6 +266,10 @@ if __name__ == '__main__':
     verify = commands.add_parser('verify-kernel')
     verify.add_argument('config', type=Path)
     verify.add_argument('kernel', type=Path)
+    images = commands.add_parser('verify-images')
+    images.add_argument('images', type=Path)
+    images.add_argument('config', type=Path)
+    images.add_argument('fdtget', type=Path)
     build = commands.add_parser('install')
     build.add_argument('images', type=Path)
     build.add_argument('config', type=Path)
@@ -268,5 +282,7 @@ if __name__ == '__main__':
         configure(args.config, args.requested)
     elif args.command == 'verify-kernel':
         verify_kernel(args.config, args.kernel)
+    elif args.command == 'verify-images':
+        verify_images(args.images, args.config, args.fdtget)
     else:
         install(args.images, args.config, args.fdtget, args.fdtput)

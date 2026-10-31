@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import combined_accelerator_profile as combined
 import emmc_recovery
+import scp_profile
 import usb_profile
 
 
@@ -28,7 +29,6 @@ class CombinedAcceleratorProfileTests(unittest.TestCase):
             '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
             '# BR2_BRICK_VE_QUALIFICATION is not set\n'
-            '# BR2_BRICK_VP9_QUALIFICATION is not set\n'
             '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set\n'
             '# BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION is not set\n'
             'BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y\n'
@@ -69,9 +69,6 @@ class CombinedAcceleratorProfileTests(unittest.TestCase):
    allwinner,video-engine-domain = <&ve_domain>;
    allwinner,sram = <&mm_sram 1>, <&ve_sram 1>; iommus = <&iommu 2>;
    status = "disabled"; }};
-  video-codec@1c00000 {{ compatible = "allwinner,sun50i-a133-vpu-g2";
-   reg = <0x01c00000 0x1000>; interrupts = <0 90 4>;
-   allwinner,video-engine-domain = <&ve_domain>; status = "disabled"; }};
   crypto@1904000 {{ compatible = "allwinner,sun50i-a133-crypto";
    reg = <0x01904000 0xa0>; interrupts = <0 92 1>;
    clocks = <&ccu 39>, <&ccu 38>, <&ccu 53>;
@@ -117,12 +114,26 @@ class CombinedAcceleratorProfileTests(unittest.TestCase):
                       self.config.read_text())
         combined.check_output(self.config, 'disabled')
 
+    def test_configuration_composes_with_deep_sleep_and_is_reversible(self):
+        scp_profile.configure(self.config, 'deep')
+        before = self.config.read_text()
+        combined.configure(self.config, 'qualification')
+        self.assertEqual(
+            combined._fragment(self.config),
+            f'{combined.DEEP_FRAGMENT} {combined.FRAGMENT}')
+        self.assertEqual(scp_profile.profile(self.config), 'deep')
+        combined.check_output(self.config, 'qualification')
+        combined.configure(self.config, 'disabled')
+        self.assertEqual(self.config.read_text(), before)
+
     def test_install_enables_all_reviewed_contracts_atomically(self):
         dtb = self.compile_dtb()
         _, fdtget, fdtput = self.tools()
         combined.configure(self.config, 'qualification')
         combined.install(self.root, self.config, fdtget, fdtput)
+        combined.install(self.root, self.config, fdtget, fdtput)
         combined.validate_active(fdtget, dtb)
+        combined.verify_images(self.root, self.config, fdtget)
 
     def test_wrong_contract_is_rejected_without_mutation(self):
         dtb = self.compile_dtb(g2d_master=4)
@@ -133,7 +144,7 @@ class CombinedAcceleratorProfileTests(unittest.TestCase):
             combined.install(self.root, self.config, fdtget, fdtput)
         self.assertEqual(dtb.read_bytes(), before)
 
-    def test_install_requires_peripheral_usb_and_no_emmc_scp_or_isolated_peer(self):
+    def test_install_requires_peripheral_usb_and_no_emmc_startup_or_isolated_peer(self):
         self.compile_dtb()
         _, fdtget, fdtput = self.tools()
         combined.configure(self.config, 'qualification')
@@ -161,15 +172,19 @@ class CombinedAcceleratorWiringTests(unittest.TestCase):
         fragment = (ROOT / 'board/trimui/brick/'
                     'combined-accelerators.fragment').read_text().splitlines()
         for option in (
+                'CONFIG_CRYPTO_BENCHMARK=m',
                 'CONFIG_VIDEO_SUNXI_CEDRUS_ENCODER_CORE=y',
                 'CONFIG_VIDEO_SUNXI_CEDRUS_A133_ENCODER_QUALIFICATION=y'):
             self.assertIn(option, fragment)
+        for option in ('CONFIG_VIDEO_HANTRO=y',
+                       'CONFIG_VIDEO_HANTRO_SUNXI=y',
+                       'CONFIG_V4L2_VP9=y'):
+            self.assertNotIn(option, fragment)
 
     def test_all_bounded_runners_accept_only_the_versioned_combined_marker(self):
         paths = (
             ROOT / 'package/brick-accelerator-qualification/brick-qualify-g2d',
             ROOT / 'package/brick-accelerator-qualification/brick-qualify-ve',
-            ROOT / 'package/brick-accelerator-qualification/brick-qualify-vp9',
             ROOT / 'package/brick-ce-trng-qualification/brick-qualify-ce-trng',
             ROOT / 'package/brick-encoder-qualification/run-encoder-qualification',
         )
@@ -178,7 +193,18 @@ class CombinedAcceleratorWiringTests(unittest.TestCase):
                 subprocess.run(['/bin/sh', '-n', path], check=True)
                 text = path.read_text()
                 self.assertIn('trimui,accelerator-qualification', text)
-                self.assertIn('combined-v1', text)
+                self.assertIn('combined-v2', text)
+                if path.name == 'run-encoder-qualification':
+                    self.assertIn('exit "$final_rc"', text)
+
+    def test_encoder_core_runner_does_not_enter_suspend(self):
+        runner = (ROOT / 'package/brick-encoder-qualification/'
+                  'run-encoder-qualification').read_text()
+        client = (ROOT / 'package/brick-encoder-qualification/'
+                  'brick-qualify-encoder.c').read_text()
+        self.assertNotIn('--suspend', runner)
+        self.assertIn('[--suspend]', client)
+        self.assertIn('true, suspend', client)
 
     def test_combined_runner_covers_every_engine_and_shared_coexistence(self):
         path = (ROOT / 'package/brick-accelerator-qualification/'
@@ -188,10 +214,9 @@ class CombinedAcceleratorWiringTests(unittest.TestCase):
         for contract in (
                 'brick-qualify-g2d', 'brick-qualify-ve probe',
                 'mpeg2-ipb h264-ip hevc-ip hevc-tiles hevc-wpp vp8-ip',
-                'brick-qualify-vp9 probe', 'brick-qualify-vp9 decode',
                 'run-encoder-qualification', 'brick-qualify-ce-trng core',
-                'brick-qualify-ce-trng lifecycle', 'coexist-g2d',
-                'coexist-ve', 'coexist-vp9', 'coexist-ce',
+                'coexist-g2d',
+                'coexist-ve', 'coexist-ce',
                 'iommu.*fault', 'video-engine-domain'):
             self.assertIn(contract, text)
 

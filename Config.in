@@ -22,13 +22,6 @@ config BR2_BRICK_VE_QUALIFICATION
 	  is intended for deterministic codec and DMA-containment qualification;
 	  the ordinary image keeps every accelerator node disabled.
 
-config BR2_BRICK_VP9_QUALIFICATION
-	bool "Brick VP9 qualification profile"
-	help
-	  Enable only the reviewed A133 Hantro G2 VP9 engine and its shared
-	  video clock/reset provider. The ordinary image keeps the engine
-	  disabled, and the isolated profile does not enable an IOMMU mapping.
-
 config BR2_BRICK_CE_TRNG_QUALIFICATION
 	bool "Brick CE/TRNG qualification profile"
 	help
@@ -39,8 +32,9 @@ config BR2_BRICK_CE_TRNG_QUALIFICATION
 config BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION
 	bool "Brick combined accelerator qualification profile"
 	help
-	  Enable the reviewed G2D, Cedrus, Hantro G2 VP9 and CE/TRNG contracts
-	  together. This profile verifies shared-domain and IOMMU coexistence;
+	  Enable the reviewed G2D, Cedrus and CE/TRNG contracts
+	  together. This profile verifies shared-domain and IOMMU coexistence
+	  either in isolation or with the normal deep-sleep product profile;
 	  the ordinary image keeps every unqualified accelerator disabled.
 
 config BR2_BRICK_CPU_IDLE_QUALIFICATION

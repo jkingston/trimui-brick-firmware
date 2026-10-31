@@ -9,7 +9,6 @@ EMMC_RECOVERY ?= 0
 SCP_PROFILE ?= deep
 G2D_PROFILE ?= disabled
 VE_PROFILE ?= disabled
-VP9_PROFILE ?= disabled
 CE_TRNG_PROFILE ?= disabled
 COMBINED_ACCELERATOR_PROFILE ?= disabled
 CPU_IDLE_PROFILE ?= disabled
@@ -30,9 +29,6 @@ endif
 ifeq ($(filter $(G2D_PROFILE),disabled qualification),)
 $(error G2D_PROFILE must be disabled or qualification)
 endif
-ifeq ($(filter $(VP9_PROFILE),disabled qualification),)
-$(error VP9_PROFILE must be disabled or qualification)
-endif
 ifeq ($(filter $(CE_TRNG_PROFILE),disabled qualification),)
 $(error CE_TRNG_PROFILE must be disabled or qualification)
 endif
@@ -42,11 +38,11 @@ endif
 ifeq ($(filter $(CPU_IDLE_PROFILE),disabled qualification),)
 $(error CPU_IDLE_PROFILE must be disabled or qualification)
 endif
-ifneq ($(words $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE))),$(words $(sort $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE)))))
+ifneq ($(words $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(CE_TRNG_PROFILE))),$(words $(sort $(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(CE_TRNG_PROFILE)))))
 $(error Hardware qualification modes are mutually exclusive)
 endif
 ifneq ($(COMBINED_ACCELERATOR_PROFILE),disabled)
-ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled:disabled)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(CE_TRNG_PROFILE),disabled:disabled:disabled)
 $(error Combined and isolated accelerator qualification modes are mutually exclusive)
 endif
 endif
@@ -60,7 +56,7 @@ endif
 ifneq ($(EMMC_RECOVERY),0)
 $(error CPU idle and eMMC qualification are mutually exclusive)
 endif
-ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled:disabled)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled)
 $(error CPU idle and hardware qualification are mutually exclusive)
 endif
 endif
@@ -74,16 +70,24 @@ endif
 ifneq ($(SCP_PROFILE),disabled)
 $(error EMMC_RECOVERY=1 and SCP_PROFILE are mutually exclusive)
 endif
-ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(VP9_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled:disabled)
+ifneq ($(G2D_PROFILE):$(VE_PROFILE):$(CE_TRNG_PROFILE):$(COMBINED_ACCELERATOR_PROFILE),disabled:disabled:disabled:disabled)
 $(error EMMC_RECOVERY=1 and hardware qualification are mutually exclusive)
 endif
 endif
-ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(VP9_PROFILE) $(CE_TRNG_PROFILE) $(COMBINED_ACCELERATOR_PROFILE)),)
+ifneq ($(filter qualification,$(G2D_PROFILE) $(VE_PROFILE) $(CE_TRNG_PROFILE)),)
 ifneq ($(USB_ROLE),peripheral)
 $(error Hardware qualification requires USB_ROLE=peripheral)
 endif
 ifneq ($(SCP_PROFILE),disabled)
 $(error Hardware qualification and SCP_PROFILE are mutually exclusive)
+endif
+endif
+ifneq ($(COMBINED_ACCELERATOR_PROFILE),disabled)
+ifneq ($(USB_ROLE),peripheral)
+$(error Combined accelerator qualification requires USB_ROLE=peripheral)
+endif
+ifeq ($(SCP_PROFILE),startup)
+$(error Combined accelerator qualification requires SCP_PROFILE=disabled or deep)
 endif
 endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
@@ -110,7 +114,6 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py check-output $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
-	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	python3 $(ROOT)/tools/cpu_idle_profile.py check-output $(O)/.config $(CPU_IDLE_PROFILE)
@@ -120,7 +123,6 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/emmc_recovery.py configure $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py configure $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py configure $(O)/.config $(VE_PROFILE)
-	python3 $(ROOT)/tools/vp9_profile.py configure $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py configure $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py configure $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	python3 $(ROOT)/tools/cpu_idle_profile.py configure $(O)/.config $(CPU_IDLE_PROFILE)
@@ -130,7 +132,6 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
 	python3 $(ROOT)/tools/g2d_profile.py check-output $(O)/.config $(G2D_PROFILE)
 	python3 $(ROOT)/tools/ve_profile.py check-output $(O)/.config $(VE_PROFILE)
-	python3 $(ROOT)/tools/vp9_profile.py check-output $(O)/.config $(VP9_PROFILE)
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	python3 $(ROOT)/tools/cpu_idle_profile.py check-output $(O)/.config $(CPU_IDLE_PROFILE)

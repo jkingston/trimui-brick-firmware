@@ -10,11 +10,13 @@ SYSTEM_SUSPEND_KEY = 'BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND'
 FRAGMENT_KEY = 'BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES'
 WAKE_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-wake.fragment'
 DEEP_FRAGMENT = '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/native-deep.fragment'
+COMBINED_FRAGMENT = (
+    '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/combined-accelerators.fragment'
+)
 NON_SCP_FRAGMENTS = {
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ve.fragment',
-    '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/vp9.fragment',
     '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/ce-trng.fragment',
-    '$(BR2_EXTERNAL_BRICK_PATH)/board/trimui/brick/combined-accelerators.fragment',
+    COMBINED_FRAGMENT,
 }
 LINES = {
     'disabled': (f'# {PACKAGE_KEY} is not set',
@@ -48,6 +50,9 @@ def profile(config):
     for name, lines in LINES.items():
         if (package, system_suspend, fragment) == lines:
             return name
+    if (package, system_suspend) == LINES['deep'][:2] and fragment == (
+            f'{FRAGMENT_KEY}="{DEEP_FRAGMENT} {COMBINED_FRAGMENT}"'):
+        return 'deep'
     if (package, system_suspend) == LINES['disabled'][:2] and \
             fragment.removeprefix(f'{FRAGMENT_KEY}="').removesuffix('"') in NON_SCP_FRAGMENTS:
         return 'disabled'

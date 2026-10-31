@@ -29,7 +29,6 @@ class CeTrngProfileTests(unittest.TestCase):
             '# BR2_PACKAGE_BRICK_SCP_SYSTEM_SUSPEND is not set\n'
             '# BR2_BRICK_G2D_QUALIFICATION is not set\n'
             '# BR2_BRICK_VE_QUALIFICATION is not set\n'
-            '# BR2_BRICK_VP9_QUALIFICATION is not set\n'
             '# BR2_BRICK_CE_TRNG_QUALIFICATION is not set\n')
 
     def tools(self):
@@ -42,8 +41,7 @@ class CeTrngProfileTests(unittest.TestCase):
 
     def compile_dtb(self, *, status='disabled', irq=92, edge=1,
                     clocks=(39, 38, 53), reset=4, iommus=False,
-                    iommu_status='disabled', g2d='disabled', ve='disabled',
-                    vp9='disabled'):
+                    iommu_status='disabled', g2d='disabled', ve='disabled'):
         dtc, _, _ = self.tools()
         iommu = 'iommus = <&iommu 7>;' if iommus else ''
         source = f'''/dts-v1/;
@@ -58,8 +56,6 @@ class CeTrngProfileTests(unittest.TestCase):
    reg = <0x06480000 0x40000>; status = "{g2d}"; }};
   video-codec@1c0e000 {{ compatible = "allwinner,sun50i-a133-video-engine";
    reg = <0x01c0e000 0x1000>; status = "{ve}"; }};
-  video-codec@1c00000 {{ compatible = "allwinner,sun50i-a133-vpu-g2";
-   reg = <0x01c00000 0x1000>; status = "{vp9}"; }};
   crypto@1904000 {{ compatible = "allwinner,sun50i-a133-crypto";
    reg = <0x01904000 0xa0>; interrupts = <0 {irq} {edge}>;
    clocks = <&ccu {clocks[0]}>, <&ccu {clocks[1]}>, <&ccu {clocks[2]}>;
@@ -120,8 +116,7 @@ class CeTrngProfileTests(unittest.TestCase):
         ce_trng_profile.configure(self.config, 'qualification')
         for name, arguments in (('IOMMU', {'iommu_status': 'okay'}),
                                 ('G2D', {'g2d': 'okay'}),
-                                ('video', {'ve': 'okay'}),
-                                ('VP9', {'vp9': 'okay'})):
+                                ('video', {'ve': 'okay'})):
             with self.subTest(name=name):
                 dtb = self.compile_dtb(**arguments)
                 before = dtb.read_bytes()
@@ -165,11 +160,15 @@ class CeTrngProfileTests(unittest.TestCase):
         hwrng.parent.mkdir(parents=True)
         (hwrng.parent / 'core.o').write_bytes(b'object')
         helper = hwrng.parent / 'core-internal.h'
-        (kernel / '.config').write_text(''.join(
+        (kernel / '.config').write_text('CONFIG_CRYPTO_BENCHMARK=m\n' + ''.join(
             f'{key}=y\n' for key in (
                 'CONFIG_CRYPTO_DEV_SUN50I_A133_CE',
-                'CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG', 'CONFIG_HW_RANDOM',
+                'CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG',
+                'CONFIG_HW_RANDOM',
                 'CONFIG_CRYPTO_USER_API_HASH', 'CONFIG_CRYPTO_USER_API_SKCIPHER')))
+        tcrypt = kernel / 'crypto/tcrypt.ko'
+        tcrypt.parent.mkdir(parents=True)
+        tcrypt.write_bytes(b'module')
         source.write_text('''
 if (device_iommu_mapped(dev))
     return -EOPNOTSUPP;
@@ -267,11 +266,15 @@ hwrng_validate_quality(&rng, 1025)
         documentation.write_text(
             'The core rejects attempts to assign\n'
             'such a source a nonzero ``rng_quality`` value.\n')
-        (kernel / '.config').write_text(''.join(
+        (kernel / '.config').write_text('CONFIG_CRYPTO_BENCHMARK=m\n' + ''.join(
             f'{key}=y\n' for key in (
                 'CONFIG_CRYPTO_DEV_SUN50I_A133_CE',
-                'CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG', 'CONFIG_HW_RANDOM',
+                'CONFIG_CRYPTO_DEV_SUN50I_A133_CE_TRNG',
+                'CONFIG_HW_RANDOM',
                 'CONFIG_CRYPTO_USER_API_HASH', 'CONFIG_CRYPTO_USER_API_SKCIPHER')))
+        tcrypt = kernel / 'crypto/tcrypt.ko'
+        tcrypt.parent.mkdir(parents=True)
+        tcrypt.write_bytes(b'module')
         valid = '''
 static ssize_t rng_quality_store(
 {
@@ -326,7 +329,10 @@ class CeTrngTargetTests(unittest.TestCase):
         for required in ('timeout 180 "$tool" kat',
                          'concurrency 1024', 'bs=8192 count=1',
                          'rng_quality', 'iommu_group', 'driver/unbind',
-                         'setsid "$tool" concurrency 4294967295',
+                         'CE lifecycle unavailable: driver suppresses bind attributes',
+                         'modprobe tcrypt mode="$mode" alg="$algorithm"',
+                         'alg=ecb-aes-a133-ce',
+                         'run_exact_ce_suite pre-suspend',
                          'kill -TERM -"$pgid"', 'kill -KILL -"$pgid"',
                          'A133 TRNG survived CE unbind',
                          'select_and_probe_trng rebind',
@@ -334,12 +340,15 @@ class CeTrngTargetTests(unittest.TestCase):
                          'of="$out/trng-$phase.bin" bs=32 count=1',
                          '"$(wc -c < "$out/trng-$phase.bin")" -eq 32',
                          "printf 'freeze\\n' > /sys/power/state",
-                         'post-resume-kat.log', 'post-reset-kat.log'):
+                         'post-resume-af-alg.log', 'post-reset-af-alg.log'):
             self.assertIn(required, script)
         unbind = script.index('> "$driver/unbind"')
+        unavailable = script.index(
+            'CE lifecycle unavailable: driver suppresses bind attributes')
         trng_absent = script.index('A133 TRNG survived CE unbind')
         rebind = script.index('> "$driver/bind"')
         rebind_probe = script.index('select_and_probe_trng rebind')
+        self.assertLess(unavailable, unbind)
         self.assertLess(unbind, trng_absent)
         self.assertLess(trng_absent, rebind)
         self.assertLess(rebind, rebind_probe)
