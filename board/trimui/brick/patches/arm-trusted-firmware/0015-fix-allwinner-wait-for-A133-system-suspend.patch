@@ -1,0 +1,39 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] fix(allwinner): wait for A133 system suspend
+
+The vendor SCP consumes CPU_OP asynchronously after the PSCI suspend
+callback returns.  Keep the last CPU in WFI until the SCP either completes
+power-down or delivers a wake event; otherwise PSCI starts its wake path
+immediately after submitting CPU_OP.
+
+Limit the hook to A133 system suspend.  CPU and cluster idle retain the
+existing path.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+diff --git a/plat/allwinner/common/sunxi_native_pm.c b/plat/allwinner/common/sunxi_native_pm.c
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -218,6 +218,14 @@ static void sunxi_a133_pwr_domain_suspend_finish(
+ 	      kind, ret);
+ 	panic();
+ }
++
++static void sunxi_a133_pwr_domain_pwr_down(
++	const psci_power_state_t *target_state)
++{
++	if (sunxi_a133_target_kind(target_state) == SUNXI_A133_SUSPEND_SYSTEM) {
++		wfi();
++	}
++}
+ #endif
+ 
+ static const plat_psci_ops_t sunxi_native_psci_ops = {
+@@ -251,6 +259,7 @@ static const plat_psci_ops_t sunxi_a133_system_suspend_psci_ops = {
+ 		sunxi_a133_pwr_domain_suspend_pwrdown_early,
+ 	.pwr_domain_suspend		= sunxi_a133_pwr_domain_suspend,
+ 	.pwr_domain_suspend_finish	= sunxi_a133_pwr_domain_suspend_finish,
++	.pwr_domain_pwr_down		= sunxi_a133_pwr_domain_pwr_down,
+ 	.get_sys_suspend_power_state	=
+ 		sunxi_a133_get_sys_suspend_power_state,
+ #if defined(SUNXI_A133_NATIVE_CPU_SUSPEND)

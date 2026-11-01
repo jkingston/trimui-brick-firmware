@@ -128,7 +128,7 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
     f = Path(directory) / 'firmware.itb'
     f.write_bytes(fit)
     require(binary_prop(f, '/images/atf', 'data') == a.bl31.read_bytes(), 'Embedded TF-A mismatch')
-    require(prop(f, '/images/atf', 'load', 'x') == '40000000', 'Unexpected TF-A load address')
+    require(prop(f, '/images/atf', 'load', 'x') == '48000000', 'Unexpected TF-A load address')
     require(prop(f, '/images/uboot', 'load', 'x') == '4a000000', 'Unexpected U-Boot load address')
     if scp_enabled:
         scp_source = (a.uboot / 'arch/arm/mach-sunxi/a133_vendor_scp.c').read_text()
@@ -142,6 +142,10 @@ with tempfile.TemporaryDirectory(prefix='brick-boot-') as directory:
                 '#define A133_SCP_SRAM_OFFSET\t\t0x00004000UL' in scp_source and
                 '#define A133_SCP_SRAM_SIZE\t\t0x00010000UL' in scp_source,
                 'Unexpected A133 sparse vector or SRAM layout')
+        require('#define A133_STANDBY_SCRATCH_BASE\t0x40020000ULL' in scp_source and
+                '#define A133_TFA_BASE\t\t\t0x48000000ULL' in scp_source and
+                '#define A133_VENDOR_RESERVE_BASE\t0x48040000ULL' in scp_source,
+                'Unexpected A133 secure firmware memory layout')
         require('ret = a133_scp_copy_runtime(scp_dst, scp_src);' in scp_source,
                 'SCP runtime image is not copied through its sparse aperture')
         start = scp_source.find('static int a133_scp_start(void)')

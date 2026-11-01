@@ -1,0 +1,46 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] sunxi: clear stale Brick suspend token in SPL
+
+A deep-suspend resume enters BL31 directly and does not execute SPL. A full
+boot always executes SPL before BL31, so clear the retained resume token
+there. This prevents a watchdog or cold reset after an interrupted suspend
+from being mistaken for a warm resume.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ arch/arm/mach-sunxi/board.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/arch/arm/mach-sunxi/board.c b/arch/arm/mach-sunxi/board.c
+index b54efea..af5cd42 100644
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -475,6 +475,18 @@ u32 spl_mmc_boot_mode(struct mmc *mmc, const u32 boot_device)
+ 	return result;
+ }
+ 
++static void trimui_brick_clear_suspend_token(void)
++{
++	void __iomem *token = (void __iomem *)0x07000100;
++
++	if (!IS_ENABLED(CONFIG_TRIMUI_BRICK_SD_DIAGNOSTIC))
++		return;
++
++	writel(0, token);
++	/* Complete the always-on-domain write before BL31 can inspect it. */
++	(void)readl(token);
++}
++
+ void board_init_f(ulong dummy)
+ {
+ 	sunxi_sram_init();
+@@ -483,5 +495,7 @@ void board_init_f(ulong dummy)
+ 	timer_init();
+ 	clock_init();
++	trimui_brick_clear_suspend_token();
++
+ 	gpio_init();
+ 
+ 	spl_init();
+-- 
+2.51.0

@@ -1,0 +1,74 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] fix(allwinner): match the A133 stock secure-memory layout
+
+Match the stock A133 secure-memory contract: keep BL31 in the
+0x48000000..0x48040000 window, preserve the separate standby scratch
+at 0x40020000, and leave 0x48040000 upward to the vendor SCP.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+diff --git a/plat/allwinner/common/include/platform_def.h b/plat/allwinner/common/include/platform_def.h
+--- a/plat/allwinner/common/include/platform_def.h
++++ b/plat/allwinner/common/include/platform_def.h
+@@ -15,12 +15,18 @@
+ 
+ #ifdef SUNXI_BL31_IN_DRAM
+ 
+-#define BL31_BASE			SUNXI_DRAM_BASE
++#ifndef SUNXI_BL31_BASE
++#define SUNXI_BL31_BASE		SUNXI_DRAM_BASE
++#endif
++#define BL31_BASE			SUNXI_BL31_BASE
+ #ifndef SUNXI_BL31_LIMIT
+-#define SUNXI_BL31_LIMIT		(SUNXI_DRAM_BASE + 0x40000)
++#define SUNXI_BL31_LIMIT		(SUNXI_BL31_BASE + 0x40000)
+ #endif
+ #ifndef SUNXI_BL31_RESERVED_LIMIT
+ #define SUNXI_BL31_RESERVED_LIMIT	SUNXI_BL31_LIMIT
++#endif
++#ifndef SUNXI_BL31_RESERVED_NODE
++#define SUNXI_BL31_RESERVED_NODE	"tf-a@40000000"
+ #endif
+ #define BL31_LIMIT			SUNXI_BL31_LIMIT
+ 
+diff --git a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+--- a/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
++++ b/plat/allwinner/sun50i_a133/include/sunxi_mmap.h
+@@ -28,9 +28,11 @@
+ #define SUNXI_STANDBY_SCRATCH_BASE	0x40020000
+ #define SUNXI_STANDBY_SCRATCH_SIZE	0x00000800
+ 
+-/* Keep BL31 below the scratch while reserving the full firmware window. */
+-#define SUNXI_BL31_LIMIT		SUNXI_STANDBY_SCRATCH_BASE
+-#define SUNXI_BL31_RESERVED_LIMIT	(SUNXI_DRAM_BASE + 0x40000)
++/* Stock loads BL31 immediately below the first SCP-owned DRAM window. */
++#define SUNXI_BL31_BASE		0x48000000
++#define SUNXI_BL31_LIMIT		0x48040000
++#define SUNXI_BL31_RESERVED_LIMIT	SUNXI_BL31_LIMIT
++#define SUNXI_BL31_RESERVED_NODE	"tf-a@48000000"
+ 
+ #if (SUNXI_STANDBY_SCRATCH_BASE & 0xfff) != 0
+ #error "A133 standby scratch must start on a BL31 page boundary"
+@@ -35,8 +37,8 @@
+ #endif
+ #if (SUNXI_STANDBY_SCRATCH_BASE < SUNXI_DRAM_BASE) || \
+ 	(SUNXI_STANDBY_SCRATCH_BASE + SUNXI_STANDBY_SCRATCH_SIZE > \
+-	 SUNXI_BL31_RESERVED_LIMIT)
+-#error "A133 standby scratch lies outside the reserved firmware window"
++	 SUNXI_BL31_BASE)
++#error "A133 standby scratch overlaps the secure firmware window"
+ #endif
+ #endif
+ 
+diff --git a/plat/allwinner/common/sunxi_prepare_dtb.c b/plat/allwinner/common/sunxi_prepare_dtb.c
+--- a/plat/allwinner/common/sunxi_prepare_dtb.c
++++ b/plat/allwinner/common/sunxi_prepare_dtb.c
+@@ -28,7 +28,7 @@
+ 
+ #ifdef SUNXI_BL31_IN_DRAM
+ 	/* Reserve the complete platform firmware window from the normal world. */
+-	if (fdt_add_reserved_memory(fdt, "tf-a@40000000", BL31_BASE,
++	if (fdt_add_reserved_memory(fdt, SUNXI_BL31_RESERVED_NODE, BL31_BASE,
+ 				    SUNXI_BL31_RESERVED_LIMIT - BL31_BASE)) {
+ 		WARN("Failed to add reserved memory nodes to DT.\n");
+ 	}
