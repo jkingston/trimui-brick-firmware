@@ -15,6 +15,11 @@ Images and checksums are written to `output/build/images/`. Source revisions
 are pinned in `configs/brick_defconfig`. GPU and radio binaries are extracted
 from a checksum-verified stock archive and are not stored in Git.
 
+`make release` builds from pinned sources in `output/release` and verifies the
+manifest, source cleanliness, payload hashes and complete-image checksums.
+Product repositories compose with the base by passing their external tree in
+`EXTERNALS`; the base remains the first tree.
+
 For tandem kernel development, place the kernel checkout at `../linux` and run:
 
 ```sh

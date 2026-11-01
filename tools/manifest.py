@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import re
 from usb_profile import profile
 from scp_profile import profile as scp_profile
 from emmc_recovery import enabled as emmc_recovery_enabled
@@ -33,9 +34,27 @@ def source(path):
     except subprocess.CalledProcessError:
         return {'commit': None, 'dirty': None}
 
+def config_string(config, key):
+    match = re.search(r'^' + re.escape(key) + r'="([^"]*)"$',
+                      config.read_text(), re.M)
+    return match.group(1) if match else None
+
+def external_sources(config):
+    names = (config_string(config, 'BR2_EXTERNAL_NAMES') or '').split()
+    result = {}
+    for name in names:
+        path = config_string(config, f'BR2_EXTERNAL_{name}_PATH')
+        if not path:
+            continue
+        entry = source(Path(path))
+        entry['path_name'] = name
+        result[name.lower()] = entry
+    return result
+
 kernel = source(a.kernel_override) if a.kernel_override else {'commit': a.kernel_revision, 'dirty': False}
 kernel['release'] = (a.images / 'kernel.release').read_text().strip()
-manifest = {'firmware': source(root), 'kernel': kernel, 'buildroot': '2026.08.1',
+manifest = {'firmware': source(root), 'kernel': kernel,
+            'externals': external_sources(a.config), 'buildroot': '2026.08.1',
             'usb_role': profile(a.config),
             'emmc_recovery': emmc_recovery_enabled(a.config),
             'g2d_qualification': g2d_qualification_enabled(a.config),

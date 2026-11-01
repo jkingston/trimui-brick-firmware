@@ -4,6 +4,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BUILDROOT := $(ROOT)/output/buildroot-$(BUILDROOT_VERSION)
 O ?= $(ROOT)/output/build
 override O := $(abspath $(O))
+EXTERNALS ?= $(ROOT)
+RELEASE_O ?= $(ROOT)/output/release
 USB_ROLE ?= peripheral
 EMMC_RECOVERY ?= 0
 SCP_PROFILE ?= deep
@@ -93,9 +95,9 @@ endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
-.PHONY: all configure dev kernel-rebuild kernel-reconfigure check clean
+.PHONY: all configure dev kernel-rebuild kernel-reconfigure check clean release release-check
 all: $(O)/.config
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads
 
 $(ARCHIVE):
 	mkdir -p $(@D)
@@ -117,7 +119,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/ce_trng_profile.py check-output $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py check-output $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	python3 $(ROOT)/tools/cpu_idle_profile.py check-output $(O)/.config $(CPU_IDLE_PROFILE)
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads brick_defconfig
 	python3 $(ROOT)/tools/usb_profile.py configure $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py configure $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py configure $(O)/.config $(EMMC_RECOVERY)
@@ -126,7 +128,7 @@ configure: $(BUILDROOT)/.brick-extracted
 	python3 $(ROOT)/tools/ce_trng_profile.py configure $(O)/.config $(CE_TRNG_PROFILE)
 	python3 $(ROOT)/tools/combined_accelerator_profile.py configure $(O)/.config $(COMBINED_ACCELERATOR_PROFILE)
 	python3 $(ROOT)/tools/cpu_idle_profile.py configure $(O)/.config $(CPU_IDLE_PROFILE)
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads olddefconfig
 	python3 $(ROOT)/tools/usb_profile.py check-output $(O)/.config $(USB_ROLE) $(SCP_PROFILE)
 	python3 $(ROOT)/tools/scp_profile.py check-output $(O)/.config $(SCP_PROFILE)
 	python3 $(ROOT)/tools/emmc_recovery.py check-output $(O)/.config $(EMMC_RECOVERY)
@@ -144,13 +146,24 @@ dev: $(O)/.config
 	printf 'LINUX_OVERRIDE_SRCDIR = %s\n' "$(abspath $(KERNEL_DIR))" > $(O)/local.mk
 
 kernel-rebuild: $(O)/.config
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads linux-rebuild all
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads linux-rebuild all
 
 kernel-reconfigure: $(O)/.config
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads linux-reconfigure all
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads linux-reconfigure all
 
 check:
 	python3 -m unittest discover -s $(ROOT)/tests
 
 clean:
-	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL=$(ROOT) BR2_DL_DIR=$(ROOT)/output/downloads clean
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads clean
+
+release:
+	test ! -e "$(RELEASE_O)/.config"
+	test ! -e "$(RELEASE_O)/local.mk"
+	$(MAKE) O=$(RELEASE_O) EXTERNALS="$(EXTERNALS)" configure
+	$(MAKE) O=$(RELEASE_O) EXTERNALS="$(EXTERNALS)" all
+	$(MAKE) O=$(RELEASE_O) EXTERNALS="$(EXTERNALS)" release-check
+
+release-check:
+	test ! -e "$(O)/local.mk"
+	python3 $(ROOT)/tools/verify_release.py $(O)/images

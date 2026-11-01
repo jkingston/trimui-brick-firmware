@@ -70,6 +70,30 @@ class ManifestProfileTests(unittest.TestCase):
         cpu_idle_profile.configure(self.config, 'qualification')
         self.assert_qualification('cpu_idle_qualification')
 
+    def test_manifest_records_composed_product_revision(self):
+        product = self.root / 'product'
+        product.mkdir()
+        subprocess.run(['git', 'init', '-q', str(product)], check=True)
+        subprocess.run(['git', '-C', str(product), 'config', 'user.email',
+                        'test@example.invalid'], check=True)
+        subprocess.run(['git', '-C', str(product), 'config', 'user.name',
+                        'Test'], check=True)
+        (product / 'source').write_text('product\n')
+        subprocess.run(['git', '-C', str(product), 'add', 'source'], check=True)
+        subprocess.run(['git', '-C', str(product), 'commit', '-q', '-m',
+                        'product'], check=True)
+        with self.config.open('a') as config:
+            config.write('BR2_EXTERNAL_NAMES="BRICK_UI"\n')
+            config.write(f'BR2_EXTERNAL_BRICK_UI_PATH="{product}"\n')
+        expected = subprocess.check_output(
+            ['git', '-C', str(product), 'rev-parse', 'HEAD'], text=True).strip()
+        manifest = self.manifest()
+        self.assertEqual(manifest['externals']['brick_ui'], {
+            'commit': expected,
+            'dirty': False,
+            'path_name': 'BRICK_UI',
+        })
+
 
 if __name__ == '__main__':
     unittest.main()
