@@ -103,6 +103,19 @@ start)
 	done
 	[ "$(cat /sys/class/block/mmcblk0p2/start)" = "$start" ] &&
 		[ "$(cat /sys/class/block/mmcblk0p2/size)" = "$size" ] || fail 'kernel partition does not match MBR'
+	disk_size=$(cat /sys/class/block/mmcblk0/size) || fail 'cannot read SD capacity'
+	target_size=$((disk_size - start))
+	[ "$target_size" -ge "$size" ] || fail 'data partition exceeds SD capacity'
+	if [ "$target_size" -gt "$size" ]; then
+		brick-grow-data /dev/mmcblk0 || fail 'cannot extend data partition'
+		attempt=0
+		while [ "$(cat /sys/class/block/mmcblk0p2/size 2>/dev/null || true)" != "$target_size" ]; do
+			[ "$attempt" -lt 50 ] || fail 'kernel did not reload extended data partition'
+			sleep 0.1
+			attempt=$((attempt + 1))
+		done
+		size=$target_size
+	fi
 	identity=$(blkid "$device") || fail 'cannot read filesystem identity'
 	printf '%s\n' "$identity" | grep -q ' TYPE="ext4"' || fail 'expected ext4'
 	printf '%s\n' "$identity" | grep -q ' LABEL="brick-data"' || fail 'unexpected volume label'
@@ -114,6 +127,20 @@ start)
 	mount -t ext4 -o nodev,nosuid,noexec /dev/mmcblk0p2 /data || fail 'mount failed'
 	: > "$state/mount-owned"
 	verify_mount || fail 'mount is not the expected writable filesystem'
+	[ ! -L /data/.partition-sectors ] || fail 'partition size marker is a symlink'
+	current_size=
+	if [ -f /data/.partition-sectors ]; then
+		current_size=$(cat /data/.partition-sectors)
+	fi
+	if [ "$current_size" != "$size" ]; then
+		if ! resize2fs "$device"; then
+			umount /data || fail 'filesystem growth failed and data remained mounted'
+			rm -f "$state/mount-owned"
+			fail 'cannot extend data filesystem'
+		fi
+		printf '%s\n' "$size" > /data/.partition-sectors.new || fail 'cannot record data capacity'
+		mv /data/.partition-sectors.new /data/.partition-sectors
+	fi
 	[ ! -L /data/schema ] || fail 'schema is a symlink'
 	if [ -e /data/schema ]; then
 		[ "$(cat /data/schema)" = 1 ] || fail 'unsupported data schema'

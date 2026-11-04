@@ -1,0 +1,5 @@
+config BR2_PACKAGE_BRICK_DATA_GROW
+	bool "Brick data partition growth"
+	help
+	  Safely extend the Brick SD card's second MBR partition to the end of
+	  the card before persistent data is mounted.
