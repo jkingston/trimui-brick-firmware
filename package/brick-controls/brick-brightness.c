@@ -113,6 +113,8 @@ int main(int argc, char **argv)
 	int fd = -1, lock, saved, result = 1;
 	double scan = 0, save = 0;
 	bool dirty = false;
+	if (argc == 2 && (!strcmp(argv[1], "--off") || !strcmp(argv[1], "--wake")))
+		return display_change(!strcmp(argv[1], "--off") ? DISPLAY_OFF : DISPLAY_AWAKE, 0, NULL) ? 1 : 0;
 	if (argc == 3 && !strcmp(argv[1], "--set")) {
 		char *end; errno = 0;
 		long level = strtol(argv[2], &end, 10);
@@ -120,7 +122,7 @@ int main(int argc, char **argv)
 		return set_level(level) ? 1 : 0;
 	}
 	if (argc != 2) {
-		fprintf(stderr, "Usage: brick-brightness STATEFILE | --set LEVEL(0..10)\n");
+		fprintf(stderr, "Usage: brick-brightness STATEFILE | --set LEVEL(0..10) | --off | --wake\n");
 		return 2;
 	}
 	lock = open("/run/brick-brightness.lock", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
