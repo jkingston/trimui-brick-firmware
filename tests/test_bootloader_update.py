@@ -69,17 +69,19 @@ def authorized(candidate):
     return boot.authorize_candidate(candidate, raw, boot.sha256(raw)), raw
 
 
-def mbr(include_data=True):
+def mbr(include_data=True, data_sectors=boot.DATA_PARTITION_SECTORS, legacy=False):
     sector = bytearray(512)
     boot_entry = bytearray(16)
     boot_entry[0] = 0x80
     boot_entry[4] = 0x0C
-    struct.pack_into("<II", boot_entry, 8, boot.BOOT_PARTITION_START,
-                     boot.BOOT_PARTITION_SECTORS)
+    boot_sectors = (boot.LEGACY_BOOT_PARTITION_SECTORS if legacy else
+                    boot.BOOT_PARTITION_SECTORS)
+    data_start = (boot.LEGACY_DATA_PARTITION_START if legacy else
+                  boot.DATA_PARTITION_START)
+    struct.pack_into("<II", boot_entry, 8, boot.BOOT_PARTITION_START, boot_sectors)
     data_entry = bytearray(16)
     data_entry[4] = 0x83
-    struct.pack_into("<II", data_entry, 8, boot.DATA_PARTITION_START,
-                     boot.DATA_PARTITION_SECTORS)
+    struct.pack_into("<II", data_entry, 8, data_start, data_sectors)
     sector[446:462] = boot_entry
     if include_data:
         sector[462:478] = data_entry
@@ -118,7 +120,7 @@ class BootloaderLifecycleTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.card_path = self.root / "card.img"
         with self.card_path.open("wb") as card:
-            card.truncate(192 * 1024 * 1024)
+            card.truncate(320 * 1024 * 1024)
             card.seek(0)
             card.write(mbr())
         self.current = image(42001, 0x21)
@@ -131,7 +133,7 @@ class BootloaderLifecycleTests(unittest.TestCase):
             card.write(self.original_region)
             card.seek(boot.BOOT_END)
             card.write(b"PARTITION-SENTINEL")
-            card.seek(128 * 1024 * 1024)
+            card.seek(boot.DATA_PARTITION_START * 512)
             card.write(b"DATA-SENTINEL")
         self.original_backup = self.raw(0, boot.BACKUP_SIZE)
         self.identity = boot.Identity(CID)
@@ -155,7 +157,8 @@ class BootloaderLifecycleTests(unittest.TestCase):
         expected = self.candidate + self.original_region[len(self.candidate):]
         self.assertEqual(self.raw(boot.BOOT_START, boot.BOOT_SIZE), expected)
         self.assertEqual(self.raw(boot.BOOT_END, 18), b"PARTITION-SENTINEL")
-        self.assertEqual(self.raw(128 * 1024 * 1024, 13), b"DATA-SENTINEL")
+        self.assertEqual(self.raw(boot.DATA_PARTITION_START * 512, 13),
+                         b"DATA-SENTINEL")
         self.assertEqual(self.backup.read_bytes(), self.original_backup)
         self.assertEqual(metadata["backup"]["sha256"], hashlib.sha256(self.original_backup).hexdigest())
         self.assertEqual(metadata["candidate"]["manifest_sha256"],
@@ -236,6 +239,23 @@ class BootloaderLifecycleTests(unittest.TestCase):
             boot.upgrade(card, self.candidate, self.candidate_identity,
                          [("known.bin", self.current)], CID, self.backup)
         self.assertFalse(self.backup.exists())
+
+    def test_data_partition_grown_in_place_is_accepted(self):
+        with self.card_path.open("r+b") as card:
+            card.seek(0)
+            card.write(mbr(data_sectors=boot.DATA_PARTITION_SECTORS * 2))
+            card.truncate(384 * 1024 * 1024)
+        metadata = self.update(dry_run=True)
+        self.assertEqual(metadata["card_layout"]["partitions"][1][3],
+                         boot.DATA_PARTITION_SECTORS * 2)
+
+    def test_legacy_128mib_layout_remains_accepted(self):
+        with self.card_path.open("r+b") as card:
+            card.seek(0)
+            card.write(mbr(legacy=True))
+        metadata = self.update(dry_run=True)
+        self.assertEqual(metadata["card_layout"]["partitions"][0][3],
+                         boot.LEGACY_BOOT_PARTITION_SECTORS)
 
     def test_deployed_boot_only_partition_generation_is_accepted(self):
         with self.card_path.open("r+b") as card:
@@ -418,7 +438,7 @@ class FakeAdb:
         if "device/type" in command:
             return self.completed(argv, f"SD\n{CID}\n512\n".encode())
         if command == "cat /sys/block/mmcblk1/size":
-            return self.completed(argv, b"524288\n")
+            return self.completed(argv, b"786432\n")
         if "dd if=/tmp/.brick-bootloader-" in command:
             import re
             match = re.search(r"dd if=(/tmp/[^ ]+) of=/dev/mmcblk1 bs=4096 seek=([0-9]+)",

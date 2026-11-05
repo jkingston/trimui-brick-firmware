@@ -6,6 +6,15 @@ flock -x 9
 [ ! -f /etc/default/brick-power ] || . /etc/default/brick-power
 export BRICK_DIM_SECONDS=${BRICK_DIM_SECONDS:-300}
 export BRICK_SUSPEND_SECONDS=${BRICK_SUSPEND_SECONDS:-0}
+if [ -r /data/settings/display-timeout ]; then
+	IFS= read -r configured < /data/settings/display-timeout || configured=
+	case "$configured" in 0|30|60|180|300|600) BRICK_DIM_SECONDS=$configured ;; esac
+fi
+if [ -r /data/settings/suspend-timeout ]; then
+	IFS= read -r configured < /data/settings/suspend-timeout || configured=
+	case "$configured" in 0|300|900|1800|3600) BRICK_SUSPEND_SECONDS=$configured ;; esac
+fi
+export BRICK_DIM_SECONDS BRICK_SUSPEND_SECONDS
 daemon=/usr/sbin/brick-power-key
 pidfile=/run/brick-power-key/pid
 case "${1:-}" in

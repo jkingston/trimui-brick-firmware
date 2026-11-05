@@ -1,0 +1,33 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] board: trimui-brick: prepare the product boot path
+
+Keep the serial console available for recovery while suppressing routine kernel
+messages and the framebuffer cursor. Fatal messages remain visible on serial.
+Load the initramfs above the stock 0x48000000..0x49ffffff reserved window;
+the product rootfs is larger than the early bring-up image and crosses that
+window when loaded at 0x45000000.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ configs/trimui-brick_defconfig | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/configs/trimui-brick_defconfig b/configs/trimui-brick_defconfig
+--- a/configs/trimui-brick_defconfig
++++ b/configs/trimui-brick_defconfig
+@@ -33,11 +33,11 @@ CONFIG_CMD_BOOTCOUNT=y
+ CONFIG_USE_BOOTCOMMAND=y
+ CONFIG_HUSH_PARSER=y
+ CONFIG_SUPPORT_RAW_INITRD=y
+-CONFIG_BOOTCOMMAND="gpio set PH3; sleep 0.12; gpio clear PH3; setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x45000000; for brick_bootdir in brick-diag brick-previous brick-baseline; do if load mmc 0:1 ${kernel_addr_r} ${brick_bootdir}/Image && load mmc 0:1 ${ramdisk_addr_r} ${brick_bootdir}/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} ${brick_bootdir}/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x48000000 0x40000; then setenv bootargs console=ttyS0,115200 loglevel=8 rdinit=/init brick.bootdir=${brick_bootdir}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; done; echo SD boot failed; while true; do sleep 1; done"
++CONFIG_BOOTCOMMAND="gpio set PH3; sleep 0.12; gpio clear PH3; setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x50000000; for brick_bootdir in brick-diag brick-previous brick-baseline; do if load mmc 0:1 ${kernel_addr_r} ${brick_bootdir}/Image && load mmc 0:1 ${ramdisk_addr_r} ${brick_bootdir}/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} ${brick_bootdir}/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x48000000 0x40000; then setenv bootargs console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 rdinit=/init brick.bootdir=${brick_bootdir}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; done; echo SD boot failed; while true; do sleep 1; done"
+ CONFIG_BOOTCOUNT_LIMIT=y
+ CONFIG_BOOTCOUNT_FS=y
+ CONFIG_BOOTCOUNT_BOOTLIMIT=1
+-CONFIG_BOOTCOUNT_ALTBOOTCMD="gpio set PH3; sleep 0.12; gpio clear PH3; setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x45000000; for brick_bootdir in brick-previous brick-baseline; do if load mmc 0:1 ${kernel_addr_r} ${brick_bootdir}/Image && load mmc 0:1 ${ramdisk_addr_r} ${brick_bootdir}/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} ${brick_bootdir}/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x48000000 0x40000; then setenv bootargs console=ttyS0,115200 loglevel=8 rdinit=/init brick.bootdir=${brick_bootdir}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; done; echo SD recovery boot failed; while true; do sleep 1; done"
++CONFIG_BOOTCOUNT_ALTBOOTCMD="gpio set PH3; sleep 0.12; gpio clear PH3; setenv kernel_addr_r 0x42000000; setenv fdt_addr_r 0x44000000; setenv ramdisk_addr_r 0x50000000; for brick_bootdir in brick-previous brick-baseline; do if load mmc 0:1 ${kernel_addr_r} ${brick_bootdir}/Image && load mmc 0:1 ${ramdisk_addr_r} ${brick_bootdir}/initramfs.cpio.gz && setenv diag_rdsize ${filesize} && load mmc 0:1 ${fdt_addr_r} ${brick_bootdir}/brick-usb.dtb && fdt addr ${fdt_addr_r} && fdt resize 4096 && fdt rsvmem add 0x48000000 0x40000; then setenv bootargs console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 rdinit=/init brick.bootdir=${brick_bootdir}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${diag_rdsize} ${fdt_addr_r}; fi; done; echo SD recovery boot failed; while true; do sleep 1; done"
+ CONFIG_SYS_BOOTCOUNT_FS_INTERFACE="mmc"
+ CONFIG_SYS_BOOTCOUNT_FS_DEVPART="0:1"
+ CONFIG_SYS_BOOTCOUNT_FS_NAME="/brick-bootcount"
+-- 
+2.51.0

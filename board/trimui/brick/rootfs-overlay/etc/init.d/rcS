@@ -1,0 +1,18 @@
+#!/bin/sh
+
+stage=/run/brick-boot-stage
+for i in /etc/init.d/S??*; do
+	[ ! -f "$i" ] && continue
+	basename "$i" > "$stage"
+	case "$i" in
+		*.sh)
+			(
+				trap - INT QUIT TSTP
+				set start
+				. "$i"
+			)
+			;;
+		*) "$i" start ;;
+	esac
+done
+printf 'complete\n' > "$stage"

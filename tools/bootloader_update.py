@@ -26,9 +26,11 @@ BOOT_END = 4 * 1024 * 1024
 BOOT_SIZE = BOOT_END - BOOT_START
 BACKUP_SIZE = BOOT_END
 BOOT_PARTITION_START = 4 * 1024 * 1024 // 512
-BOOT_PARTITION_SECTORS = 124 * 1024 * 1024 // 512
-DATA_PARTITION_START = 128 * 1024 * 1024 // 512
+BOOT_PARTITION_SECTORS = 252 * 1024 * 1024 // 512
+DATA_PARTITION_START = 256 * 1024 * 1024 // 512
 DATA_PARTITION_SECTORS = 64 * 1024 * 1024 // 512
+LEGACY_BOOT_PARTITION_SECTORS = 124 * 1024 * 1024 // 512
+LEGACY_DATA_PARTITION_START = 128 * 1024 * 1024 // 512
 SUNXI_CHECKSUM_STAMP = 0x5F0A6C39
 BLKGETSIZE64 = 0x80081272
 FDT_MAGIC = 0xD00DFEED
@@ -219,16 +221,20 @@ def parse_genimage_mbr(sector):
         start, sectors = struct.unpack_from("<II", entry, 8)
         raw_entries.append((entry, (boot, ptype, start, sectors)))
     boot = raw_entries[0][1]
+    layouts = {
+        (BOOT_PARTITION_SECTORS, DATA_PARTITION_START),
+        (LEGACY_BOOT_PARTITION_SECTORS, LEGACY_DATA_PARTITION_START),
+    }
     if (boot[0] != 0x80 or boot[1] != 0x0C or
             boot[2] != BOOT_PARTITION_START or
-            boot[3] != BOOT_PARTITION_SECTORS):
+            boot[3] not in {layout[0] for layout in layouts}):
         raise UpgradeError("card boot partition does not match the Brick genimage layout")
     entries = [boot]
     second_raw, data = raw_entries[1]
     if any(second_raw):
         if (data[0] != 0 or data[1] != 0x83 or
-                data[2] != DATA_PARTITION_START or
-                data[3] != DATA_PARTITION_SECTORS):
+                (boot[3], data[2]) not in layouts or
+                data[3] < DATA_PARTITION_SECTORS):
             raise UpgradeError("card data partition does not match the Brick genimage layout")
         if boot[2] + boot[3] > data[2]:
             raise UpgradeError("card boot and data partitions overlap")
