@@ -56,7 +56,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((self.stage / 'update.tar.gz').exists())
 
     def test_missing_rootfs_is_rejected_before_upload(self):
-        (self.images / 'rootfs.cpio.gz').unlink()
+        (self.images / 'rootfs.cpio.zst').unlink()
         with self.assertRaises(FileNotFoundError):
             deploy.package(self.images, self.stage)
         self.assertFalse((self.stage / 'update.tar.gz').exists())
@@ -178,6 +178,25 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
                          bytes((0xbd, 1, 0, 1)))
+        self.assertFalse((self.current / deploy.BOOTLOADER).exists())
+        self.assert_clean()
+
+    def test_zstd_update_preserves_gzip_current_as_previous(self):
+        zstd = self.current / 'initramfs.cpio.zst'
+        gzip = self.current / 'initramfs.cpio.gz'
+        zstd.rename(gzip)
+        lines = []
+        for file in self.current.iterdir():
+            if file.name in ('SHA256SUMS', 'manifest.json'):
+                continue
+            lines.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.name}\n')
+        (self.current / 'SHA256SUMS').write_text(''.join(lines))
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.previous / 'initramfs.cpio.gz').is_file())
+        self.assertTrue((self.current / 'initramfs.cpio.zst').is_file())
         self.assertFalse((self.current / deploy.BOOTLOADER).exists())
         self.assert_clean()
 
@@ -305,7 +324,7 @@ exec "$REAL_BB" "$command" "$@"
     def test_large_unaligned_payload_roundtrips_exactly(self):
         payload = self.root / 'payload'
         content = b'large-payload-block-' * 140000 + b'tail'
-        (payload / 'initramfs.cpio.gz').write_bytes(content)
+        (payload / 'initramfs.cpio.zst').write_bytes(content)
         lines = []
         for name in deploy.PAYLOAD.values():
             checksum = hashlib.sha256((payload / name).read_bytes()).hexdigest()
@@ -314,7 +333,7 @@ exec "$REAL_BB" "$command" "$@"
         self.pack_source_payload(payload)
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.current / 'initramfs.cpio.gz').read_bytes(), content)
+        self.assertEqual((self.current / 'initramfs.cpio.zst').read_bytes(), content)
 
     def test_publish_failure_restores_current(self):
         result = self.run_installer('publish')

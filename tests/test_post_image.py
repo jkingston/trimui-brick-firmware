@@ -47,7 +47,7 @@ class PostImageTests(unittest.TestCase):
             for name in (
                 "Image",
                 "sun50i-a133-trimui-brick.dtb",
-                "rootfs.cpio.gz",
+                "rootfs.cpio.zst",
                 "u-boot-sunxi-with-spl.bin",
             ):
                 (binaries / name).write_bytes(name.encode())

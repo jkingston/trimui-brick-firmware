@@ -14,7 +14,7 @@ import uuid
 from serial_console import Console, DEFAULT_PORT, ProtocolError
 
 PAYLOAD = {'Image': 'Image', 'sun50i-a133-trimui-brick.dtb': 'brick-usb.dtb',
-           'rootfs.cpio.gz': 'initramfs.cpio.gz'}
+           'rootfs.cpio.zst': 'initramfs.cpio.zst'}
 BOOTLOADER = 'u-boot-sunxi-with-spl.bin'
 BOOTLOADER_OFFSET = 128 * 1024
 
@@ -106,7 +106,8 @@ $bb mount /dev/mmcblk0p1 "$mountpoint"
 mounted=1
 [ -f "$current/Image" ]
 [ -f "$current/brick-usb.dtb" ]
-[ -f "$current/initramfs.cpio.gz" ]
+# Preserve rollback across the one-time gzip-to-zstd migration.
+[ -f "$current/initramfs.cpio.zst" ] || [ -f "$current/initramfs.cpio.gz" ]
 [ -f "$current/manifest.json" ]
 [ -f "$current/SHA256SUMS" ]
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
@@ -115,7 +116,7 @@ mounted=1
 # bounded margin for FAT allocation and directory updates so ENOSPC is rejected
 # before any slot or boot state is changed.
 payload_bytes=0
-for name in Image brick-usb.dtb initramfs.cpio.gz SHA256SUMS manifest.json; do
+for name in Image brick-usb.dtb initramfs.cpio.zst SHA256SUMS manifest.json; do
  size=$($bb wc -c < "$work/payload/$name")
  [ "$size" -gt 0 ]
  payload_bytes=$((payload_bytes + size))
@@ -161,7 +162,7 @@ copy_payload_file() {{
  $bb dd if="$source" of="$destination" bs=1048576 2>/dev/null
  [ "$($bb wc -c < "$destination")" = "$expected_size" ]
 }}
-for name in Image brick-usb.dtb initramfs.cpio.gz SHA256SUMS manifest.json; do
+for name in Image brick-usb.dtb initramfs.cpio.zst SHA256SUMS manifest.json; do
  copy_payload_file "$work/payload/$name" "$stage/$name"
 done
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
