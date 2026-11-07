@@ -1,8 +1,6 @@
-# From https://wpewebkit.org/releases/wpewebkit-2.54.1.tar.xz.sums
-md5  834129000777bef051f2587ab069a6b5  wpewebkit-2.54.1.tar.xz
-sha1  2337fce302aae017cf3ff699987cb258eb7c9260  wpewebkit-2.54.1.tar.xz
-sha256  0de8bdfba011f9cd63ba9a9171fa6038dd2c08237894f4082abbb821f29d3fe9  wpewebkit-2.54.1.tar.xz
+# Brick WPE WebKit 2.54.1 r1 GitHub release
+sha256  0218c27f7674a50fcb6aa4bd3f1011ce37fa78399f834506ece507be6abd567c  brick-wpewebkit-2.54.1-r1-aarch64-buildroot-62474ed54affdd6d.tar.gz
 
 # License files
-sha256  0b5d3a7cc325942567373b0ecd757d07c132e0ebd7c97bfc63f7e1a76094edb4  Source/WebCore/LICENSE-APPLE
-sha256  f2b3bd09663381deb99721109d22b47af1213bb43007a8b56a06c6375c8050ce  Source/WebCore/LICENSE-LGPL-2.1
+sha256  0b5d3a7cc325942567373b0ecd757d07c132e0ebd7c97bfc63f7e1a76094edb4  licenses/LICENSE-APPLE
+sha256  f2b3bd09663381deb99721109d22b47af1213bb43007a8b56a06c6375c8050ce  licenses/LICENSE-LGPL-2.1

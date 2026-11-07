@@ -40,7 +40,8 @@ config BR2_PACKAGE_BRICK_WPEWEBKIT
 	select BR2_PACKAGE_XKEYBOARD_CONFIG
 	help
 	  Pinned WPE WebKit 2.54 engine for the Brick captive browser.
-	  This builds the upstream DRM WPEPlatform backend against Mesa
-	  softpipe/GBM and libudev-zero with four narrow Brick integration
-	  patches. It does not build Wayland, the legacy WPE API, a custom
-	  WPEPlatform backend, or a second browser engine.
+	  The checksum-pinned Brick binary was built from upstream WPE
+	  WebKit against Mesa softpipe/GBM and libudev-zero with four narrow
+	  integration patches. Corresponding sources and build provenance
+	  are published beside it. This package still builds the small Brick
+	  launcher locally, but does not recompile WebKit.

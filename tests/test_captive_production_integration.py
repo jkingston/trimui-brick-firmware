@@ -519,7 +519,8 @@ class ConnectivityAuthorityTest(unittest.TestCase):
 class ImageIntegrationContractTest(unittest.TestCase):
     def test_package_and_post_build_install_complete_production_chain(self):
         package = (ROOT / 'package/brick-wpewebkit/brick-wpewebkit.mk').read_text()
-        self.assertIn('BRICK_WPEWEBKIT_POST_INSTALL_STAGING_HOOKS', package)
+        self.assertIn('BRICK_WPEWEBKIT_INSTALL_PREBUILT_STAGING', package)
+        self.assertIn('BRICK_WPEWEBKIT_INSTALL_STAGING_CMDS', package)
         self.assertNotIn('BRICK_WPEWEBKIT_POST_BUILD_HOOKS', package)
         for path in (
                 '/usr/libexec/brick-captive-authority',

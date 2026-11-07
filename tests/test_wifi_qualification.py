@@ -173,7 +173,7 @@ exit 1
 class SecurityBuildPolicyTests(unittest.TestCase):
     def test_tkip_is_rejected_before_join(self):
         patch = (WPA_PATCHES /
-                 "0002-build-disable-obsolete-TKIP.patch").read_text()
+                 "0003-build-disable-obsolete-TKIP.patch").read_text()
         self.assertIn("+CONFIG_NO_TKIP=y", patch)
         self.assertIn("wpa_supplicant/defconfig", patch)
 

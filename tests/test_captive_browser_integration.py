@@ -44,6 +44,8 @@ class SingleBrowserImplementationTest(unittest.TestCase):
         self.assertNotIn('BR2_PACKAGE_NETSURF=y', config)
 
         package = (ROOT / 'package/brick-wpewebkit/brick-wpewebkit.mk').read_text()
+        source_options = (ROOT / 'package/brick-wpewebkit/'
+                          'source-cmake-options.txt').read_text()
         self.assertIn('brick-captive-supervisor', package)
         self.assertIn('/usr/libexec/brick-captive-supervisor', package)
         self.assertNotIn('LIBGL_ALWAYS_SOFTWARE', package)
@@ -53,12 +55,14 @@ class SingleBrowserImplementationTest(unittest.TestCase):
                 '-DUSE_GBM=ON',
                 '-DUSE_LIBDRM=ON',
                 '-DENABLE_BUBBLEWRAP_SANDBOX=ON'):
-            self.assertIn(option, package)
+            self.assertIn(option, source_options)
         for option in (
                 '-DENABLE_WPE_PLATFORM_WAYLAND=OFF',
                 '-DENABLE_WPE_PLATFORM_HEADLESS=OFF',
                 '-DENABLE_WPE_LEGACY_API=OFF'):
-            self.assertIn(option, package)
+            self.assertIn(option, source_options)
+        self.assertIn('releases/download/wpewebkit-brick-2.54.1-r1', package)
+        self.assertIn('$(generic-package)', package)
 
         self.assertFalse((ROOT / 'board/trimui/brick/patches/netsurf').exists())
         self.assertFalse((ROOT / 'board/trimui/brick/wpe-platform-brick/'
@@ -440,7 +444,7 @@ class TrustedOskViewTest(unittest.TestCase):
             self.assertIn(literal, osk)
         self.assertIn('return "EUR"', osk)
         self.assertIn('return blank;', osk)
-        gate = (ROOT / 'package/brick-wpewebkit/'
+        gate = (ROOT / 'package/brick-wpewebkit/source-patches/'
                 '0004-WPE-drop-pending-web-frame-while-view-unmapped.patch')
         gate_source = gate.read_text()
         self.assertIn('!wpe_view_get_mapped(m_wpeView.get())', gate_source)
@@ -481,7 +485,7 @@ class TrustedOskViewTest(unittest.TestCase):
                       runner)
 
     def test_drm_backend_imports_bounded_linear_shm_without_web_drm(self):
-        patch = (ROOT / 'package' / 'brick-wpewebkit' /
+        patch = (ROOT / 'package' / 'brick-wpewebkit' / 'source-patches' /
                  '0003-WPEPlatformDRM-scan-out-shared-memory-buffers.patch').read_text()
         self.assertIn('WPE_IS_BUFFER_SHM(buffer)', patch)
         self.assertIn('WPE_PIXEL_FORMAT_ARGB8888', patch)
@@ -503,7 +507,7 @@ class TrustedOskViewTest(unittest.TestCase):
 
         package = (ROOT / 'package/brick-wpewebkit/brick-wpewebkit.mk').read_text()
         self.assertNotIn(' - video Captive browser', package)
-        sandbox_patch = (ROOT / 'package/brick-wpewebkit/'
+        sandbox_patch = (ROOT / 'package/brick-wpewebkit/source-patches/'
                          '0002-Bubblewrap-bind-graphics-devices-only-in-GPUProcess.patch').read_text()
         self.assertIn('ProcessType::GPU', sandbox_patch)
         self.assertIn('-        bindOpenGL(sandboxArgs);', sandbox_patch)

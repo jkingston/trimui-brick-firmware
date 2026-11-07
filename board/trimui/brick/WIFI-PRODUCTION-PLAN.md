@@ -453,35 +453,28 @@ on/off/connect/forget cycles pass.
 
 Exit: P0.4 through P0.8 pass on the clean image.
 
-Build iteration is part of maintaining this path.  `brick_defconfig` enables a
-20 GiB persistent Buildroot ccache under ignored `output/ccache`, with relative
-paths so isolated output directories can share objects.  Buildroot's compiler
-wrapper owns caching; keep WebKit's internal `WK_USE_CCACHE=NO` to avoid nesting
-a second launcher around that wrapper.  Each experiment gets its own output
-directory and a recorded tuple of toolchain, source hash, patch hash and CMake
-options.  Preserve one dependency-complete baseline, rebuild only the WPE
-package/launcher for a WPE change, and never run two `make` processes against
-one output tree.  CI publishes a keyed AArch64 WPE SDK/package artifact so
-device tests normally transfer the changed launcher or library rather than
-rebuilding JavaScriptCore, Skia and WebCore.
+Build iteration is part of maintaining this path. The normal product build
+downloads the checksum-pinned AArch64 WPE SDK release and compiles only the
+small Brick launcher. `tools/archive_wpe.py` is the release-engineering path:
+it records the upstream source, patches, toolchain, Buildroot configuration and
+per-file hashes, and emits both binary and corresponding-source archives. Only
+a WPE source, patch, toolchain or ABI change should invoke the multi-hour source
+build and publish a new SDK revision. Never run two `make` processes against
+one output tree.
 
 Use the following bounded milestones in order. `make O="$out" configure`
 regenerates the exact product configuration and profile fragments. Then
-`make O="$out" captive-patch-check` verifies the pinned archive hashes,
-extracts it and applies all four package patches, but deliberately performs no
-CMake configure or compile. Cross-link the launcher against the retained,
-dependency-complete SDK before asking Buildroot to rebuild WebKit. A
-`ninja -n` in that SDK's WPE build directory must show only the expected
-incremental work. Only a milestone integration gate may run the package build
-and final image; use `make release` for the clean release tree rather than
-reusing an experiment output.
+`make O="$out" captive-archive-check` verifies and extracts the pinned binary
+SDK but deliberately performs no compile. The compatibility alias
+`captive-patch-check` performs the same check. Only a milestone integration
+gate may run the package build and final image; use `make release` for the
+clean release tree rather than reusing an experiment output.
 
 Do not mistake an extracted/patched tree or a directly cross-linked launcher
 for an image. A trustworthy image requires the complete Buildroot dependency
 graph, package staging/target installation, post-build processing and
 `release-check`. If the selected output lacks those dependency stamps, stop at
-`captive-patch-check`; starting WebKit there is an unbounded bootstrap, not an
-incremental build.
+`captive-archive-check`; it is an archive-integrity gate, not an image.
 
 The package now installs the engine, privilege-dropping launcher, bounded
 session supervisor, connectivity authority, exact-KMS watchdog, display
