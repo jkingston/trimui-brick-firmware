@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -17,8 +18,41 @@ PAYLOAD = {'Image': 'Image', 'sun50i-a133-trimui-brick.dtb': 'brick-usb.dtb',
            'rootfs.cpio.zst': 'initramfs.cpio.zst'}
 BOOTLOADER = 'u-boot-sunxi-with-spl.bin'
 BOOTLOADER_OFFSET = 128 * 1024
+COMPATIBLE_BOOTLOADER = 'COMPATIBLE-BOOTLOADER-SHA256'
 
-def package(images, directory):
+
+def upload_archive(console, archive, destination, timeout, ssh_host=None):
+    """Upload a verified archive over serial or an explicitly selected SSH host."""
+    if ssh_host is None:
+        return console.upload(archive, destination, raw=True, timeout=timeout)
+    if not ssh_host or ssh_host.startswith('-') or any(
+            character not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._:@[]'
+            for character in ssh_host):
+        raise ValueError('Invalid SSH host')
+    try:
+        subprocess.run(
+            ['scp', '-O', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+             '--', str(archive), f'{ssh_host}:{destination}'],
+            check=True, timeout=timeout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ProtocolError(f'SSH upload failed: {error}') from error
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+    try:
+        actual = subprocess.check_output(
+            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+             ssh_host, '/bin/busybox', 'sha256sum', destination],
+            text=True, timeout=timeout).split()[0]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ProtocolError(f'SSH verification failed: {error}') from error
+    if actual != expected:
+        subprocess.run(
+            ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+             ssh_host, '/bin/busybox', 'rm', '-f', destination],
+            check=False, timeout=timeout)
+        raise ProtocolError('SSH upload SHA256 mismatch')
+    return actual
+
+def package(images, directory, compatible_bootloader=None):
     manifest = json.loads((images / 'manifest.json').read_text())
     checksums = []
     archive_checksums = []
@@ -40,14 +74,24 @@ def package(images, directory):
             raise ValueError('Bootloader does not match the SD image at 128 KiB')
     (directory / 'SHA256SUMS').write_text(''.join(checksums))
     (directory / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    for name in ('SHA256SUMS', 'manifest.json'):
+    metadata_names = ['SHA256SUMS', 'manifest.json']
+    archive_names = [*PAYLOAD.values(), BOOTLOADER, *metadata_names]
+    if compatible_bootloader is not None:
+        compatible = compatible_bootloader.read_bytes()
+        candidate_size = (images / BOOTLOADER).stat().st_size
+        if len(compatible) != candidate_size:
+            raise ValueError('Compatible bootloader must match candidate size')
+        (directory / COMPATIBLE_BOOTLOADER).write_text(
+            hashlib.sha256(compatible).hexdigest() + '\n')
+        archive_names.append(COMPATIBLE_BOOTLOADER)
+        metadata_names.append(COMPATIBLE_BOOTLOADER)
+    for name in metadata_names:
         digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
         archive_checksums.append(f'{digest}  {name}\n')
     (directory / 'ARCHIVE-SHA256SUMS').write_text(''.join(archive_checksums))
     archive = directory / 'update.tar.gz'
     with tarfile.open(archive, 'w:gz') as tar:
-        for name in (*PAYLOAD.values(), BOOTLOADER, 'SHA256SUMS',
-                     'manifest.json', 'ARCHIVE-SHA256SUMS'):
+        for name in (*archive_names, 'ARCHIVE-SHA256SUMS'):
             tar.add(directory / name, arcname=name)
     return archive, manifest
 
@@ -94,7 +138,13 @@ bootloader_size=$($bb wc -c < "$bootloader")
 bootloader_sectors=$(( (bootloader_size + 511) / 512 ))
 expected_bootloader=$($bb sha256sum "$bootloader" | $bb awk '{{ print $1 }}')
 installed_bootloader=$($bb dd if=/dev/mmcblk0 bs=512 skip=256 count="$bootloader_sectors" 2>/dev/null | $bb head -c "$bootloader_size" | $bb sha256sum | $bb awk '{{ print $1 }}')
-[ "$installed_bootloader" = "$expected_bootloader" ]
+if [ "$installed_bootloader" != "$expected_bootloader" ]; then
+ [ -f "$work/payload/{COMPATIBLE_BOOTLOADER}" ]
+ compatible_bootloader=$($bb cat "$work/payload/{COMPATIBLE_BOOTLOADER}")
+ case "$compatible_bootloader" in *[!0-9a-f]*|'') exit 1 ;; esac
+ [ "${{#compatible_bootloader}}" = 64 ]
+ [ "$installed_bootloader" = "$compatible_bootloader" ]
+fi
 # Match the device number so mounts through UUID/label aliases also count.
 device=$($bb cat /sys/class/block/mmcblk0p1/dev)
 mounted_device=$($bb awk -v device="$device" '$3 == device {{ print $3 }}' /proc/self/mountinfo)
@@ -258,6 +308,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('images', type=Path)
     parser.add_argument('--port', default=DEFAULT_PORT)
+    parser.add_argument('--ssh-host',
+                        help='copy the large archive over SSH; retain serial control and verification')
+    parser.add_argument('--compatible-bootloader', type=Path,
+                        help='explicitly admit this same-size installed bootloader without writing it')
     parser.add_argument('--no-reboot', action='store_true')
     parser.add_argument('--timeout', type=int, default=180)
     parser.add_argument('--emmc-recovery', action='store_true',
@@ -276,7 +330,8 @@ def main():
     token = 'brick-update-' + uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='brick-update-') as temporary:
         directory = Path(temporary)
-        archive, manifest = package(args.images, directory)
+        archive, manifest = package(args.images, directory,
+                                    args.compatible_bootloader)
         if manifest.get('emmc_recovery', False) and not args.emmc_recovery:
             raise ValueError('Use --emmc-recovery for the dedicated recovery profile')
         if manifest.get('ve_qualification', False) and not args.ve_qualification:
@@ -292,8 +347,14 @@ def main():
             raise ValueError('Use --cpu-idle-qualification for the CPU-idle qualification profile')
         script = directory / 'install.sh'
         script.write_text(install_script(token))
+        archive_destination = '/tmp/' + token + '.tar.gz'
+        if args.ssh_host:
+            upload_archive(None, archive, archive_destination,
+                           args.timeout, args.ssh_host)
         with Console(args.port) as console:
-            console.upload(archive, '/tmp/' + token + '.tar.gz', raw=True, timeout=args.timeout)
+            if not args.ssh_host:
+                upload_archive(console, archive, archive_destination,
+                               args.timeout)
             console.upload(script, '/tmp/' + token + '.sh')
             output = console.checked('/bin/sh ' + shlex.quote('/tmp/' + token + '.sh'),
                                      timeout=args.timeout).decode()

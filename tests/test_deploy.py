@@ -67,6 +67,23 @@ class PackageTests(unittest.TestCase):
             deploy.package(self.images, self.stage)
         self.assertFalse((self.stage / 'update.tar.gz').exists())
 
+    def test_explicit_compatible_bootloader_is_hashed_into_archive(self):
+        candidate = (self.images / deploy.BOOTLOADER).read_bytes()
+        compatible = self.stage / 'installed-bootloader.bin'
+        compatible.write_bytes(b'x' * len(candidate))
+        archive, _ = deploy.package(self.images, self.stage, compatible)
+        with tarfile.open(archive) as contents:
+            digest = contents.extractfile(deploy.COMPATIBLE_BOOTLOADER).read().decode().strip()
+            self.assertEqual(digest, hashlib.sha256(compatible.read_bytes()).hexdigest())
+            archived = contents.extractfile('ARCHIVE-SHA256SUMS').read().decode()
+            self.assertIn(deploy.COMPATIBLE_BOOTLOADER, archived)
+
+    def test_compatible_bootloader_must_match_candidate_size(self):
+        compatible = self.stage / 'installed-bootloader.bin'
+        compatible.write_bytes(b'wrong size')
+        with self.assertRaisesRegex(ValueError, 'match candidate size'):
+            deploy.package(self.images, self.stage, compatible)
+
 
 class InstallTests(unittest.TestCase):
     """Run the generated installer against real files, with simulated mounts."""
@@ -94,6 +111,7 @@ class InstallTests(unittest.TestCase):
         self.write_payload(self.current, b'current')
         self.write_payload(self.previous, b'previous')
         payload = self.root / 'payload'
+        self.payload = payload
         self.write_payload(payload, b'new')
         bootloader = b'test bootloader'
         (payload / deploy.BOOTLOADER).write_bytes(bootloader)
@@ -271,6 +289,19 @@ exec "$REAL_BB" "$command" "$@"
         self.assertEqual((self.current / 'Image').read_bytes(), b'current')
         self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
         self.assertFalse((self.sd / 'brick-bootcount').exists())
+        self.assert_clean()
+
+    def test_explicit_compatible_bootloader_allows_safe_slot_rotation(self):
+        candidate = (self.payload / deploy.BOOTLOADER).read_bytes()
+        installed = b'x' * len(candidate)
+        self.raw.write_bytes(bytes(128 * 1024) + installed)
+        (self.payload / deploy.COMPATIBLE_BOOTLOADER).write_text(
+            hashlib.sha256(installed).hexdigest() + '\n')
+        self.pack_source_payload(self.payload)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'new')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
         self.assert_clean()
 
     def test_missing_previous_manifest_does_not_delete_rollback(self):
@@ -454,6 +485,51 @@ class BootIdentityTests(unittest.TestCase):
 
 
 class DeploymentLifecycleTests(unittest.TestCase):
+    def test_ssh_archive_upload_is_verified_over_serial(self):
+        console = MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'update.tar.gz'
+            archive.write_bytes(b'large verified update')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            with patch.object(deploy.subprocess, 'run') as run, \
+                 patch.object(deploy.subprocess, 'check_output',
+                              return_value=f'{digest}  /tmp/update.tar.gz\n'):
+                result = deploy.upload_archive(
+                    console, archive, '/tmp/update.tar.gz', 180,
+                    'root@192.168.7.2')
+        self.assertEqual(result, digest)
+        run.assert_called_once()
+        console.upload.assert_not_called()
+
+    def test_ssh_archive_upload_rejects_checksum_mismatch(self):
+        console = MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'update.tar.gz'
+            archive.write_bytes(b'large verified update')
+            with patch.object(deploy.subprocess, 'run') as run, \
+                 patch.object(deploy.subprocess, 'check_output',
+                              return_value='0' * 64 + '  /tmp/update.tar.gz\n'), \
+                 self.assertRaisesRegex(deploy.ProtocolError, 'SHA256'):
+                deploy.upload_archive(console, archive, '/tmp/update.tar.gz',
+                                      180, 'root@192.168.7.2')
+        self.assertEqual(run.call_count, 2)
+
+    def test_ssh_archive_upload_rejects_option_injection(self):
+        with self.assertRaisesRegex(ValueError, 'Invalid SSH host'):
+            deploy.upload_archive(MagicMock(), Path('archive'), '/tmp/update',
+                                  180, '-oProxyCommand=bad')
+
+    def test_ssh_archive_transport_failure_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'update.tar.gz'
+            archive.write_bytes(b'large verified update')
+            failure = deploy.subprocess.CalledProcessError(255, ['scp'])
+            with patch.object(deploy.subprocess, 'run', side_effect=failure), \
+                 self.assertRaisesRegex(deploy.ProtocolError, 'SSH upload failed'):
+                deploy.upload_archive(MagicMock(), archive,
+                                      '/tmp/update.tar.gz', 180,
+                                      'root@192.168.7.2')
+
     def run_deployment(self, no_reboot=False, install_failure=False, usb_role=None,
                        install_output=b'UPDATE_VERIFIED\n', token_failure=False):
         console = MagicMock()
