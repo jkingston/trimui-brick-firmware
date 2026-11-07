@@ -1,0 +1,150 @@
+From: Brick Firmware <firmware@trimui-brick.invalid>
+Subject: [PATCH] WPEPlatformDRM: scan out reused shared-memory buffers
+
+The software renderer reuses its WPEBufferSHM pool and updates the shared
+mapping before every frame. Allocate one linear trusted-UI GBM scanout buffer
+per WPE buffer, but refresh its pixels on every render submission. Copying only
+at first import leaves later animations scanning out stale pixels.
+
+--- a/Source/WebKit/WPEPlatform/wpe/drm/WPEViewDRM.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/drm/WPEViewDRM.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include "DRMUniquePtr.h"
+ #include "WPEDisplayDRMPrivate.h"
++#include "WPEBufferSHM.h"
+ #include "WPEScreenDRMPrivate.h"
+ #include "WPEToplevelDRM.h"
+ #include "WPEViewDRMPrivate.h"
+@@ -200,12 +201,98 @@
+     return drmBufferPtr;
+ }
+ 
++static WPE::DRM::Buffer* drmBufferCreateSHM(WPEView* view, WPEBuffer* buffer, GError** error)
++{
++    auto* shmBuffer = WPE_BUFFER_SHM(buffer);
++    if (wpe_buffer_shm_get_format(shmBuffer) != WPE_PIXEL_FORMAT_ARGB8888) {
++        g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: unsupported shared-memory pixel format");
++        return nullptr;
++    }
++
++    auto bufferWidth = wpe_buffer_get_width(buffer);
++    auto bufferHeight = wpe_buffer_get_height(buffer);
++    if (bufferWidth <= 0 || bufferHeight <= 0) {
++        g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: invalid shared-memory buffer bounds");
++        return nullptr;
++    }
++    auto width = static_cast<uint32_t>(bufferWidth);
++    auto height = static_cast<uint32_t>(bufferHeight);
++
++    auto* device = wpe_display_drm_get_device(WPE_DISPLAY_DRM(wpe_view_get_display(view)));
++    auto* bo = gbm_bo_create(device, width, height, DRM_FORMAT_ARGB8888,
++        GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR);
++    if (!bo) {
++        g_set_error(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: failed to allocate shared-memory scanout buffer: %s",
++            safeStrerror(errno).data());
++        return nullptr;
++    }
++
++    auto drmBuffer = WPE::DRM::Buffer::create(bo);
++    if (!drmBuffer) {
++        g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: failed to create shared-memory DRM frame buffer");
++        gbm_bo_destroy(bo);
++        return nullptr;
++    }
++    auto* drmBufferPtr = drmBuffer.get();
++    wpe_buffer_set_user_data(buffer, drmBuffer.release(), reinterpret_cast<GDestroyNotify>(+[](void* userData) {
++        delete static_cast<WPE::DRM::Buffer*>(userData);
++    }));
++    return drmBufferPtr;
++}
++
++static bool drmBufferUpdateSHM(WPEBuffer* buffer, WPE::DRM::Buffer& drmBuffer, GError** error)
++{
++    auto* shmBuffer = WPE_BUFFER_SHM(buffer);
++    auto width = static_cast<uint32_t>(wpe_buffer_get_width(buffer));
++    auto height = static_cast<uint32_t>(wpe_buffer_get_height(buffer));
++    auto sourceStride = wpe_buffer_shm_get_stride(shmBuffer);
++    auto rowBytes = static_cast<gsize>(width) * 4;
++    gsize sourceSize = 0;
++    auto* source = static_cast<const uint8_t*>(g_bytes_get_data(
++        wpe_buffer_shm_get_data(shmBuffer), &sourceSize));
++    if (sourceStride < rowBytes || height > G_MAXSIZE / sourceStride ||
++        sourceSize < static_cast<gsize>(sourceStride) * height) {
++        g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: invalid shared-memory buffer bounds");
++        return false;
++    }
++
++    uint32_t destinationStride = 0;
++    void* mapData = nullptr;
++    auto* destination = static_cast<uint8_t*>(gbm_bo_map(drmBuffer.bufferObject(),
++        0, 0, width, height, GBM_BO_TRANSFER_WRITE, &destinationStride, &mapData));
++    if (!destination) {
++        g_set_error(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: failed to map shared-memory scanout buffer: %s",
++            safeStrerror(errno).data());
++        return false;
++    }
++    if (destinationStride < rowBytes) {
++        gbm_bo_unmap(drmBuffer.bufferObject(), mapData);
++        g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++            "Failed to render buffer: invalid scanout buffer stride");
++        return false;
++    }
++    for (uint32_t y = 0; y < height; ++y)
++        memcpy(destination + y * destinationStride, source + y * sourceStride,
++            rowBytes);
++    gbm_bo_unmap(drmBuffer.bufferObject(), mapData);
++    return true;
++}
++
+ static WPE::DRM::Buffer* drmBufferCreate(WPEView* view, WPEBuffer* buffer, bool modifiersSupported, GError** error)
+ {
+     // FIXME: check bounds.
+     if (WPE_IS_BUFFER_DMA_BUF(buffer))
+         return drmBufferCreateDMABuf(view, buffer, modifiersSupported, error);
+ 
++    if (WPE_IS_BUFFER_SHM(buffer))
++        return drmBufferCreateSHM(view, buffer, error);
++
+     // FIXME: implement.
+     g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED, "Failed to render buffer: unsupported buffer");
+     return nullptr;
+@@ -405,6 +492,10 @@
+         return { wpe_buffer_dma_buf_get_format(dmaBuffer), wpe_buffer_dma_buf_get_modifier(dmaBuffer) };
+     }
+ 
++    if (WPE_IS_BUFFER_SHM(buffer) &&
++        wpe_buffer_shm_get_format(WPE_BUFFER_SHM(buffer)) == WPE_PIXEL_FORMAT_ARGB8888)
++        return { DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR };
++
+     return { DRM_FORMAT_INVALID, DRM_FORMAT_MOD_INVALID };
+ }
+ 
+@@ -459,7 +550,10 @@
+         auto& plane = wpeDisplayDRMGetPrimaryPlane(display);
+         auto format = wpeBufferFormat(buffer);
+         if (!plane.supportsFormat(format.first, format.second)) {
+-            g_set_error_literal(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED, "Failed to render buffer: buffer format is not supported by DRM plane");
++            g_set_error(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
++                "Failed to render buffer: %s format 0x%08x modifier 0x%016llx is not supported by DRM plane %u",
++                G_OBJECT_TYPE_NAME(buffer), format.first,
++                static_cast<unsigned long long>(format.second), plane.id());
+             return FALSE;
+         }
+ 
+@@ -468,6 +562,9 @@
+             return FALSE;
+     }
+ 
++    if (WPE_IS_BUFFER_SHM(buffer) && !drmBufferUpdateSHM(buffer, *drmBuffer, error))
++        return FALSE;
++
+     drmBuffer->setFenceFD(UnixFileDescriptor { wpe_buffer_take_rendering_fence(buffer), UnixFileDescriptor::Adopt });
+ 
+     auto* priv = WPE_VIEW_DRM(view)->priv;

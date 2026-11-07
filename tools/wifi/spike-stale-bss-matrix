@@ -1,0 +1,95 @@
+#!/bin/sh
+# Qualification-only controller for the XR829 stale-BSSID fallback spike.
+# Run on a Linux host with NetworkManager and USB SSH access to the Brick.
+set -eu
+
+brick=${BRICK_HOST:-root@192.168.7.2}
+wifi_if=${HOST_WIFI_IF:-wlo1}
+ap_con=brick-stale-bss-spike
+ap_ssid=brick_stale_bss_spike
+fallback_ssid=${FALLBACK_SSID:-quietnet_Guest}
+rounds=${ROUNDS:-1}
+policies=${POLICIES:-2:0,2:1,1:0,1:1}
+outage=${OUTAGE_SECONDS:-0}
+psk=$(openssl rand -hex 32)
+ssid_hex=$(printf %s "$ap_ssid" | od -An -tx1 | tr -d ' \n')
+test_id=
+
+brick_cmd() {
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "$brick" "$@"
+}
+
+cleanup() {
+	set +e
+	if [ -n "$test_id" ]; then
+		brick_cmd "wpa_cli -i wlan0 remove_network $test_id >/dev/null; wpa_cli -i wlan0 enable_network all >/dev/null; wpa_cli -i wlan0 set bss_expiration_scan_count 2 >/dev/null; wpa_cli -i wlan0 set ignore_old_scan_res 0 >/dev/null; wpa_cli -i wlan0 save_config >/dev/null; wpa_cli -i wlan0 reassociate >/dev/null"
+	fi
+	nmcli connection down "$ap_con" >/dev/null 2>&1
+	nmcli connection delete "$ap_con" >/dev/null 2>&1
+	nmcli device connect "$wifi_if" >/dev/null 2>&1
+}
+trap cleanup EXIT INT TERM
+
+nmcli device wifi hotspot ifname "$wifi_if" con-name "$ap_con" ssid "$ap_ssid" password "$psk" >/dev/null
+nmcli connection modify "$ap_con" connection.autoconnect no 802-11-wireless.band bg
+
+test_id=$(brick_cmd "wpa_cli -i wlan0 add_network" | tr -d '\r')
+case "$test_id" in
+	''|*[!0-9]*) echo "Could not add temporary Brick network" >&2; exit 1 ;;
+esac
+brick_cmd "wpa_cli -i wlan0 set_network $test_id ssid $ssid_hex >/dev/null; wpa_cli -i wlan0 set_network $test_id psk $psk >/dev/null; wpa_cli -i wlan0 set_network $test_id priority 100 >/dev/null; wpa_cli -i wlan0 enable_network $test_id >/dev/null"
+
+wait_ssid() {
+	want=$1
+	limit=$2
+	i=0
+	while [ "$i" -lt "$limit" ]; do
+		got=$(brick_cmd "wpa_cli -i wlan0 status | sed -n 's/^ssid=//p'" 2>/dev/null | tr -d '\r') || got=
+		[ "$got" = "$want" ] && return 0
+		sleep 0.2
+		i=$((i + 1))
+	done
+	return 1
+}
+
+printf 'expire,ignore,round,fallback_ms,stale_join,recovery\n'
+old_ifs=$IFS
+IFS=,
+for policy in $policies; do
+	IFS=:
+	set -- $policy
+	IFS=$old_ifs
+	expire=$1
+	ignore=$2
+	round=1
+	while [ "$round" -le "$rounds" ]; do
+		nmcli connection up "$ap_con" >/dev/null
+		brick_cmd "wpa_cli -i wlan0 set bss_expiration_scan_count $expire >/dev/null; wpa_cli -i wlan0 set ignore_old_scan_res $ignore >/dev/null; wpa_cli -i wlan0 select_network $test_id >/dev/null; wpa_cli -i wlan0 enable_network all >/dev/null"
+		wait_ssid "$ap_ssid" 100 || { echo "Brick did not join test AP" >&2; exit 1; }
+		before=$(brick_cmd "dmesg | wc -l" | tr -d ' \r')
+		start=$(date +%s%3N)
+		nmcli connection down "$ap_con" >/dev/null
+		if [ "$outage" != 0 ]; then
+			sleep "$outage"
+			nmcli connection up "$ap_con" >/dev/null
+			sleep 8
+			final=$(brick_cmd "wpa_cli -i wlan0 status | sed -n 's/^ssid=//p'" | tr -d '\r')
+			printf '%s,%s,%s,transient-%ss:%s,0,0\n' "$expire" "$ignore" "$round" "$outage" "$final"
+			round=$((round + 1))
+			continue
+		fi
+		if wait_ssid "$fallback_ssid" 150; then
+			end=$(date +%s%3N)
+			elapsed=$((end - start))
+		else
+			elapsed=timeout
+		fi
+		markers=$(brick_cmd "dmesg | tail -n +$((before + 1)) | grep -E 'JOIN rejected|fresh firmware epoch|fresh-firmware|recovery' || true")
+		stale_join=0
+		recovery=0
+		printf %s "$markers" | grep -q 'JOIN rejected' && stale_join=1 || true
+		printf %s "$markers" | grep -Eq 'fresh firmware epoch|fresh-firmware|recovery' && recovery=1 || true
+		printf '%s,%s,%s,%s,%s,%s\n' "$expire" "$ignore" "$round" "$elapsed" "$stale_join" "$recovery"
+		round=$((round + 1))
+	done
+done

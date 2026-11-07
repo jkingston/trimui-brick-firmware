@@ -1,0 +1,72 @@
+#!/bin/sh
+# Measure browser-family CPU and PSS only after the launcher reports a frame.
+set -eu
+
+[ "$#" -eq 2 ] || {
+	echo "usage: $0 FRAME_MARKER SAMPLE_SECONDS" >&2
+	exit 2
+}
+marker=$1
+seconds=$2
+case $seconds in ''|*[!0-9]*) exit 2 ;; esac
+[ "$seconds" -gt 0 ] && [ "$seconds" -le 60 ] || exit 2
+
+pids()
+{
+	ps -o pid,comm | awk '
+		/brick-captive|WebKit|bwrap|WPEWeb|WPENetwork|WPEGPU/ { print $1 }'
+}
+
+cpu_ticks()
+{
+	total=0
+	for pid in $(pids); do
+		ticks=$(awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null ||
+			echo 0)
+		total=$((total + ticks))
+	done
+	echo "$total"
+}
+
+pss_kib()
+{
+	total=0
+	for pid in $(pids); do
+		value=$(awk '/^Pss:/ { print $2; found=1 }
+			END { if (!found) print 0 }' "/proc/$pid/smaps_rollup" \
+			2>/dev/null || echo 0)
+		total=$((total + value))
+	done
+	echo "$total"
+}
+
+deadline=500
+while [ ! -e "$marker" ] && [ "$deadline" -gt 0 ]; do
+	sleep 0.02
+	deadline=$((deadline - 1))
+done
+[ -e "$marker" ] || { echo 'first-frame marker timeout' >&2; exit 1; }
+
+if command -v getconf >/dev/null 2>&1; then
+	hz=$(getconf CLK_TCK)
+else
+	# Linux exposes /proc/PID/stat CPU time in USER_HZ; all supported Brick
+	# AArch64 libc ABIs use 100 when the minimal image omits getconf.
+	hz=${CLK_TCK:-100}
+fi
+[ "$hz" -gt 0 ]
+start_ticks=$(cpu_ticks)
+start_pss=$(pss_kib)
+start_uptime=$(cut -d. -f1,2 /proc/uptime)
+sleep "$seconds"
+end_uptime=$(cut -d. -f1,2 /proc/uptime)
+end_pss=$(pss_kib)
+end_ticks=$(cpu_ticks)
+
+awk -v before="$start_ticks" -v after="$end_ticks" -v hz="$hz" \
+	-v start="$start_uptime" -v end="$end_uptime" \
+	-v pss_before="$start_pss" -v pss_after="$end_pss" 'BEGIN {
+	elapsed=end-start
+	percent=elapsed > 0 ? (after-before) * 100 / hz / elapsed : 0
+	printf "elapsed_s=%.2f cpu_ticks=%d cpu_percent_one_core=%.2f start_pss_kib=%d end_pss_kib=%d\n", elapsed, after-before, percent, pss_before, pss_after
+}'

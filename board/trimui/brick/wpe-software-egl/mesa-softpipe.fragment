@@ -1,0 +1,8 @@
+# Lab-only Buildroot fragment for the isolated Mesa software renderer spike.
+# Do not merge it into brick_defconfig while BR2_PACKAGE_BRICK_GPU installs
+# another libEGL/libGLES implementation into /usr/lib.
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+

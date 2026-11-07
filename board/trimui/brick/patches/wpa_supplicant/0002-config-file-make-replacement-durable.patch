@@ -1,0 +1,87 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] config_file: make atomic replacement durable
+
+SAVE_CONFIG already writes a private temporary file, calls fdatasync(), and
+renames it over the profile. It did not check fdatasync/fclose failures and did
+not sync the containing directory after rename. Treat writeback failures as
+SAVE_CONFIG failures and fsync the parent after a successful rename.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ wpa_supplicant/config_file.c | 42 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 39 insertions(+), 3 deletions(-)
+
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -11,6 +11,7 @@
+ 
+ #include "includes.h"
+ #include <sys/stat.h>
++#include <fcntl.h>
+ 
+ #include "common.h"
+ #include "config.h"
+@@ -1845,6 +1845,36 @@
+ #endif /* CONFIG_NO_CONFIG_WRITE */
+ 
+ 
++static int wpa_config_sync_parent_dir(const char *name)
++{
++	char *path, *separator;
++	int fd, ret;
++
++	path = os_strdup(name);
++	if (!path)
++		return -1;
++	separator = os_strrchr(path, '/');
++	if (!separator) {
++		os_free(path);
++		path = os_strdup(".");
++		if (!path)
++			return -1;
++	} else if (separator == path) {
++		separator[1] = '\0';
++	} else {
++		*separator = '\0';
++	}
++
++	fd = open(path, O_RDONLY);
++	os_free(path);
++	if (fd < 0)
++		return -1;
++	ret = fsync(fd);
++	close(fd);
++	return ret;
++}
++
++
+ int wpa_config_write(const char *name, struct wpa_config *config)
+ {
+ #ifndef CONFIG_NO_CONFIG_WRITE
+@@ -1939,9 +1969,10 @@
+ 	}
+ #endif /* CONFIG_NO_CONFIG_BLOBS */
+ 
+-	os_fdatasync(f);
+-
+-	fclose(f);
++	if (os_fdatasync(f))
++		ret = -1;
++	if (fclose(f))
++		ret = -1;
+ 
+ #ifdef ANDROID
+ 	if (!ret)
+@@ -1949,6 +1980,12 @@
+ #endif /* ANDROID */
+ 	if (!ret)
+ 		ret = rename(tmp_name, orig_name);
++	if (!ret && wpa_config_sync_parent_dir(orig_name) < 0) {
++		wpa_printf(MSG_ERROR,
++			   "Failed to sync configuration directory: %s",
++			   strerror(errno));
++		ret = -1;
++	}
+ 	if (ret)
+ 		unlink(tmp_name);
+ 

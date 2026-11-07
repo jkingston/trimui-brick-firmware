@@ -1,0 +1,70 @@
+--- a/Source/WebKit/WPEPlatform/wpe/drm/WPEViewDRM.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/drm/WPEViewDRM.cpp
+@@ -70,6 +70,27 @@
+     OptionSet<UpdateFlags> updateFlags;
+     std::unique_ptr<RunLoop::Timer> cursorUpdateTimer;
+ };
++
++struct BrickFrameQualificationCounters {
++    uint64_t renderSubmissions { 0 };
++    uint64_t shmCopies { 0 };
++    uint64_t atomicCommits { 0 };
++    uint64_t pageFlipEvents { 0 };
++    uint64_t completedBufferFlips { 0 };
++};
++
++static BrickFrameQualificationCounters& brickFrameQualificationCounters()
++{
++    static BrickFrameQualificationCounters counters;
++    return counters;
++}
++
++static void brickFrameQualificationReport(const char* name, uint64_t value)
++{
++    if (value == 1 || !(value % 100))
++        g_printerr("BRICK_WPE_FRAME %s=%llu\n", name,
++            static_cast<unsigned long long>(value));
++}
+ WEBKIT_DEFINE_FINAL_TYPE(WPEViewDRM, wpe_view_drm, WPE_TYPE_VIEW, WPEView)
+ 
+ static void wpeViewDRMDidPageFlip(WPEViewDRM*);
+@@ -280,5 +301,7 @@
+         memcpy(destination + y * destinationStride, source + y * sourceStride,
+             rowBytes);
+     gbm_bo_unmap(drmBuffer.bufferObject(), mapData);
++    auto& counters = brickFrameQualificationCounters();
++    brickFrameQualificationReport("shm_copies", ++counters.shmCopies);
+     return true;
+ }
+@@ -440,6 +463,8 @@
+         g_set_error(error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED, "Failed to render buffer: failed to commit properties: %s", strerror(errno));
+         return false;
+     }
++    auto& counters = brickFrameQualificationCounters();
++    brickFrameQualificationReport("atomic_commits", ++counters.atomicCommits);
+ 
+     if (flags & DRM_MODE_ATOMIC_ALLOW_MODESET)
+         crtc.setCurrentMode(mode);
+@@ -538,6 +563,8 @@
+ 
+ static gboolean wpeViewDRMRenderBuffer(WPEView* view, WPEBuffer* buffer, const WPERectangle* damageRects, guint nDamageRects, GError** error)
+ {
++    auto& counters = brickFrameQualificationCounters();
++    brickFrameQualificationReport("render_submissions", ++counters.renderSubmissions);
+     auto* drmBuffer = static_cast<WPE::DRM::Buffer*>(wpe_buffer_get_user_data(buffer));
+     if (!drmBuffer) {
+         auto* display = WPE_DISPLAY_DRM(wpe_view_get_display(view));
+@@ -628,9 +655,13 @@
+ 
+ static void wpeViewDRMDidPageFlip(WPEViewDRM* view)
+ {
++    auto& counters = brickFrameQualificationCounters();
++    brickFrameQualificationReport("page_flip_events", ++counters.pageFlipEvents);
+     auto* priv = view->priv;
+     auto updateFlags = std::exchange(priv->updateFlags, OptionSet<UpdateFlags> { });
+     if (updateFlags.contains(UpdateFlags::BufferUpdateRequested)) {
++        brickFrameQualificationReport("completed_buffer_flips",
++            ++counters.completedBufferFlips);
+         if (priv->committedBuffer)
+             wpe_view_buffer_released(WPE_VIEW(view), priv->committedBuffer.get());
+         priv->committedBuffer = WTF::move(priv->pendingBuffer);

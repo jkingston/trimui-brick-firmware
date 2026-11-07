@@ -1,0 +1,78 @@
+From 6ab7863395ef7ae027060fa31c1236adaf9c5edf Mon Sep 17 00:00:00 2001
+From: Brick Firmware <firmware@brick.invalid>
+Date: Fri, 6 Nov 2026 18:30:00 +0000
+Subject: [PATCH] WPE: isolate unmapped and external view producers
+
+WPEView visibility is propagated asynchronously to the WebProcess. A frame
+already in flight can therefore reach AcceleratedBackingStore after the view
+has synchronously become unmapped. Do not submit that stale frame to the
+platform view. Complete it so the producer can recycle its buffer, and clear
+both the pending buffer and damage.
+
+This provides an explicit producer boundary for trusted UI-process content
+submitted directly to the same WPEView while web content is hidden. The direct
+producer still uses the platform backend's normal pending/committed buffer and
+page-flip lifecycle. Buffer-rendered is a shared view signal, so send FrameDone
+only for buffers owned by the Web producer; an external UI buffer must not
+grant the WebProcess a spurious frame credit.
+
+Upstream-Status: Pending [needs upstream review of external-producer contract]
+---
+ Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp | 17 ++++++++++++-----
+ Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h   |  2 +-
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+index 241d8514e7a8..2192a6c48701 100644
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+@@ -69,8 +69,8 @@ AcceleratedBackingStore::AcceleratedBackingStore(WebPageProxy& webPage, WPEVie
+     , m_legacyMainFrameProcess(webPage.legacyMainFrameProcess())
+ {
+-    g_signal_connect(m_wpeView.get(), "buffer-rendered", G_CALLBACK(+[](WPEView*, WPEBuffer*, gpointer userData) {
++    g_signal_connect(m_wpeView.get(), "buffer-rendered", G_CALLBACK(+[](WPEView*, WPEBuffer* buffer, gpointer userData) {
+         auto& backingStore = *static_cast<AcceleratedBackingStore*>(userData);
+-        backingStore.bufferRendered();
++        backingStore.bufferRendered(buffer);
+     }), this);
+     g_signal_connect(m_wpeView.get(), "buffer-released", G_CALLBACK(+[](WPEView*, WPEBuffer* buffer, gpointer userData) {
+         auto& backingStore = *static_cast<AcceleratedBackingStore*>(userData);
+@@ -278,6 +278,16 @@ Expected<Ref<ViewSnapshot>, String> AcceleratedBackingStore::takeSnapshot(std::
+ 
+ void AcceleratedBackingStore::renderPendingBuffer()
+ {
++    // Visibility reaches the WebProcess asynchronously. A frame may already
++    // be in flight after WPEView was synchronously unmapped; acknowledge and
++    // discard it instead of allowing hidden web content to replace a trusted
++    // UI-process buffer submitted to the same platform view.
++    if (!wpe_view_get_mapped(m_wpeView.get())) {
++        frameDone();
++        m_pendingBuffer = nullptr;
++        m_pendingDamageRects = { };
++        return;
++    }
+     if (!wpe_view_get_toplevel(m_wpeView.get()))
+         return;
+ 
+@@ -304,9 +314,10 @@ void AcceleratedBackingStore::frameDone()
+         legacyMainFrameProcess->send(Messages::AcceleratedSurface::FrameDone(), m_surfaceID);
+ }
+ 
+-void AcceleratedBackingStore::bufferRendered()
++void AcceleratedBackingStore::bufferRendered(WPEBuffer* buffer)
+ {
+-    frameDone();
++    if (m_bufferIDs.contains(buffer))
++        frameDone();
+ }
+ 
+ void AcceleratedBackingStore::bufferReleased(WPEBuffer* buffer)
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
+index f7e6a73c3c03..ddb65ddc4d55 100644
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
+@@ -96 +96 @@ private:
+-    void bufferRendered();
++    void bufferRendered(WPEBuffer*);
+-- 
+2.51.0

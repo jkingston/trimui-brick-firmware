@@ -1,0 +1,273 @@
+#!/bin/sh
+# Bounded supervisor for one captive-browser session.
+set -eu
+umask 077
+
+die() {
+	echo "brick-captive-supervisor: $*" >&2
+	exit 2
+}
+
+[ "$#" -ge 4 ] || die 'usage: NETWORK_KEY URL -- BROWSER [ARG ...]'
+network_key=$1
+url=$2
+shift 2
+[ "$1" = -- ] || die 'missing -- before browser command'
+shift
+[ "$#" -gt 0 ] || die 'missing browser command'
+
+case $network_key in
+????????????????????????????????????????????????????????????????) ;;
+*) die 'network key must be a 64-character lowercase SHA-256 value' ;;
+esac
+case $network_key in *[!0-9a-f]*) die 'network key is not lowercase hexadecimal' ;; esac
+case $url in
+http://*|https://*) ;;
+*) die 'portal URL must use HTTP or HTTPS' ;;
+esac
+case $url in *[![:print:]]*|*' '*) die 'portal URL contains whitespace or controls' ;; esac
+
+profile_root=${BRICK_CAPTIVE_PROFILE_ROOT:-/data/wifi/captive-browser}
+profile_owner=${BRICK_CAPTIVE_PROFILE_OWNER:-brick-captive:brick-captive}
+runtime_root=${BRICK_CAPTIVE_RUNTIME_ROOT:-/run/brick-captive-browser}
+pause_hook=${BRICK_DISPLAY_PAUSE_HOOK:-}
+resume_hook=${BRICK_DISPLAY_RESUME_HOOK:-}
+watchdog=${BRICK_CAPTIVE_WATCHDOG:-}
+kill_grace_ticks=${BRICK_CAPTIVE_KILL_GRACE_TICKS:-20}
+meminfo=/proc/meminfo
+[ -z "${BRICK_TEST_MEMINFO:-}" ] || [ "$(id -u)" -eq 0 ] || \
+	meminfo=$BRICK_TEST_MEMINFO
+cgroup_mount=${BRICK_CAPTIVE_CGROUP_MOUNT:-/sys/fs/cgroup}
+cgroup_parent=$cgroup_mount/brick-captive
+admission_kib=$((512 * 1024))
+memory_high=$((352 * 1024 * 1024))
+memory_max=$((384 * 1024 * 1024))
+pids_max=64
+case $kill_grace_ticks in ''|*[!0-9]*) die 'kill grace ticks must be numeric' ;; esac
+[ -n "$pause_hook" ] && [ -n "$resume_hook" ] ||
+	die 'display pause and resume hooks are required'
+
+[ ! -L "$profile_root" ] || die 'profile root must not be a symlink'
+[ ! -L "$runtime_root" ] || die 'runtime root must not be a symlink'
+mkdir -p "$profile_root" "$runtime_root"
+chmod 700 "$profile_root" "$runtime_root"
+
+# The launcher hashes the canonical network identity once.  Construct and
+# permission the same directory here; using the unhashed key would create an
+# unused sibling and make cleanup/security assertions target the wrong tree.
+profile_id=$(printf '%s' "$network_key" | sha256sum | cut -d' ' -f1)
+profile=$profile_root/$profile_id
+[ ! -L "$profile" ] || die 'network profile must not be a symlink'
+mkdir -p "$profile/cache" "$profile/config" "$profile/data"
+chmod 700 "$profile" "$profile/cache" "$profile/config" "$profile/data"
+if [ "$(id -u)" -eq 0 ]; then
+	case $profile_owner in
+	brick-captive:brick-captive) ;;
+	*:*)
+		owner_uid=${profile_owner%%:*}
+		owner_gid=${profile_owner#*:}
+		case $owner_uid in ''|*[!0-9]*) die 'invalid captive profile owner' ;; esac
+		case $owner_gid in ''|*[!0-9]*) die 'invalid captive profile owner' ;; esac
+		;;
+	*) die 'invalid captive profile owner' ;;
+	esac
+	chown "$profile_owner" \
+		"$profile" "$profile/cache" "$profile/config" "$profile/data" ||
+		die 'cannot assign network profile to captive account'
+fi
+
+exec 9>"$runtime_root/display.lock"
+flock -x 9
+
+paused=0
+child=
+child_group=
+cgroup_session=
+cgroup_mounted=0
+cgroup_test=0
+cleaned=0
+memory_metrics() {
+	[ -n "$cgroup_session" ] && [ -r "$cgroup_session/memory.events" ] || return 0
+	current=$(cat "$cgroup_session/memory.current" 2>/dev/null || echo unavailable)
+	peak=$(cat "$cgroup_session/memory.peak" 2>/dev/null || echo unavailable)
+	events=$(tr '\n' ' ' < "$cgroup_session/memory.events")
+	pids_peak=$(cat "$cgroup_session/pids.peak" 2>/dev/null || echo unavailable)
+	if [ -r "$cgroup_session/pids.events" ]; then
+		pids_events=$(tr '\n' ' ' < "$cgroup_session/pids.events")
+	else
+		pids_events=unavailable
+	fi
+	line="memory current_bytes=$current peak_bytes=$peak high_bytes=$memory_high max_bytes=$memory_max pids_peak=$pids_peak events=[$events] pids_events=[$pids_events]"
+	echo "brick-captive-supervisor: $line" >&2
+	metrics_tmp=$runtime_root/last-memory.$$
+	printf '%s\n' "$line" > "$metrics_tmp"
+	mv "$metrics_tmp" "$runtime_root/last-memory"
+}
+
+cgroup_empty() {
+	# cgroupfs control files report a zero stat size even while populated.
+	[ -z "$(cat "$cgroup_session/cgroup.procs" 2>/dev/null)" ]
+}
+
+cleanup() {
+	status=${1:-0}
+	[ "$cleaned" -eq 0 ] || return 0
+	cleaned=1
+	trap - EXIT HUP INT TERM
+	if [ -n "$child_group" ]; then
+		kill -TERM "-$child_group" 2>/dev/null || :
+		tick=0
+		while kill -0 "-$child_group" 2>/dev/null &&
+		      [ "$tick" -lt "$kill_grace_ticks" ]; do
+			sleep 0.1
+			tick=$((tick + 1))
+		done
+		kill -KILL "-$child_group" 2>/dev/null || :
+	fi
+	if [ -n "$cgroup_session" ] && [ -e "$cgroup_session/cgroup.kill" ]; then
+		echo 1 > "$cgroup_session/cgroup.kill" 2>/dev/null || :
+	fi
+	if [ -n "$child" ]; then
+		wait "$child" 2>/dev/null || :
+	fi
+	if [ -n "$cgroup_session" ]; then
+		[ "$cgroup_test" -eq 0 ] || : > "$cgroup_session/cgroup.procs"
+		tick=0
+		while ! cgroup_empty && [ "$tick" -lt "$kill_grace_ticks" ]; do
+			sleep 0.1
+			tick=$((tick + 1))
+		done
+		memory_metrics
+		if ! cgroup_empty; then
+			echo 'brick-captive-supervisor: memory domain did not empty' >&2
+			[ "$status" -ne 0 ] || status=125
+		fi
+		if [ "$cgroup_test" -eq 1 ]; then
+			rm -f "$cgroup_session"/*
+		fi
+		if ! rmdir "$cgroup_session" 2>/dev/null; then
+			echo 'brick-captive-supervisor: memory domain removal failed' >&2
+			[ "$status" -ne 0 ] || status=125
+		fi
+		cgroup_session=
+	fi
+	if [ "$cgroup_mounted" -eq 1 ]; then
+		rmdir "$cgroup_parent" 2>/dev/null || :
+		if ! umount "$cgroup_mount"; then
+			echo 'brick-captive-supervisor: private cgroup2 unmount failed' >&2
+			[ "$status" -ne 0 ] || status=125
+		fi
+		cgroup_mounted=0
+	fi
+	rm -f "$runtime_root/session"
+	if [ "$paused" -eq 1 ] && [ -n "$resume_hook" ]; then
+		# Retain the lease in this supervisor until cleanup returns, but never
+		# leak it into the long-lived shell started by the resume hook.
+		if ! "$resume_hook" "$network_key" 9>&-; then
+			echo 'brick-captive-supervisor: display resume hook failed' >&2
+			[ "$status" -ne 0 ] || status=125
+		fi
+	fi
+	exit "$status"
+}
+trap 'cleanup 129' HUP
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+trap 'cleanup $?' EXIT
+
+available_kib=$(awk '/^MemAvailable:/ { print $2; found=1 }
+	END { if (!found) exit 1 }' "$meminfo") || die 'cannot read MemAvailable'
+if [ "$available_kib" -lt "$admission_kib" ]; then
+	echo "brick-captive-supervisor: admission denied available_kib=$available_kib floor_kib=$admission_kib" >&2
+	exit 75
+fi
+
+# Host tests use an ordinary directory only when unprivileged. Root product
+# execution cannot opt out of the real kernel controller through this path.
+if [ -n "${BRICK_TEST_CGROUP_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+	cgroup_mount=$BRICK_TEST_CGROUP_ROOT
+	cgroup_parent=$cgroup_mount/brick-captive
+	cgroup_test=1
+else
+	if [ ! -r "$cgroup_mount/cgroup.controllers" ]; then
+		[ "$(id -u)" -eq 0 ] || die 'cgroup2 is not mounted and supervisor is not root'
+		mkdir -p "$cgroup_mount"
+		mount -t cgroup2 none "$cgroup_mount" || die 'cannot mount cgroup2'
+		cgroup_mounted=1
+	fi
+	controllers=$(cat "$cgroup_mount/cgroup.controllers")
+	case " $controllers " in *' memory '*) ;; *) die 'cgroup2 memory controller unavailable' ;; esac
+	case " $controllers " in *' pids '*) ;; *) die 'cgroup2 pids controller unavailable' ;; esac
+fi
+
+mkdir -p "$cgroup_parent"
+if [ "$cgroup_test" -eq 0 ]; then
+	printf '+memory +pids\n' > "$cgroup_mount/cgroup.subtree_control" ||
+		die 'cannot enable root memory/pids controllers'
+	printf '+memory +pids\n' > "$cgroup_parent/cgroup.subtree_control" ||
+		die 'cannot enable captive memory/pids controllers'
+fi
+cgroup_session=$cgroup_parent/session-$$
+mkdir "$cgroup_session" || die 'cannot create captive memory domain'
+if [ "$cgroup_test" -eq 1 ]; then
+	for file in cgroup.kill cgroup.procs memory.current memory.events \
+		memory.high memory.max memory.oom.group memory.peak pids.events \
+		pids.max pids.peak; do
+		: > "$cgroup_session/$file"
+	done
+	printf '0\n' > "$cgroup_session/memory.current"
+	printf '0\n' > "$cgroup_session/memory.peak"
+	printf '0\n' > "$cgroup_session/pids.peak"
+	printf 'max 0\n' > "$cgroup_session/pids.events"
+	printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n' \
+		> "$cgroup_session/memory.events"
+fi
+echo "$memory_high" > "$cgroup_session/memory.high" || die 'cannot set memory.high'
+echo "$memory_max" > "$cgroup_session/memory.max" || die 'cannot set memory.max'
+echo 1 > "$cgroup_session/memory.oom.group" || die 'cannot set memory.oom.group'
+echo "$pids_max" > "$cgroup_session/pids.max" || die 'cannot set pids.max'
+[ -e "$cgroup_session/cgroup.kill" ] || die 'cgroup.kill unavailable'
+
+paused=1
+if [ -z "$watchdog" ]; then
+	"$pause_hook" "$network_key" || die 'display pause hook failed'
+fi
+
+session_tmp=$runtime_root/session.$$
+{
+	printf 'pid=%s\n' "$$"
+	printf 'network_key=%s\n' "$network_key"
+	printf 'cgroup=%s\n' "$cgroup_session"
+	printf 'available_kib=%s\n' "$available_kib"
+} > "$session_tmp"
+mv "$session_tmp" "$runtime_root/session"
+
+unset WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS
+export XDG_CACHE_HOME=$profile/cache
+export XDG_CONFIG_HOME=$profile/config
+export XDG_DATA_HOME=$profile/data
+export BRICK_CAPTIVE_NETWORK_KEY=$network_key
+export BRICK_CAPTIVE_URL=$url
+export BRICK_CAPTIVE_CGROUP_PATH=$cgroup_session
+
+if [ -n "$watchdog" ]; then
+	setsid "$watchdog" --restore-only --child-cgroup "$cgroup_session" \
+		--pause-hook "$pause_hook" --pause-argument "$network_key" -- \
+		"$@" --uri "$url" --network-key "$network_key" \
+		--profile-root "$profile_root" &
+else
+	# Unprivileged host tests retain this path. The production broker always
+	# supplies the external KMS watchdog above.
+	setsid sh -c 'echo "$$" > "$1/cgroup.procs" || exit 126; shift; exec "$@"' \
+		sh "$cgroup_session" "$@" \
+		--uri "$url" --network-key "$network_key" \
+		--profile-root "$profile_root" &
+fi
+child=$!
+child_group=$child
+set +e
+wait "$child"
+status=$?
+set -e
+child=
+cleanup "$status"

@@ -3,12 +3,30 @@ set -eu
 board=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python=$(command -p -v python3)
 "$board/prepare-state.sh" "$TARGET_DIR"
+if grep -q '^BR2_PACKAGE_BRICK_WPEWEBKIT=y$' "$BR2_CONFIG" &&
+   ! grep -Fqx '::respawn:/usr/libexec/brick-captive-broker daemon' \
+       "$TARGET_DIR/etc/inittab"; then
+	printf '%s\n' '::respawn:/usr/libexec/brick-captive-broker daemon' >> \
+		"$TARGET_DIR/etc/inittab"
+fi
+# libcurl installs wcurl as a convenience wrapper.  The firmware uses the curl
+# binary directly and does not ship a general-purpose download UI.
+rm -f "$TARGET_DIR/usr/bin/wcurl"
 if grep -q '^BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y$' "$BR2_CONFIG"; then
 	# Run before the generic modalias rule; retain Buildroot's permissions.
 	rules='$SUBSYSTEM=udc root:root 660 */etc/init.d/S30usb hotplug
-$SUBSYSTEM=gadget root:root 660 */etc/init.d/S30usb hotplug'
+$SUBSYSTEM=gadget root:root 660 */etc/init.d/S30usb hotplug
+$SUBSYSTEM=drm card[0-9]+ root:root 600'
 	if ! grep -q '^\$SUBSYSTEM=udc .*S30usb hotplug$' "$TARGET_DIR/etc/mdev.conf"; then
 		{ printf '%s\n' "$rules"; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
+		mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+	fi
+	if grep -Fqx '$SUBSYSTEM=drm card[0-9]+ root:video 660' "$TARGET_DIR/etc/mdev.conf"; then
+		{ grep -Fvx '$SUBSYSTEM=drm card[0-9]+ root:video 660' "$TARGET_DIR/etc/mdev.conf" || :; } > "$TARGET_DIR/etc/mdev.conf.tmp"
+		mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
+	fi
+	if ! grep -Fqx '$SUBSYSTEM=drm card[0-9]+ root:root 600' "$TARGET_DIR/etc/mdev.conf"; then
+		{ printf '%s\n' '$SUBSYSTEM=drm card[0-9]+ root:root 600'; cat "$TARGET_DIR/etc/mdev.conf"; } > "$TARGET_DIR/etc/mdev.conf.tmp"
 		mv "$TARGET_DIR/etc/mdev.conf.tmp" "$TARGET_DIR/etc/mdev.conf"
 	fi
 	if grep -q '^BR2_PACKAGE_BRICK_EMMC_RECOVERY=y$' "$BR2_CONFIG"; then
@@ -30,6 +48,7 @@ else
 	cat > "$TARGET_DIR/etc/udev/rules.d/90-brick-usb.rules" <<'EOF'
 SUBSYSTEM=="udc", ACTION=="add|change|bind", RUN+="/etc/init.d/S30usb hotplug"
 SUBSYSTEM=="gadget", ACTION=="add|change|bind", RUN+="/etc/init.d/S30usb hotplug"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", OWNER="root", GROUP="root", MODE="0600"
 EOF
 fi
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/usb_profile.py" install \

@@ -95,7 +95,7 @@ endif
 KERNEL_DIR ?= $(abspath $(ROOT)/../linux)
 ARCHIVE := $(ROOT)/output/downloads/buildroot-$(BUILDROOT_VERSION).tar.xz
 
-.PHONY: all configure dev kernel-rebuild kernel-reconfigure check clean release release-check
+.PHONY: all configure dev kernel-rebuild kernel-reconfigure captive-patch-check check clean release release-check
 all: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads
 
@@ -150,6 +150,11 @@ kernel-rebuild: $(O)/.config
 
 kernel-reconfigure: $(O)/.config
 	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads linux-reconfigure all
+
+# Bounded captive-engine milestone: verify the pinned archive and apply every
+# package patch through Buildroot without configuring or compiling WebKit.
+captive-patch-check: $(O)/.config
+	$(MAKE) -C $(BUILDROOT) O=$(O) BR2_EXTERNAL="$(EXTERNALS)" BR2_DL_DIR=$(ROOT)/output/downloads brick-wpewebkit-patch
 
 check:
 	python3 -m unittest discover -s $(ROOT)/tests

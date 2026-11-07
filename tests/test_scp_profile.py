@@ -121,6 +121,10 @@ class ScpProfileTests(unittest.TestCase):
     def test_new_output_is_accepted(self):
         scp_profile.check_output(self.config.with_name('new-config'), 'startup')
 
+    def test_package_selects_lzma_support_for_stock_firmware_archive(self):
+        package_config = (ROOT / 'package/brick-scp/Config.in').read_text()
+        self.assertIn('select BR2_PACKAGE_HOST_PYTHON3_XZ', package_config)
+
 
 if __name__ == '__main__':
     unittest.main()

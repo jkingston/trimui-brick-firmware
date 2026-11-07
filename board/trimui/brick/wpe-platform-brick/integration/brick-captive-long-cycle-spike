@@ -1,0 +1,335 @@
+#!/bin/sh
+# Bounded packaged-chain lifecycle and accelerated soak qualification.
+set -eu
+umask 077
+
+self=$0
+root=${BRICK_LONG_ROOT:-/tmp/brick-captive-long-cycle}
+runtime=$root/runtime
+state=$root/wifi-state
+profile=$root/profile
+mode=$root/connectivity-mode
+results=$root/cycles.csv
+samples=$root/soak.csv
+checkpoints=$root/checkpoints.log
+chain_log=$root/chain.log
+stage=${BRICK_WPE_STAGE:-/data/wpe-single-spike}
+broker=${BRICK_TEST_BROKER:-/tmp/brick-captive-broker}
+control=${BRICK_TEST_CONTROL:-/tmp/brick-captive-control}
+supervisor=${BRICK_TEST_SUPERVISOR:-/tmp/brick-captive-supervisor}
+authority=${BRICK_TEST_AUTHORITY:-/tmp/brick-captive-authority}
+browser=${BRICK_TEST_BROWSER:-/tmp/brick-captive-browser}
+watchdog=${BRICK_TEST_WATCHDOG:-/tmp/brick-captive-watchdog}
+pause=${BRICK_TEST_PAUSE:-/tmp/brick-captive-display-pause}
+resume=${BRICK_TEST_RESUME:-/tmp/brick-captive-display-resume}
+real_wpa=${BRICK_REAL_WPA_CLI:-wpa_cli}
+broker_pid=
+
+field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | sed -n '1p'; }
+status_text() { "$real_wpa" -i wlan0 -p /run/wpa_supplicant status; }
+
+if [ "${1:-}" = -i ]; then
+	exec "$real_wpa" "$@"
+fi
+
+if [ "${1:-}" = check ]; then
+	fixture_url=${BRICK_LONG_FIXTURE_URL:?}
+	check_state=$(cat "$mode")
+	case $check_state in online|captive) ;; *) check_state=captive ;; esac
+	tmp=$state/connectivity.tmp.$$
+	{
+		printf 'state=%s\n' "$check_state"
+		printf 'portal_url=%s\n' "$fixture_url"
+	} > "$tmp"
+	mv "$tmp" "$state/connectivity"
+	exit 0
+fi
+
+if [ "${1:-}" = key ]; then
+	printf 'ab90deed815b4d2e5d85ab032d1f5b53d1edbeea28011f6dde55f21c4dd47d65\n'
+	exit 0
+fi
+
+[ "$(id -u)" -eq 0 ] || { echo 'must run as root' >&2; exit 2; }
+[ "$#" -eq 4 ] || {
+	echo "Usage: $0 FIXTURE_BASE CYCLES STATIC_SECONDS ANIMATED_SECONDS" >&2
+	exit 2
+}
+fixture_base=$1
+cycles=$2
+static_seconds=$3
+animated_seconds=$4
+case $fixture_base in http://192.168.7.1:*) ;; *)
+	echo 'fixture must use the isolated USB host address' >&2; exit 2 ;;
+esac
+for number in "$cycles" "$static_seconds" "$animated_seconds"; do
+	case $number in ''|*[!0-9]*) echo 'numeric arguments required' >&2; exit 2 ;; esac
+done
+[ "$cycles" -gt 0 ] && [ "$cycles" -le 1000 ] || exit 2
+[ "$static_seconds" -le 600 ] && [ "$animated_seconds" -le 600 ] || exit 2
+
+write_captive_state() {
+	state_tmp=$state/connectivity.tmp.$$
+	{
+		printf 'state=captive\n'
+		printf 'portal_url=%s\n' "$1"
+	} > "$state_tmp"
+	mv "$state_tmp" "$state/connectivity"
+}
+
+control_command() {
+	control_count=0
+	while [ "$control_count" -lt 50 ]; do
+		control_error=$root/control-error
+		if BRICK_CAPTIVE_RUNTIME_ROOT=$runtime WIFI_STATE_DIR=$state \
+			WIFI_WPA_CLI=$self WIFI_PRIVATE_MAC=$self \
+			BRICK_REAL_WPA_CLI=$real_wpa "$control" "$@" \
+			2> "$control_error"; then
+			rm -f "$control_error"
+			return 0
+		fi
+		if ! grep -q '^brick-captive-control: control is busy; try again$' \
+			"$control_error"; then
+			cat "$control_error" >&2
+			return 1
+		fi
+		sleep 0.1
+		control_count=$((control_count + 1))
+	done
+	echo 'control remained busy for 5 seconds' >&2
+	return 1
+}
+
+wait_field() {
+	wait_file=$1 wait_name=$2 wait_expected=$3 wait_ticks=$4
+	wait_count=0
+	while [ "$wait_count" -lt "$wait_ticks" ]; do
+		[ "$(field "$wait_name" "$wait_file")" = "$wait_expected" ] && return 0
+		sleep 0.1
+		wait_count=$((wait_count + 1))
+	done
+	return 1
+}
+
+browser_count() {
+	ps -eo comm | awk '$1 ~ /^brick-captive-w/ || /^(bwrap|WPEWebProcess|WPENetworkProcess|WPEGPUProcess)$/ { count++ } END { print count+0 }'
+}
+
+session_cgroup() {
+	field cgroup "$runtime/session"
+}
+
+hash_drm() {
+	hash_output=$1
+	: > "$hash_output"
+	for hash_name in clients gem_names framebuffer state; do
+		sha256sum "/sys/kernel/debug/dri/0/$hash_name" >> "$hash_output"
+	done
+}
+
+wait_live() {
+	wait_field "$runtime/status" state running 100
+	live_count=0
+	while [ "$live_count" -lt 200 ]; do
+		[ "$(browser_count)" -ge 4 ] && [ -f "$runtime/session" ] && return 0
+		sleep 0.1
+		live_count=$((live_count + 1))
+	done
+	return 1
+}
+
+wait_idle() {
+	wait_field "$runtime/status" state idle 300
+}
+
+verify_recovery() {
+	recovery_label=$1
+	recovery_count=0
+	while [ "$recovery_count" -lt 150 ]; do
+		if [ "$(browser_count)" -eq 0 ] && [ ! -e "$runtime/session" ] &&
+			[ -z "$(find /sys/fs/cgroup/brick-captive -mindepth 1 -maxdepth 1 -type d -name 'session-*' -print -quit 2>/dev/null)" ]; then
+			break
+		fi
+		sleep 0.1
+		recovery_count=$((recovery_count + 1))
+	done
+	[ "$(browser_count)" -eq 0 ] || { echo "$recovery_label: process leak" >&2; return 1; }
+	[ ! -e "$runtime/session" ] || { echo "$recovery_label: session marker leak" >&2; return 1; }
+	[ -z "$(find /sys/fs/cgroup/brick-captive -mindepth 1 -maxdepth 1 -type d -name 'session-*' -print -quit 2>/dev/null)" ] || {
+		echo "$recovery_label: cgroup leak" >&2; return 1; }
+	pidof brick-shell >/dev/null || { echo "$recovery_label: shell absent" >&2; return 1; }
+	drm_count=0
+	while [ "$drm_count" -lt 100 ]; do
+		hash_drm "$root/drm.current"
+		cmp -s "$root/drm.baseline" "$root/drm.current" && break
+		sleep 0.1
+		drm_count=$((drm_count + 1))
+	done
+	cmp "$root/drm.baseline" "$root/drm.current" >/dev/null
+}
+
+open_session() {
+	open_url=$1
+	write_captive_state "$open_url"
+	control_command open "$network_id" "$open_url"
+	wait_live
+}
+
+kill_one_web_process() {
+	kill_count=0
+	while [ "$kill_count" -lt 100 ]; do
+		web_pids=$(ps -eo pid,comm | awk '$2 == "WPEWebProcess" { print $1 }')
+		set -- $web_pids
+		if [ "$#" -eq 1 ] && kill -KILL "$1" 2>/dev/null; then
+			return 0
+		fi
+		sleep 0.1
+		kill_count=$((kill_count + 1))
+	done
+	echo 'did not find exactly one Web process' >&2
+	return 1
+}
+
+mem_available() { awk '/^MemAvailable:/ { print $2 }' /proc/meminfo; }
+
+profile_kib() {
+	du -sk "$stage$profile" 2>/dev/null | awk '{ print $1+0 }'
+}
+
+sample_active() {
+	sample_phase=$1 sample_second=$2
+	sample_cgroup=$(session_cgroup)
+	case $sample_cgroup in /sys/fs/cgroup/brick-captive/session-[0-9]*) ;; *)
+		echo "$sample_phase: invalid active cgroup" >&2; return 1 ;;
+	esac
+	memory_current=$(cat "$sample_cgroup/memory.current")
+	memory_peak=$(cat "$sample_cgroup/memory.peak")
+	processes=$(browser_count)
+	rss_kib=0
+	for sample_pid in $(ps -eo pid,comm | awk '$2 ~ /^brick-captive-w/ || $2 ~ /^(bwrap|WPEWebProcess|WPENetworkProcess|WPEGPUProcess)$/ { print $1 }'); do
+		pid_rss=$(awk '/^VmRSS:/ { print $2; found=1 } END { if (!found) print 0 }' "/proc/$sample_pid/status" 2>/dev/null || echo 0)
+		rss_kib=$((rss_kib + pid_rss))
+	done
+	printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$sample_phase" "$sample_second" \
+		"$memory_current" "$memory_peak" "$rss_kib" "$processes" \
+		"$(mem_available)" "$(profile_kib)" >> "$samples"
+}
+
+run_soak() {
+	soak_phase=$1 soak_url=$2 soak_seconds=$3
+	[ "$soak_seconds" -gt 0 ] || return 0
+	printf 'captive\n' > "$mode"
+	open_session "$soak_url"
+	soak_elapsed=0
+	while [ "$soak_elapsed" -le "$soak_seconds" ]; do
+		sample_active "$soak_phase" "$soak_elapsed"
+		[ "$soak_elapsed" -eq "$soak_seconds" ] && break
+		soak_step=5
+		[ $((soak_elapsed + soak_step)) -le "$soak_seconds" ] || soak_step=$((soak_seconds - soak_elapsed))
+		sleep "$soak_step"
+		soak_elapsed=$((soak_elapsed + soak_step))
+	done
+	printf 'online\n' > "$mode"
+	wait_idle
+	[ "$(field result "$runtime/status")" = success ]
+	verify_recovery "$soak_phase"
+	printf 'soak=%s seconds=%s result=success cleanup=PASS\n' "$soak_phase" "$soak_seconds" >> "$checkpoints"
+}
+
+cleanup() {
+	cleanup_status=$?
+	trap - EXIT HUP INT TERM
+	if [ -n "$broker_pid" ] && kill -0 "$broker_pid" 2>/dev/null; then
+		kill -TERM "$broker_pid" 2>/dev/null || :
+		wait "$broker_pid" 2>/dev/null || :
+	fi
+	pidof brick-shell >/dev/null || /etc/init.d/S20brick-shell start >/dev/null 2>&1 || :
+	exit "$cleanup_status"
+}
+trap cleanup EXIT HUP INT TERM
+
+for executable in "$broker" "$control" "$supervisor" "$authority" \
+	"$browser" "$watchdog" "$pause" "$resume"; do
+	[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 2; }
+done
+[ -d "$stage" ] || exit 2
+[ ! -e "$root" ] || { echo "refusing stale root: $root" >&2; exit 2; }
+mkdir -p "$runtime" "$state" "$profile" "$stage$profile"
+chmod 0700 "$root" "$runtime" "$state" "$profile"
+chmod 0711 "$stage$root"
+chown -R 997:997 "$stage$profile"
+chmod 0700 "$stage$profile"
+
+initial_status=$(status_text)
+network_id=$(printf '%s\n' "$initial_status" | sed -n 's/^id=//p' | sed -n '1p')
+network_state=$(printf '%s\n' "$initial_status" | sed -n 's/^wpa_state=//p' | sed -n '1p')
+case $network_id in ''|*[!0-9]*) exit 2 ;; esac
+[ "$network_state" = COMPLETED ] || exit 2
+[ "$(browser_count)" -eq 0 ] || exit 2
+hash_drm "$root/drm.baseline"
+printf 'cycle,kind,result,mem_available_kib,profile_kib\n' > "$results"
+printf 'phase,elapsed_s,memory_current_bytes,memory_peak_bytes,rss_kib,processes,mem_available_kib,profile_kib\n' > "$samples"
+: > "$checkpoints"
+printf 'online\n' > "$mode"
+
+BRICK_CAPTIVE_RUNTIME_ROOT=$runtime WIFI_STATE_DIR=$state WIFI_WPA_CLI=$self \
+BRICK_REAL_WPA_CLI=$real_wpa BRICK_LONG_FIXTURE_URL=$fixture_base/static \
+BRICK_CAPTIVE_SUPERVISOR=$supervisor BRICK_CAPTIVE_AUTHORITY=$authority \
+BRICK_CAPTIVE_BROWSER=$browser BRICK_CAPTIVE_WATCHDOG=$watchdog \
+BRICK_DISPLAY_PAUSE_HOOK=$pause BRICK_DISPLAY_RESUME_HOOK=$resume \
+BRICK_CAPTIVE_PROFILE_ROOT=$profile BRICK_CAPTIVE_PROFILE_OWNER=997:997 \
+BRICK_CONNECTIVITY_CHECKER=$self BRICK_AUTHORITY_CHECK_INTERVAL_MS=100 \
+BRICK_AUTHORITY_SESSION_TIMEOUT_MS=600000 \
+"$broker" daemon >> "$chain_log" 2>&1 &
+broker_pid=$!
+wait_field "$runtime/status" state idle 50
+
+cycle=1
+while [ "$cycle" -le "$cycles" ]; do
+	cycle_kind=success
+	case $cycle in
+		*[!0-9]*) exit 2 ;;
+	esac
+	if [ $((cycle % 100)) -eq 0 ]; then
+		cycle_kind=cancel
+	elif [ $((cycle % 125)) -eq 0 ]; then
+		cycle_kind=web-kill
+	fi
+	# Keep fault sessions captive so the authority cannot approve and tear down
+	# the target between process discovery and injection. Normal sessions use
+	# the fast online path.
+	case $cycle_kind in
+		success) printf 'online\n' > "$mode" ;;
+		cancel|web-kill) printf 'captive\n' > "$mode" ;;
+	esac
+	open_session "$fixture_base/static"
+	case $cycle_kind in
+		success) ;;
+		cancel)
+		control_command cancel
+		;;
+		web-kill)
+		kill_one_web_process
+		;;
+	esac
+	wait_idle
+	cycle_result=$(field result "$runtime/status")
+	case $cycle_kind:$cycle_result in
+		success:success|cancel:exit-*|web-kill:exit-*) ;;
+		*) echo "cycle $cycle unexpected $cycle_kind:$cycle_result" >&2; exit 1 ;;
+	esac
+	verify_recovery "cycle-$cycle"
+	printf '%s,%s,%s,%s,%s\n' "$cycle" "$cycle_kind" "$cycle_result" \
+		"$(mem_available)" "$(profile_kib)" >> "$results"
+	if [ $((cycle % 25)) -eq 0 ] || [ "$cycle" -eq "$cycles" ]; then
+		printf 'cycle=%s result=%s mem_available_kib=%s profile_kib=%s drm=identical cleanup=PASS\n' \
+			"$cycle" "$cycle_result" "$(mem_available)" "$(profile_kib)" | tee -a "$checkpoints"
+	fi
+	cycle=$((cycle + 1))
+done
+
+run_soak static "$fixture_base/static" "$static_seconds"
+run_soak animated "$fixture_base/animate-full?frames=10000&token=long-cycle" "$animated_seconds"
+
+printf 'PASS cycles=%s static_seconds=%s animated_seconds=%s final_mem_available_kib=%s profile_kib=%s\n' \
+	"$cycles" "$static_seconds" "$animated_seconds" "$(mem_available)" "$(profile_kib)"

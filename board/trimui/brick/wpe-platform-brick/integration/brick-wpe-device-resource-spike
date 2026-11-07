@@ -1,0 +1,131 @@
+#!/bin/sh
+# Sample the real WPE process family while a broker/watchdog command runs.
+set -eu
+
+[ "$#" -ge 3 ] || {
+	echo "usage: $0 SESSIONS OUTPUT -- COMMAND [ARG ...]" >&2
+	exit 2
+}
+sessions=$1
+output=$2
+shift 2
+[ "$1" = -- ] || { echo 'missing --' >&2; exit 2; }
+shift
+case $sessions in ''|*[!0-9]*) echo 'sessions must be numeric' >&2; exit 2 ;; esac
+[ "$sessions" -gt 0 ] && [ "$sessions" -le 1000 ] || exit 2
+
+stage_mount=${BRICK_WPE_STAGE_MOUNT:-/tmp/wpe-single-root}
+
+process_rows()
+{
+	for pid in $(ps -o pid,comm | awk '
+		/brick-captive|WebKit|bwrap|WPEWeb|WPENetwork|WPEGPU/ { print $1 }'); do
+		rss=$(awk '/^VmRSS:/ { print $2; found=1 }
+			END { if (!found) print 0 }' "/proc/$pid/status" 2>/dev/null ||
+			echo 0)
+		set -- $(awk '
+			/^Pss:/ { pss=$2 }
+			/^Pss_Anon:/ { anon=$2 }
+			/^Pss_File:/ { file=$2 }
+			/^Pss_Shmem:/ { shmem=$2 }
+			END { print pss+0, anon+0, file+0, shmem+0 }
+		' "/proc/$pid/smaps_rollup" 2>/dev/null || echo '0 0 0 0')
+		printf '%s %s %s %s %s %s\n' "$pid" "$rss" "$1" "$2" "$3" "$4"
+	done
+}
+
+mount_count()
+{
+	awk -v stage="$stage_mount" '$2 == stage || index($2, stage "/") == 1 {
+		count++ } END { print count + 0 }' /proc/mounts
+}
+
+if [ "$(process_rows | awk 'END { print NR + 0 }')" -ne 0 ] ||
+   [ "$(mount_count)" -ne 0 ]; then
+	echo 'WPE process or stage mount already active; refusing concurrent run' >&2
+	exit 3
+fi
+
+rm -f "$output"
+printf 'session,status,elapsed_cs,peak_rss_kib,peak_pss_kib,peak_pss_anon_kib,peak_pss_file_kib,peak_pss_shmem_kib,peak_processes,leaked_processes,leaked_mounts\n' > "$output"
+i=1
+while [ "$i" -le "$sessions" ]; do
+	start=$(cut -d. -f1,2 /proc/uptime)
+	"$@" > "$output.$i.log" 2>&1 &
+	command_pid=$!
+	peak_rss=0
+	peak_pss=0
+	peak_pss_anon=0
+	peak_pss_file=0
+	peak_pss_shmem=0
+	peak_processes=0
+	while kill -0 "$command_pid" 2>/dev/null; do
+		sample=$(process_rows | awk '{
+			rss += $2; pss += $3; anon += $4; file += $5; shmem += $6;
+			count++
+		} END { print rss+0, pss+0, anon+0, file+0, shmem+0, count+0 }')
+		current_rss=$(echo "$sample" | awk '{ print $1 }')
+		current_pss=$(echo "$sample" | awk '{ print $2 }')
+		current_pss_anon=$(echo "$sample" | awk '{ print $3 }')
+		current_pss_file=$(echo "$sample" | awk '{ print $4 }')
+		current_pss_shmem=$(echo "$sample" | awk '{ print $5 }')
+		current_processes=$(echo "$sample" | awk '{ print $6 }')
+		[ "$current_rss" -le "$peak_rss" ] || peak_rss=$current_rss
+		[ "$current_pss" -le "$peak_pss" ] || peak_pss=$current_pss
+		[ "$current_pss_anon" -le "$peak_pss_anon" ] ||
+			peak_pss_anon=$current_pss_anon
+		[ "$current_pss_file" -le "$peak_pss_file" ] ||
+			peak_pss_file=$current_pss_file
+		[ "$current_pss_shmem" -le "$peak_pss_shmem" ] ||
+			peak_pss_shmem=$current_pss_shmem
+		[ "$current_processes" -le "$peak_processes" ] || \
+			peak_processes=$current_processes
+		sleep 0.02
+	done
+	set +e
+	wait "$command_pid"
+	status=$?
+	set -e
+	end=$(cut -d. -f1,2 /proc/uptime)
+	elapsed_cs=$(awk -v start="$start" -v end="$end" \
+		'BEGIN { printf "%d", (end - start) * 100 }')
+	settle=0
+	while [ "$settle" -lt 250 ]; do
+		leaked=$(process_rows | awk 'END { print NR + 0 }')
+		leaked_mounts=$(mount_count)
+		[ "$leaked" -ne 0 ] || [ "$leaked_mounts" -ne 0 ] || break
+		sleep 0.02
+		settle=$((settle + 1))
+	done
+	printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+		"$i" "$status" "$elapsed_cs" "$peak_rss" "$peak_pss" \
+		"$peak_pss_anon" "$peak_pss_file" "$peak_pss_shmem" \
+		"$peak_processes" "$leaked" "$leaked_mounts" >> "$output"
+	if [ "$leaked" -ne 0 ] || [ "$leaked_mounts" -ne 0 ]; then
+		echo "session $i did not quiesce; refusing another session" >&2
+		break
+	fi
+	i=$((i + 1))
+done
+
+awk -F, 'NR > 1 {
+	count++; failures += ($2 != 0); elapsed[count] = $3;
+	if ($4 > peak_rss) peak_rss = $4;
+	if ($5 > peak_pss) peak_pss = $5;
+	if ($6 > peak_anon) peak_anon = $6;
+	if ($7 > peak_file) peak_file = $7;
+	if ($8 > peak_shmem) peak_shmem = $8;
+	if ($9 > peak_processes) peak_processes = $9;
+	leaks += $10; mount_leaks += $11
+}
+END {
+	for (i = 1; i <= count; i++)
+		for (j = i + 1; j <= count; j++)
+			if (elapsed[i] > elapsed[j]) {
+				t = elapsed[i]; elapsed[i] = elapsed[j]; elapsed[j] = t
+			}
+	p95_index = int((count - 1) * .95) + 1
+	printf "sessions=%d failures=%d p95_elapsed_ms=%d peak_rss_kib=%d peak_pss_kib=%d peak_pss_anon_kib=%d peak_pss_file_kib=%d peak_pss_shmem_kib=%d peak_processes=%d leaked_processes=%d leaked_mounts=%d\n",
+		count, failures, elapsed[p95_index] * 10, peak_rss, peak_pss,
+		peak_anon, peak_file, peak_shmem, peak_processes, leaks, mount_leaks
+}' "$output"

@@ -1,0 +1,27 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] build: disable obsolete TKIP for the Brick station
+
+The Brick product supports open networks and WPA2-PSK with CCMP.  Its XR829
+firmware can remain joined but unable to scan after attempting a WPA/TKIP BSS,
+and TKIP is obsolete cryptography outside the product security scope.
+
+Build out TKIP so mixed WPA/WPA2 access points can still negotiate their CCMP
+RSN mode, while TKIP-only profiles are rejected before the driver mutates
+firmware state.  WEP is already absent because CONFIG_WEP is opt-in.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ wpa_supplicant/defconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/wpa_supplicant/defconfig
++++ b/wpa_supplicant/defconfig
+@@ -658,7 +658,7 @@
+ # use WPA+WPA2 mixed mode. For now, the default wpa_supplicant build includes
+ # support for this by default, but that functionality is subject to be removed
+ # in the future.
+-#CONFIG_NO_TKIP=y
++CONFIG_NO_TKIP=y
+ 
+ # Pre-Association Security Negotiation (PASN)
+ #CONFIG_PASN=y

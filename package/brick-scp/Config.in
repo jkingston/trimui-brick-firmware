@@ -1,6 +1,7 @@
 config BR2_PACKAGE_BRICK_SCP
 	bool "Brick SCP startup profile"
 	select BR2_PACKAGE_HOST_PYTHON3
+	select BR2_PACKAGE_HOST_PYTHON3_XZ
 	help
 	  Build the opt-in Brick SCP profile using the exact SCP and service
 	  device tree extracted from the official firmware archive. The profile

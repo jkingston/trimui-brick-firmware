@@ -1,0 +1,248 @@
+#!/bin/sh
+# Classify the current Wi-Fi path without accepting unauthenticated HTTPS.
+set -eu
+umask 077
+
+state=${WIFI_STATE_DIR:-/run/brick-wifi}
+curl=${WIFI_CURL:-curl}
+http_url=${WIFI_HTTP_PROBE_URL:-http://connectivitycheck.gstatic.com/generate_204}
+https_url=${WIFI_HTTPS_PROBE_URL:-https://connectivitycheck.gstatic.com/generate_204}
+connect_timeout=${WIFI_CONNECT_TIMEOUT:-4}
+total_timeout=${WIFI_TOTAL_TIMEOUT:-8}
+max_body=${WIFI_MAX_PROBE_BODY:-16384}
+
+mkdir -p "$state"
+exec 9>"$state/connectivity.lock"
+flock -x 9
+
+write_result() {
+	result_state=$1
+	reason=$2
+	tmp="$state/connectivity.tmp.$$"
+	{
+		printf 'state=%s\n' "$result_state"
+		printf 'reason=%s\n' "$reason"
+		printf 'checked_at=%s\n' "$(date +%s)"
+		printf 'http_code=%s\n' "${http_code:-000}"
+		printf 'https_code=%s\n' "${https_code:-000}"
+		printf 'http_result=%s\n' "${http_rc:-not-run}"
+		printf 'https_result=%s\n' "${https_rc:-not-run}"
+		printf 'capport_result=%s\n' "${capport_result:-not-provided}"
+		printf 'portal_url=%s\n' "${portal_url:-}"
+	} > "$tmp"
+	mv "$tmp" "$state/connectivity"
+	cat "$state/connectivity"
+}
+
+valid_https_uri() {
+	[ ${#1} -le 255 ] || return 1
+	printf '%s\n' "$1" |
+		LC_ALL=C grep -Eq '^https://[^[:space:][:cntrl:]]+$'
+}
+
+# Print the unique, unescaped, top-level "captive" boolean. Anything more
+# surprising is rejected so an RFC 8908 response cannot spoof the parser with
+# a nested member or a string containing JSON-looking text.
+parse_capport_captive() {
+	awk '
+	function white(c) { return c == " " || c == "\t" || c == "\r" || c == "\n" }
+	{
+		text = text $0 "\n"
+	}
+	END {
+		depth = 0
+		found = 0
+		n = length(text)
+		for (i = 1; i <= n;) {
+			c = substr(text, i, 1)
+			if (c == "\"") {
+				key = ""
+				escaped = 0
+				closed = 0
+				for (i = i + 1; i <= n; i++) {
+					c = substr(text, i, 1)
+					if (c == "\\") {
+						escaped = 1
+						i++
+						continue
+					}
+					if (c == "\"") {
+						closed = 1
+						i++
+						break
+					}
+					key = key c
+				}
+				if (!closed)
+					exit 2
+				j = i
+				while (j <= n && white(substr(text, j, 1)))
+					j++
+				if (depth == 1 && !escaped && key == "captive" && substr(text, j, 1) == ":") {
+					for (j = j + 1; j <= n && white(substr(text, j, 1)); j++)
+						;
+					if (substr(text, j, 4) == "true") {
+						value = "true"
+						j += 4
+					} else if (substr(text, j, 5) == "false") {
+						value = "false"
+						j += 5
+					} else {
+						exit 2
+					}
+					while (j <= n && white(substr(text, j, 1)))
+						j++
+					if (substr(text, j, 1) != "," && substr(text, j, 1) != "}")
+						exit 2
+					found++
+					if (found > 1)
+						exit 2
+				}
+				continue
+			}
+			if (c == "{" || c == "[")
+				depth++
+			else if (c == "}" || c == "]")
+				depth--
+			if (depth < 0)
+				exit 2
+			i++
+		}
+		if (depth != 0 || found != 1)
+			exit 2
+		print value
+	}
+	' "$1"
+}
+
+run_probe() {
+	name=$1
+	url=$2
+	accept=$3
+	body="$work/$name.body"
+	headers="$work/$name.headers"
+	error="$work/$name.error"
+	if metadata=$("$curl" --disable --silent --show-error \
+		--connect-timeout "$connect_timeout" --max-time "$total_timeout" \
+		--max-filesize "$max_body" --proto '=http,https' \
+		--header "Accept: $accept" --output "$body" --dump-header "$headers" \
+		--write-out '%{http_code}\n%{size_download}\n%{content_type}\n' \
+		"$url" 2>"$error"); then
+		probe_rc=0
+	else
+		probe_rc=$?
+	fi
+	probe_code=$(printf '%s\n' "$metadata" | sed -n '1p')
+	probe_size=$(printf '%s\n' "$metadata" | sed -n '2p')
+	probe_type=$(printf '%s\n' "$metadata" | sed -n '3p')
+	case $probe_code in
+	[0-9][0-9][0-9]) ;;
+	*) probe_code=000 ;;
+	esac
+	case $probe_size in
+	''|*[!0-9]*) probe_size=0 ;;
+	esac
+}
+
+case ${1:-} in
+show)
+	if [ -f "$state/connectivity" ]; then
+		cat "$state/connectivity"
+	else
+		printf 'state=unknown\nreason=not-checked\n'
+	fi
+	exit 0
+	;;
+clear)
+	rm -f "$state/connectivity" "$state/capport.json"
+	exit 0
+	;;
+check)
+	;;
+*)
+	echo 'Usage: brick-wifi-connectivity {check [CAPPORT_URI]|show|clear}' >&2
+	exit 2
+	;;
+esac
+
+work=$(mktemp -d "$state/connectivity.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+rm -f "$state/capport.json"
+capport_uri=${2:-${WIFI_CAPPORT_URI:-}}
+capport_result=not-provided
+portal_url=
+
+if [ "$capport_uri" = urn:ietf:params:capport:unrestricted ]; then
+	capport_result=unrestricted
+	write_result online capport-unrestricted
+	exit 0
+fi
+
+if [ -n "$capport_uri" ]; then
+	if valid_https_uri "$capport_uri"; then
+		run_probe capport "$capport_uri" application/captive+json
+		capport_result="curl-$probe_rc"
+		if [ "$probe_rc" -eq 0 ] && [ "$probe_code" = 200 ] &&
+		   printf '%s\n' "$probe_type" | grep -Eqi '^application/captive\+json([[:space:]]*;|$)'; then
+			if captive=$(parse_capport_captive "$work/capport.body"); then
+				mv "$work/capport.body" "$state/capport.json"
+				capport_result=$captive
+				case $captive in
+				true) portal_url=$http_url; write_result captive capport-api ;;
+				false) write_result online capport-api ;;
+				esac
+				exit 0
+			fi
+			capport_result=invalid-json
+		elif [ "$probe_rc" -eq 0 ]; then
+			capport_result=invalid-response
+		fi
+	else
+		capport_result=invalid-uri
+	fi
+fi
+
+run_probe http "$http_url" '*/*'
+http_rc=$probe_rc
+http_code=$probe_code
+http_size=$probe_size
+run_probe https "$https_url" '*/*'
+https_rc=$probe_rc
+https_code=$probe_code
+https_size=$probe_size
+
+# Authenticated HTTPS success is sufficient proof of Internet access. HTTP is
+# retained to spot portals that intentionally intercept the legacy probe.
+if [ "$https_rc" -eq 0 ] && [ "$https_code" = 204 ] && [ "$https_size" -eq 0 ]; then
+	if [ "$http_rc" -eq 0 ] && [ "$http_code" = 204 ] && [ "$http_size" -eq 0 ]; then
+		write_result online dual-probe
+	else
+		write_result online https-probe
+	fi
+	exit 0
+fi
+
+if [ "$http_rc" -eq 0 ]; then
+	case $http_code in
+	3??|511)
+		portal_url=$http_url
+		write_result captive http-intercept
+		exit 0
+		;;
+	200)
+		if [ "$http_size" -gt 0 ]; then
+			portal_url=$http_url
+			write_result captive http-content
+			exit 0
+		fi
+		;;
+	esac
+fi
+
+case " $http_rc $https_rc " in
+*' 60 '*|*' 77 '*) write_result limited tls-validation ;;
+*' 6 '*) write_result limited dns ;;
+*' 28 '*) write_result limited timeout ;;
+*' 7 '*) write_result limited connect ;;
+*) write_result limited unexpected-response ;;
+esac

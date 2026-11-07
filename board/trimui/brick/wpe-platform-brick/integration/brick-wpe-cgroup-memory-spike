@@ -1,0 +1,143 @@
+#!/bin/sh
+# Run one browser-family command in a bounded cgroup-v2 memory domain.
+set -eu
+
+[ "$#" -ge 5 ] || {
+	echo "usage: $0 ADMISSION_MIB HIGH_MIB MAX_MIB -- COMMAND [ARG ...]" >&2
+	exit 2
+}
+admission_mib=$1
+high_mib=$2
+max_mib=$3
+shift 3
+[ "$1" = -- ] || { echo 'missing --' >&2; exit 2; }
+shift
+for value in "$admission_mib" "$high_mib" "$max_mib"; do
+	case $value in ''|*[!0-9]*) exit 2 ;; esac
+done
+[ "$admission_mib" -ge 128 ] && [ "$high_mib" -ge 128 ] &&
+	[ "$max_mib" -ge "$high_mib" ] || exit 2
+
+root=/tmp/brick-wpe-cgroup2
+group=$root/session
+stage=${BRICK_WPE_STAGE_MOUNT:-/tmp/wpe-single-root}
+runner=
+
+mount_count()
+{
+	awk -v stage="$stage" '$2 == stage || index($2, stage "/") == 1 {
+		count++ } END { print count + 0 }' /proc/mounts
+}
+
+browser_process_count()
+{
+	ps -o comm | awk '
+		/brick-captive|WebKit|WPEWeb|WPENetwork|WPEGPU|bwrap/ { count++ }
+		END { print count + 0 }'
+}
+
+cleanup()
+{
+	trap - EXIT INT TERM HUP
+	if [ -n "$runner" ] && kill -0 "$runner" 2>/dev/null; then
+		kill "$runner" 2>/dev/null || true
+	fi
+	if [ -e "$group/cgroup.kill" ]; then
+		echo 1 > "$group/cgroup.kill" 2>/dev/null || true
+	fi
+	killall brick-captive-wpe WPEWebProcess WPENetworkProcess WPEGPUProcess \
+		bwrap 2>/dev/null || true
+	attempt=0
+	while [ "$attempt" -lt 250 ]; do
+		for target in "$stage/run" "$stage/sys" "$stage/proc" "$stage/dev" \
+			"$stage"; do
+			while umount "$target" 2>/dev/null; do :; done
+		done
+		[ "$(mount_count)" -ne 0 ] ||
+			[ "$(browser_process_count)" -ne 0 ] || break
+		sleep 0.02
+		attempt=$((attempt + 1))
+	done
+	rmdir "$group" 2>/dev/null || true
+	umount "$root" 2>/dev/null || true
+	rmdir "$root" 2>/dev/null || true
+	chown 0:0 /dev/dri/card0 /dev/fb0
+	chmod 0660 /dev/dri/card0 /dev/fb0
+	if ! pidof brick-shell >/dev/null 2>&1; then
+		/etc/init.d/S20brick-shell start \
+			>/tmp/wpe-cgroup-shell-start.log 2>&1 || true
+	fi
+	settle=0
+	while [ "$settle" -lt 250 ]; do
+		set -- $(pidof brick-shell 2>/dev/null || true)
+		[ "$#" -eq 1 ] && break
+		sleep 0.02
+		settle=$((settle + 1))
+	done
+}
+trap cleanup EXIT INT TERM HUP
+
+[ "$(mount_count)" -eq 0 ] || {
+	echo 'temporary WPE stage already mounted' >&2
+	exit 3
+}
+if ps -o comm | awk '/brick-captive|WebKit|WPEWeb|WPENetwork|WPEGPU|bwrap/ {
+	found=1 } END { exit found ? 0 : 1 }'; then
+	echo 'browser-family process already active' >&2
+	exit 3
+fi
+available_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+admission_kib=$((admission_mib * 1024))
+[ "$available_kib" -ge "$admission_kib" ] || {
+	echo "admission_denied available_kib=$available_kib floor_kib=$admission_kib"
+	exit 75
+}
+
+mkdir -p "$root"
+mount -t cgroup2 none "$root"
+printf '+memory +pids\n' > "$root/cgroup.subtree_control"
+mkdir "$group"
+echo $((high_mib * 1024 * 1024)) > "$group/memory.high"
+echo $((max_mib * 1024 * 1024)) > "$group/memory.max"
+echo 1 > "$group/memory.oom.group"
+echo 64 > "$group/pids.max"
+
+run_started=$(cut -d. -f1,2 /proc/uptime)
+sh -c 'echo "$$" > "$1/cgroup.procs"; shift; exec "$@"' sh \
+	"$group" "$@" &
+runner=$!
+while kill -0 "$runner" 2>/dev/null; do
+	sleep 0.02
+done
+set +e
+wait "$runner"
+status=$?
+set -e
+runner=
+run_ended=$(cut -d. -f1,2 /proc/uptime)
+
+current=$(cat "$group/memory.current")
+peak=$(cat "$group/memory.peak")
+events=$(tr '\n' ' ' < "$group/memory.events")
+pids_peak=$(cat "$group/pids.peak")
+printf 'status=%s available_kib=%s admission_kib=%s high_bytes=%s max_bytes=%s current_bytes=%s peak_bytes=%s pids_peak=%s events="%s"\n' \
+	"$status" "$available_kib" "$admission_kib" \
+	"$((high_mib * 1024 * 1024))" "$((max_mib * 1024 * 1024))" \
+	"$current" "$peak" "$pids_peak" "$events"
+
+cleanup
+trap - EXIT INT TERM HUP
+recovered=$(cut -d. -f1,2 /proc/uptime)
+timing=$(awk -v start="$run_started" -v ended="$run_ended" \
+	-v recovered="$recovered" 'BEGIN {
+	printf "session_ms=%d recovery_ms=%d", (ended-start)*1000,
+		(recovered-ended)*1000
+}')
+leaked_processes=$(browser_process_count)
+leaked_mounts=$(mount_count)
+shell_pid=$(pidof brick-shell || true)
+printf 'recovery %s leaked_processes=%s leaked_mounts=%s shell_pid=%s\n' \
+	"$timing" "$leaked_processes" "$leaked_mounts" "${shell_pid:-none}"
+[ "$leaked_processes" -eq 0 ] && [ "$leaked_mounts" -eq 0 ] &&
+	[ -n "$shell_pid" ] || exit 1
+exit "$status"

@@ -1,0 +1,124 @@
+#!/bin/sh
+# Prototype the connectivity authority's post-association roam decision.
+# This qualification helper is not installed in the target root filesystem.
+set -eu
+
+state=${WIFI_ROAM_STATE_DIR:-/run/brick-wifi/roam-qualification}
+wpa_cli=${WIFI_WPA_CLI:-wpa_cli}
+arping=${WIFI_ARPING:-arping}
+ip=${WIFI_IP:-ip}
+sleep_cmd=${WIFI_SLEEP:-sleep}
+date_cmd=${WIFI_DATE:-date}
+interface=${WIFI_INTERFACE:-wlan0}
+cooldown=${WIFI_ROAM_COOLDOWN:-300}
+attempts=${WIFI_ROAM_PROBE_ATTEMPTS:-3}
+
+valid_bssid() {
+	case $1 in
+	[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+valid_ipv4() {
+	case $1 in
+	''|*[!0-9.]*) return 1 ;;
+	*) return 0 ;;
+	esac
+}
+
+pair_path() {
+	old=$(printf '%s' "$1" | tr 'A-F:' 'a-f_')
+	new=$(printf '%s' "$2" | tr 'A-F:' 'a-f_')
+	printf '%s/%s-%s' "$state" "$old" "$new"
+}
+
+in_cooldown() {
+	path=$(pair_path "$1" "$2")
+	[ -f "$path" ] || return 1
+	expires=$(sed -n '1p' "$path")
+	case $expires in ''|*[!0-9]*) return 1 ;; esac
+	now=$($date_cmd +%s)
+	[ "$expires" -gt "$now" ]
+}
+
+case ${1:-} in
+approve)
+	[ "$#" -eq 5 ] || exit 64
+	valid_bssid "$2" && valid_bssid "$3" && valid_ipv4 "$4" &&
+		valid_bssid "$5" || exit 64
+	mkdir -p "$state/approved"
+	printf '%s %s\n' "$4" "$(printf '%s' "$5" | tr A-F a-f)" > \
+		"$state/approved/$(basename "$(pair_path "$2" "$3")")"
+	echo approved
+	;;
+check)
+	[ "$#" -eq 3 ] && valid_bssid "$2" && valid_bssid "$3" || exit 64
+	if in_cooldown "$2" "$3"; then
+		echo cooldown
+		exit 75
+	fi
+	echo eligible
+	;;
+verify)
+	[ "$#" -eq 6 ] || exit 64
+	old_bssid=$2
+	new_bssid=$3
+	gateway=$4
+	old_gateway_mac=$5
+	address=$6
+	valid_bssid "$old_bssid" && valid_bssid "$new_bssid" &&
+		valid_bssid "$old_gateway_mac" && valid_ipv4 "$gateway" &&
+		valid_ipv4 "$address" || exit 64
+	mkdir -p "$state"
+	approved="$state/approved/$(basename "$(pair_path "$old_bssid" "$new_bssid")")"
+	# Never infer same-L2 merely from a shared SSID.  A pair becomes eligible
+	# only after a prior DHCP-backed qualification recorded its gateway identity.
+	if [ ! -f "$approved" ] || \
+	   [ "$(sed -n '1p' "$approved")" != \
+	     "$gateway $(printf '%s' "$old_gateway_mac" | tr A-F a-f)" ]; then
+		echo unverified-l2
+		exit 20
+	fi
+	if in_cooldown "$old_bssid" "$new_bssid"; then
+		echo cooldown
+		exit 75
+	fi
+
+	i=0
+	while [ "$i" -lt "$attempts" ]; do
+		# An ARP response proves local L2 reachability.  Comparing the gateway
+		# MAC prevents retaining a lease across same-SSID but different L2s.
+		if "$arping" -f -q -c 1 -w 1 -I "$interface" "$gateway"; then
+			mac=$($ip neigh show "$gateway" dev "$interface" |
+				sed -n 's/.* lladdr \([^ ]*\).*/\1/p' | sed -n '1p')
+			if [ "$(printf '%s' "$mac" | tr A-F a-f)" = \
+			     "$(printf '%s' "$old_gateway_mac" | tr A-F a-f)" ]; then
+				"$arping" -U -q -b -c 2 -I "$interface" "$address" || :
+				echo same-l2
+				exit 0
+			fi
+			# A reachable different gateway MAC is positive evidence of a
+			# different L2.  The authority must discard the old lease and DHCP.
+			echo different-l2
+			exit 20
+		fi
+		i=$((i + 1))
+		[ "$i" -ge "$attempts" ] || "$sleep_cmd" 0.05
+	done
+
+	# Association without a usable old L2 is a failed candidate.  Roll back
+	# immediately and cool this directed pair to prevent ping-pong.
+	now=$($date_cmd +%s)
+	printf '%s\n' "$((now + cooldown))" > "$(pair_path "$old_bssid" "$new_bssid")"
+	"$wpa_cli" -i "$interface" roam "$old_bssid" >/dev/null
+	echo rollback
+	exit 21
+	;;
+*)
+	echo "Usage: $0 approve OLD_BSSID NEW_BSSID GATEWAY GATEWAY_MAC" >&2
+	echo "Usage: $0 check OLD_BSSID NEW_BSSID" >&2
+	echo "       $0 verify OLD_BSSID NEW_BSSID GATEWAY OLD_GATEWAY_MAC ADDRESS" >&2
+	exit 64
+	;;
+esac

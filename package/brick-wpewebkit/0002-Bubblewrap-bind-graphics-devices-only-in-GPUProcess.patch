@@ -1,0 +1,166 @@
+From 2bb7b5596fe9ba97d22aa3f308130730f20b49da Mon Sep 17 00:00:00 2001
+From: Brick Firmware <firmware@trimui-brick.invalid>
+Date: Fri, 6 Nov 2026 16:45:00 +0000
+Subject: [PATCH] WPE: broker the DRM allocation fd only to GPUProcess
+
+When DOM rendering is forced into the GPU process, exposing DRM primary and
+framebuffer nodes in the Web process defeats the process split. The WPE DRM UI
+process owns KMS and the GPU process performs rendering; the Web process needs
+neither device class.
+
+Sandbox GPU and Network as well as Web. Upstream only annotates Web launch
+options for sandboxing and explicitly treats Network as trusted. Keep host
+networking and bind only the declared captive profile root for Network. Move
+the existing OpenGL device bind as one unit. This retains upstream's device
+discovery list while ensuring Web content cannot see DRM or fbdev.
+
+The Brick has no render node and keeps its primary node root-only. Pass a
+pre-opened allocation fd only through the GPU launch, at a fixed child fd, and
+teach GBMDevice to consume and close that transport instead of reopening the
+node. The UI copy is close-on-exec and no Web or Network launch receives a
+mapped descriptor.
+---
+ Source/WebCore/platform/graphics/gbm/GBMDevice.cpp           | 14 +++++++++++++-
+ Source/WebKit/UIProcess/Launcher/glib/BubblewrapLauncher.cpp |  4 +++-
+ Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp | 19 +++++++++++++++++++
+ 3 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WebKit/UIProcess/Launcher/glib/BubblewrapLauncher.cpp b/Source/WebKit/UIProcess/Launcher/glib/BubblewrapLauncher.cpp
+index 05b0052f..7fca8f71 100644
+--- a/Source/WebKit/UIProcess/Launcher/glib/BubblewrapLauncher.cpp
++++ b/Source/WebKit/UIProcess/Launcher/glib/BubblewrapLauncher.cpp
+@@ -747,9 +747,8 @@ static bool shouldUnshareNetwork(ProcessLauncher::ProcessType processType, Vecto
+     }
+ #endif
+ 
+-    // Otherwise, only the network process should have network access. If we are the network
+-    // process, then we are not sandboxed and have already bailed out before this point.
+-    return true;
++    // Only the network process retains the host network namespace.
++    return processType != ProcessLauncher::ProcessType::Network;
+ }
+ 
+ static std::optional<CString> directoryContainingDBusSocket(const char* dbusAddress)
+@@ -792,12 +791,6 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
+ {
+     ASSERT(launcher);
+ 
+-    // For now we are just considering the network process trusted as it
+-    // requires a lot of access but doesn't execute arbitrary code like
+-    // the WebProcess where our focus lies.
+-    if (launchOptions.processType == ProcessLauncher::ProcessType::Network)
+-        return adoptGRef(g_subprocess_launcher_spawnv(launcher, argv.span().data(), error));
+-
+     const char* runDir = g_get_user_runtime_dir();
+     Vector<CString> sandboxArgs = {
+         "--unshare-uts",
+@@ -863,6 +856,13 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
+ 
+     addExtraPaths(launchOptions.extraSandboxPaths, sandboxArgs);
+ 
++    if (launchOptions.processType == ProcessLauncher::ProcessType::Network) {
++        const char* profileRoot = g_getenv("BRICK_CAPTIVE_PROFILE_ROOT");
++        if (!profileRoot || !g_path_is_absolute(profileRoot))
++            g_error("A trusted captive profile root is required");
++        sandboxArgs.appendList<CString>({ "--bind", profileRoot, profileRoot });
++    }
++
+     if (launchOptions.processType == ProcessLauncher::ProcessType::DBusProxy) {
+         sandboxArgs.appendList<CString>({
+             "--ro-bind", DBUS_PROXY_EXECUTABLE, DBUS_PROXY_EXECUTABLE,
+@@ -953,7 +953,6 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
+         bindSndio(sandboxArgs);
+         bindFonts(sandboxArgs);
+         bindGStreamerData(sandboxArgs);
+-        bindOpenGL(sandboxArgs);
+ 
+         // Although cameras can be managed via the DesktopPortal, we still need v4l2 for video decoding.
+         bindV4l(sandboxArgs);
+@@ -973,5 +972,8 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
+         dbusProxy.launch(launchOptions);
+     } else {
++        if (launchOptions.processType == ProcessLauncher::ProcessType::GPU)
++            bindOpenGL(sandboxArgs);
++
+         // Only X11 users need this for XShm which is only the Web process.
+         sandboxArgs.append("--unshare-ipc");
+     }
+diff --git a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+index b20208a..ee07aee 100644
+--- a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
++++ b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+@@ -235,6 +235,26 @@ void ProcessLauncher::launchProcess()
+     int webkitClientSocketValue = webkitSocketPair.client.release();
+     g_subprocess_launcher_take_fd(launcher.get(), webkitClientSocketValue, webkitClientSocketValue);
++    g_subprocess_launcher_unsetenv(launcher.get(), "BRICK_CAPTIVE_GPU_DRM_FD");
++    g_subprocess_launcher_unsetenv(launcher.get(), "BRICK_CAPTIVE_PROFILE_ROOT");
+ 
++#if ENABLE(GPU_PROCESS) && USE(GBM)
++    if (m_launchOptions.processType == ProcessLauncher::ProcessType::GPU) {
++        static constexpr int gpuDRMTargetFD = 198;
++        const char* gpuDRMFDString = g_getenv("BRICK_CAPTIVE_GPU_DRM_FD");
++        char* end = nullptr;
++        errno = 0;
++        gint64 gpuDRMFDValue = gpuDRMFDString ? g_ascii_strtoll(gpuDRMFDString, &end, 10) : -1;
++        if (errno || gpuDRMFDValue < 0 || gpuDRMFDValue > G_MAXINT || !end || *end)
++            g_error("A trusted GPU DRM fd is required");
++        int gpuDRMFD = fcntl(static_cast<int>(gpuDRMFDValue), F_DUPFD_CLOEXEC, 3);
++        if (gpuDRMFD < 0)
++            g_error("Failed to duplicate trusted GPU DRM fd: %s", g_strerror(errno));
++        // Bubblewrap 0.13 passes unknown inherited fds to the final executable; only its monitor and PID 1 close their copies.
++        g_subprocess_launcher_setenv(launcher.get(), "BRICK_CAPTIVE_GPU_DRM_FD", "198", TRUE);
++        g_subprocess_launcher_take_fd(launcher.get(), gpuDRMFD, gpuDRMTargetFD);
++    }
++#endif
++
+ #if USE(SYSPROF_CAPTURE)
+     UnixFileDescriptor sysprofFd;
+ 
+@@ -253,7 +274,10 @@ void ProcessLauncher::launchProcess()
+     GRefPtr<GSubprocess> process;
+ 
+ #if OS(LINUX)
+-    bool sandboxEnabled = m_launchOptions.extraInitializationData.get<HashTranslatorASCIILiteral>("enable-sandbox"_s) == "true"_s;
++    // WebKit only annotates Web launch options with enable-sandbox. Brick's
++    // single captive-browser path also requires GPU and Network isolation.
++    bool sandboxEnabled = m_launchOptions.processType != ProcessLauncher::ProcessType::Web
++        || m_launchOptions.extraInitializationData.get<HashTranslatorASCIILiteral>("enable-sandbox"_s) == "true"_s;
+ 
+     if (sandboxEnabled && isInsideFlatpak() && isFlatpakSpawnUsable())
+         process = flatpakSpawn(launcher.get(), m_launchOptions, argv, webkitClientSocketValue, &error.outPtr());
+diff --git a/Source/WebCore/platform/graphics/gbm/GBMDevice.cpp b/Source/WebCore/platform/graphics/gbm/GBMDevice.cpp
+index 4a004f7..76768c0 100644
+--- a/Source/WebCore/platform/graphics/gbm/GBMDevice.cpp
++++ b/Source/WebCore/platform/graphics/gbm/GBMDevice.cpp
+@@ -27,6 +27,9 @@
+ #include "GBMDevice.h"
+ 
+ #if USE(GBM)
++#include <cerrno>
++#include <climits>
++#include <cstdlib>
+ #include <fcntl.h>
+ #include <gbm.h>
+ #include <unistd.h>
+@@ -39,7 +42,18 @@ namespace WebCore {
+ RefPtr<GBMDevice> GBMDevice::create(const CString& filename)
+ {
+     RELEASE_ASSERT(isMainThread());
+-    auto fd = UnixFileDescriptor { open(filename.data(), O_RDWR | O_CLOEXEC), UnixFileDescriptor::Adopt };
++    UnixFileDescriptor fd;
++    if (const char* brokerFDString = getenv("BRICK_CAPTIVE_GPU_DRM_FD")) {
++        char* end = nullptr;
++        errno = 0;
++        long brokerFDValue = strtol(brokerFDString, &end, 10);
++        if (!errno && brokerFDValue >= 0 && brokerFDValue <= INT_MAX && end && !*end) {
++            fd = UnixFileDescriptor { fcntl(static_cast<int>(brokerFDValue), F_DUPFD_CLOEXEC, 3), UnixFileDescriptor::Adopt };
++            unsetenv("BRICK_CAPTIVE_GPU_DRM_FD");
++            close(static_cast<int>(brokerFDValue));
++        }
++    } else
++        fd = UnixFileDescriptor { open(filename.data(), O_RDWR | O_CLOEXEC), UnixFileDescriptor::Adopt };
+     if (!fd) {
+         WTFLogAlways("Failed to open DRM node %s: %s", filename.data(), safeStrerror(errno).data());
+         return nullptr;
+-- 
+2.51.2

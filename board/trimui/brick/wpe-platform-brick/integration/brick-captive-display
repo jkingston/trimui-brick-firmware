@@ -1,0 +1,42 @@
+#!/bin/sh
+# The only production display lease hooks: delegate to the stock shell service.
+set -eu
+
+shell_init=${BRICK_SHELL_INIT:-/etc/init.d/S20brick-shell}
+shell_daemon=${BRICK_SHELL_DAEMON:-/usr/bin/brick-shell}
+ssd=${BRICK_START_STOP_DAEMON:-start-stop-daemon}
+
+running() {
+	"$ssd" -K -t -q -x "$shell_daemon"
+}
+
+case ${0##*/} in
+*-pause) action=pause ;;
+*-resume) action=resume ;;
+*) action=${1:-}; shift || : ;;
+esac
+
+case $action in
+pause)
+	"$shell_init" stop
+	if running; then
+		echo 'brick-captive-display: shell remained active after stop' >&2
+		"$shell_init" start >/dev/null 2>&1 || :
+		exit 1
+	fi
+	;;
+resume)
+	if running; then
+		exit 0
+	fi
+	"$shell_init" start
+	if ! running; then
+		echo 'brick-captive-display: shell did not become active' >&2
+		exit 1
+	fi
+	;;
+*)
+	echo 'Usage: brick-captive-display {pause|resume} [NETWORK_KEY]' >&2
+	exit 2
+	;;
+esac

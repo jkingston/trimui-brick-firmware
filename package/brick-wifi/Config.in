@@ -1,0 +1,12 @@
+config BR2_PACKAGE_BRICK_WIFI
+	bool "brick-wifi"
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_WPA_SUPPLICANT
+	select BR2_PACKAGE_WPA_SUPPLICANT_CLI
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBCURL_CURL
+	select BR2_PACKAGE_LIBCURL_FORCE_TLS
+	select BR2_PACKAGE_CA_CERTIFICATES
+	help
+	  Single Wi-Fi product authority for radio state, network selection,
+	  saved profiles, private addresses, connectivity and captive login.

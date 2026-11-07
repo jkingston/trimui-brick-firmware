@@ -1,0 +1,34 @@
+#!/bin/sh
+# Bounded recovery that never resets the shared WLAN/Bluetooth hardware.
+set -eu
+
+wpa_cli=${WIFI_WPA_CLI:-wpa_cli}
+service=${WIFI_SERVICE:-/etc/init.d/S45wifi}
+interface=${WIFI_INTERFACE:-wlan0}
+polls=${WIFI_RECOVERY_POLLS:-12}
+
+scan_capable() {
+	"$wpa_cli" -i "$interface" scan >/dev/null 2>&1 || return 1
+	i=0
+	seen_scanning=false
+	while [ "$i" -lt "$polls" ]; do
+		state=$("$wpa_cli" -i "$interface" status 2>/dev/null |
+			sed -n 's/^wpa_state=//p')
+		[ "$state" != SCANNING ] || seen_scanning=true
+		if $seen_scanning && [ "$state" != SCANNING ]; then return 0; fi
+		i=$((i + 1))
+		[ "$i" -ge "$polls" ] || sleep 0.25
+	done
+	return 1
+}
+
+"$wpa_cli" -i "$interface" disconnect >/dev/null 2>&1 || :
+sleep 0.25
+if scan_capable; then
+	"$wpa_cli" -i "$interface" reconnect >/dev/null 2>&1 || :
+	exit 0
+fi
+
+"$service" restart >/dev/null
+scan_capable
+

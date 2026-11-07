@@ -1,0 +1,25 @@
+From: Jack Kingston <998656+jkingston@users.noreply.github.com>
+Subject: [PATCH] config_file: persist the dedicated network MAC value
+
+mac_addr=3 selects a pre-generated, per-network address supplied through
+mac_value.  The text parser accepts both fields, but the file backend only
+writes mac_addr.  SAVE_CONFIG therefore turns a working private address into
+00:00:00:00:00:00 after the next restart.
+
+Write mac_value whenever the dedicated-per-ESS mode is selected.  This keeps
+the address stable across restarts while leaving address generation and
+rotation policy outside wpa_supplicant, as intended by mac_addr=3.
+
+Signed-off-by: Jack Kingston <998656+jkingston@users.noreply.github.com>
+---
+ wpa_supplicant/config_file.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -950,2 +950,5 @@
+	write_int(f, "mac_addr", ssid->mac_addr, -1);
++	if (ssid->mac_addr == WPAS_MAC_ADDR_STYLE_DEDICATED_PER_ESS)
++		fprintf(f, "\tmac_value=" MACSTR "\n",
++			MAC2STR(ssid->mac_value));
+ #ifdef CONFIG_MESH

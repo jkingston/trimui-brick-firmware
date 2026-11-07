@@ -1,0 +1,112 @@
+#!/bin/sh
+# Run from the Brick's root account against a stage held entirely under /tmp.
+set -eu
+
+stage=${1:-/tmp/brick-sandbox-stage-20261106}
+uid=65533
+gid=65533
+marker=brick-sandbox-cleanup-marker
+
+export LD_LIBRARY_PATH="$stage/lib"
+
+cd "$stage"
+sha256sum -c SHA256SUMS
+"$stage/bin/bwrap" --version
+"$stage/bin/xdg-dbus-proxy" --version
+
+echo "baseline_identity_and_namespaces:"
+"$stage/bin/brick-drop-exec" "$uid" "$gid" /bin/sh -c '
+    id
+    for namespace in user mnt pid net ipc uts; do
+        printf "%s=" "$namespace"
+        readlink "/proc/self/ns/$namespace"
+    done
+'
+
+run_sandbox()
+{
+    "$stage/bin/brick-drop-exec" "$uid" "$gid" \
+        "$stage/bin/bwrap" \
+        --unshare-all \
+        --die-with-parent \
+        --new-session \
+        --ro-bind / / \
+        --tmpfs /data \
+        --dev /dev \
+        --proc /proc \
+        --ro-bind "$stage" /mnt \
+        --tmpfs /tmp \
+        --chdir / \
+        "$@"
+}
+
+echo "runtime_isolation:"
+run_sandbox \
+    --setenv LD_LIBRARY_PATH /mnt/lib \
+    /mnt/bin/brick-sandbox-runtime-probe
+
+find_inner_marker_pid()
+{
+    for command_file in /proc/[0-9]*/cmdline; do
+        command=$(tr '\000' ' ' <"$command_file" 2>/dev/null || true)
+        case "$command" in
+            *"$marker"*)
+                pid=${command_file#/proc/}
+                pid=${pid%/cmdline}
+                namespace_pids=$(sed -n 's/^NSpid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null || true)
+                set -- $namespace_pids
+                if [ "$#" -eq 2 ] && grep -q '^Name:[[:space:]]*sh$' "/proc/$pid/status"; then
+                    echo "$pid"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+    return 1
+}
+
+assert_marker_absent()
+{
+    for command_file in /proc/[0-9]*/cmdline; do
+        command=$(tr '\000' ' ' <"$command_file" 2>/dev/null || true)
+        case "$command" in
+            *"$marker"*)
+                pid=${command_file#/proc/}
+                pid=${pid%/cmdline}
+                echo "cleanup FAIL: marker remains in pid $pid" >&2
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
+start_cleanup_fixture()
+{
+    run_sandbox /bin/sh -c 'while :; do sleep 30; done' "$marker" \
+        >"/tmp/$marker.log" 2>&1 &
+    fixture_outer_pid=$!
+    sleep 1
+}
+
+echo "kill_inner_child_cleanup:"
+start_cleanup_fixture
+fixture_inner_pid=$(find_inner_marker_pid)
+echo "outer_pid=$fixture_outer_pid inner_pid=$fixture_inner_pid"
+kill -KILL "$fixture_inner_pid"
+wait "$fixture_outer_pid" 2>/dev/null || true
+sleep 1
+assert_marker_absent
+echo "kill_inner_child_cleanup=PASS"
+
+echo "kill_outer_bwrap_cleanup:"
+start_cleanup_fixture
+fixture_inner_pid=$(find_inner_marker_pid)
+echo "outer_pid=$fixture_outer_pid inner_pid=$fixture_inner_pid"
+kill -KILL "$fixture_outer_pid"
+wait "$fixture_outer_pid" 2>/dev/null || true
+sleep 1
+assert_marker_absent
+echo "kill_outer_bwrap_cleanup=PASS"
+
+echo "brick_sandbox_device_test=PASS"

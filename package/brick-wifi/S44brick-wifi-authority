@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+daemon=/usr/sbin/brick-wifi-authority
+pidfile=/run/brick-wifi-authority.pid
+socket=/run/brick-wifi/control.sock
+
+case ${1:-} in
+start)
+	[ -d /data/wifi ] || exit 1
+	if [ ! -e /data/wifi/enabled ]; then
+		printf '1\n' > /data/wifi/enabled.new
+		mv /data/wifi/enabled.new /data/wifi/enabled
+		sync
+	fi
+	case $(cat /data/wifi/enabled) in 0|1) ;; *) exit 1 ;; esac
+	if start-stop-daemon -K -t -q -p "$pidfile" -x "$daemon"; then
+		exit 0
+	fi
+	mkdir -p /run/brick-wifi
+	start-stop-daemon -S -q -b -m -p "$pidfile" -x "$daemon"
+	attempt=0
+	while [ ! -S "$socket" ]; do
+		[ "$attempt" -lt 50 ] || exit 1
+		sleep 0.02
+		attempt=$((attempt + 1))
+	done
+	;;
+stop)
+	/usr/libexec/brick-stop-daemon S44brick-wifi-authority "$pidfile" "$daemon"
+	rm -f "$socket"
+	;;
+restart)
+	"$0" stop
+	exec "$0" start
+	;;
+*)
+	echo 'Usage: S44brick-wifi-authority {start|stop|restart}' >&2
+	exit 2
+	;;
+esac

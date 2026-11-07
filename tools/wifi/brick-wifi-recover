@@ -1,0 +1,65 @@
+#!/bin/sh
+# Bounded failed-JOIN recovery spike.  Not installed in the production image.
+set -eu
+
+wpa_cli=${WIFI_WPA_CLI:-wpa_cli}
+service=${WIFI_SERVICE:-/etc/init.d/S45wifi}
+sleep_cmd=${WIFI_SLEEP:-sleep}
+interface=${WIFI_INTERFACE:-wlan0}
+driver=${WIFI_SDIO_DRIVER:-/sys/bus/sdio/drivers/xr829}
+device=${WIFI_SDIO_DEVICE:-mmc1:0001:1}
+polls=${WIFI_RECOVERY_POLLS:-12}
+
+scan_capable() {
+	"$wpa_cli" -i "$interface" scan >/dev/null 2>&1 || return 1
+	i=0
+	seen_scanning=false
+	while [ "$i" -lt "$polls" ]; do
+		state=$("$wpa_cli" -i "$interface" status 2>/dev/null |
+			sed -n 's/^wpa_state=//p')
+		[ "$state" != SCANNING ] || seen_scanning=true
+		if $seen_scanning && [ "$state" != SCANNING ]; then return 0; fi
+		i=$((i + 1))
+		[ "$i" -ge "$polls" ] || "$sleep_cmd" 0.25
+	done
+	return 1
+}
+
+# Stage 1 asks for normal teardown, then requires an observed SCANNING state.
+# Reading cached scan results is not evidence that firmware accepted a scan.
+"$wpa_cli" -i "$interface" disconnect >/dev/null 2>&1 || :
+"$sleep_cmd" 0.25
+if scan_capable; then
+	"$wpa_cli" -i "$interface" reconnect >/dev/null 2>&1 || :
+	echo station-reset
+	exit 0
+fi
+
+# Stage 2 recreates userspace state but deliberately retains the driver.
+"$service" restart >/dev/null
+if scan_capable; then
+	echo supplicant-restart
+	exit 0
+fi
+
+# A physical WLAN-function reset is disruptive and must be explicitly enabled
+# by the qualification caller.  Stopping supplicant before unbind prevents old
+# key commands racing the fresh firmware epoch.  Bluetooth uses another SDIO
+# function, but coexistence still requires a separate live qualification gate.
+[ "${1:-}" = --allow-driver-reset ] || {
+	echo driver-reset-required >&2
+	exit 22
+}
+[ -w "$driver/unbind" ] && [ -w "$driver/bind" ] || exit 23
+"$service" stop >/dev/null
+printf '%s\n' "$device" > "$driver/unbind"
+"$sleep_cmd" 0.25
+printf '%s\n' "$device" > "$driver/bind"
+"$service" start >/dev/null
+if scan_capable; then
+	echo driver-reset
+	exit 0
+fi
+
+echo unrecovered >&2
+exit 24

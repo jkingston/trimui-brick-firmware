@@ -1,0 +1,108 @@
+From 9b1475a8bb1fb7e149f57676afae44c1f840f4bf Mon Sep 17 00:00:00 2001
+From: Brick Firmware <firmware@trimui-brick.invalid>
+Date: Fri, 6 Nov 2026 16:00:00 +0000
+Subject: [PATCH] WPEPlatformDRM: allow a pre-opened DRM device fd
+
+An appliance display broker may need to open the primary DRM node while
+privileged and then permanently drop uid and supplementary groups before
+starting WebKit. Reopening /proc/self/fd/N is permission checked and fails
+after that drop, while granting the UI account video-group membership also
+grants it to the unsandboxed NetworkProcess.
+
+Add an explicit fd entry point. The display duplicates the descriptor with
+CLOEXEC and otherwise follows the existing setup path. Keeping ownership of
+the caller's descriptor with the caller makes the API usable by brokers and
+avoids leaking the broker descriptor into auxiliary processes.
+---
+ Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.cpp | 35 ++++++++++++++++------
+ Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.h   |  4 +++
+ 2 files changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.h b/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.h
+index 5c620d00..90f24d8b 100644
+--- a/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.h
++++ b/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.h
+@@ -54,6 +54,10 @@ WPE_API WPEDisplay         *wpe_display_drm_new                (void);
+ WPE_API gboolean            wpe_display_drm_connect            (WPEDisplayDRM *display,
+                                                                 const char    *name,
+                                                                 GError       **error);
++WPE_API gboolean            wpe_display_drm_connect_fd         (WPEDisplayDRM *display,
++                                                                int            fd,
++                                                                const char    *name,
++                                                                GError       **error);
+ WPE_API struct gbm_device  *wpe_display_drm_get_device         (WPEDisplayDRM *display);
+ WPE_API gboolean            wpe_display_drm_supports_atomic    (WPEDisplayDRM *display);
+ WPE_API gboolean            wpe_display_drm_supports_modifiers (WPEDisplayDRM *display);
+diff --git a/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.cpp b/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.cpp
+index 14e85c08..ad9d23e4 100644
+--- a/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/drm/WPEDisplayDRM.cpp
+@@ -299,7 +299,7 @@ static std::unique_ptr<WPE::DRM::Plane> choosePlaneForCrtc(int fd, WPE::DRM::Pl
+     return nullptr;
+ }
+ 
+-static gboolean wpeDisplayDRMSetup(WPEDisplayDRM* displayDRM, const char* deviceName, GError** error)
++static gboolean wpeDisplayDRMSetup(WPEDisplayDRM* displayDRM, const char* deviceName, int deviceFD, GError** error)
+ {
+     RefPtr<struct udev> udev = adoptRef(udev_new());
+     if (!udev) {
+@@ -310,7 +310,20 @@ static gboolean wpeDisplayDRMSetup(WPEDisplayDRM* displayDRM, const char* device
+ 
+     auto session = WPE::DRM::Session::create();
+     DisplayDevice displayDevice;
+-    if (!deviceName) {
++    if (deviceFD >= 0) {
++        if (!deviceName) {
++            g_set_error_literal(error, WPE_DISPLAY_ERROR, WPE_DISPLAY_ERROR_CONNECTION_FAILED, "DRM device name is required with a pre-opened fd");
++            return FALSE;
++        }
++        int fd = fcntl(deviceFD, F_DUPFD_CLOEXEC, 3);
++        if (fd < 0) {
++            g_set_error_literal(error, WPE_DISPLAY_ERROR, WPE_DISPLAY_ERROR_CONNECTION_FAILED, "Failed to duplicate DRM device fd");
++            return FALSE;
++        }
++        WTF::UnixFileDescriptor unixFd(fd, WTF::UnixFileDescriptor::Adopt);
++        auto drmDevice = createDisplayDevice(unixFd, deviceName);
++        displayDevice = { WTF::move(unixFd), WTF::move(drmDevice) };
++    } else if (!deviceName) {
+         displayDevice = findTargetDevice(udev.get(), session->seatID());
+         if (displayDevice.isNull()) {
+             g_set_error_literal(error, WPE_DISPLAY_ERROR, WPE_DISPLAY_ERROR_CONNECTION_FAILED, "No suitable DRM device found");
+@@ -436,5 +449,5 @@ static gboolean wpeDisplayDRMConnect(WPEDisplay* display, GError** error)
+ {
+-    return wpeDisplayDRMSetup(WPE_DISPLAY_DRM(display), nullptr, error);
++    return wpeDisplayDRMSetup(WPE_DISPLAY_DRM(display), nullptr, -1, error);
+ }
+ 
+ static WPEView* wpeDisplayDRMCreateView(WPEDisplay* display)
+@@ -567,7 +580,27 @@ WPEDisplay* wpe_display_drm_new(void)
+ gboolean wpe_display_drm_connect(WPEDisplayDRM* display, const char* name, GError** error)
+ {
+     g_return_val_if_fail(WPE_IS_DISPLAY_DRM(display), FALSE);
+-    return wpeDisplayDRMSetup(display, name, error);
++    return wpeDisplayDRMSetup(display, name, -1, error);
++}
++
++/**
++ * wpe_display_drm_connect_fd:
++ * @display: a #WPEDisplayDRM
++ * @fd: a pre-opened DRM device descriptor
++ * @name: the DRM device node name represented by @fd
++ * @error: return location for error or %NULL to ignore
++ *
++ * Connect to @name using a duplicate of @fd. The caller retains ownership of
++ * @fd and may close it after this function returns.
++ *
++ * Returns: %TRUE if connection succeeded, or %FALSE in case of error.
++ */
++gboolean wpe_display_drm_connect_fd(WPEDisplayDRM* display, int fd, const char* name, GError** error)
++{
++    g_return_val_if_fail(WPE_IS_DISPLAY_DRM(display), FALSE);
++    g_return_val_if_fail(fd >= 0, FALSE);
++    g_return_val_if_fail(name, FALSE);
++    return wpeDisplayDRMSetup(display, name, fd, error);
+ }
+ 
+ /**
+-- 
+2.51.2

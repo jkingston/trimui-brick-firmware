@@ -2,10 +2,16 @@
 # WPA events and init actions share a lock so stop cannot race DHCP startup.
 set -eu
 umask 077
-state=/run/brick-wifi
+state=${WIFI_STATE_DIR:-/run/brick-wifi}
 config=${WIFI_CONFIG:-/etc/wpa_supplicant.conf}
 ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
-export WIFI_CONFIG="$config" WIFI_CTRL_DIR="$ctrl"
+rfkill_root=${WIFI_RFKILL_ROOT:-/sys/class/rfkill}
+private_mac=${WIFI_PRIVATE_MAC:-/usr/libexec/brick-wifi-private-mac}
+forget=${WIFI_FORGET:-/usr/libexec/brick-wifi-forget}
+action_script=${WIFI_ACTION_SCRIPT:-/etc/init.d/S45wifi}
+roam_grace=${WIFI_ROAM_GRACE:-5}
+enabled_policy=${WIFI_ENABLED_POLICY:-/data/wifi/enabled}
+export WIFI_CONFIG="$config" WIFI_CTRL_DIR="$ctrl" WIFI_STATE_DIR="$state"
 mkdir -p "$state"
 exec 9>"$state/lock"
 flock -x 9
@@ -24,13 +30,75 @@ stop_dhcp() {
 	fi
 }
 
+dhcp_running() {
+	start-stop-daemon -K -t -q -p "$state/udhcpc.pid" -x /sbin/udhcpc
+}
+
+start_dhcp() {
+	# Keep DHCP alive for renewal; retry in the background when no server answers.
+	start-stop-daemon -S -q -o -p "$state/udhcpc.pid" -x /sbin/udhcpc -- \
+		-i wlan0 -b -R -t 3 -T 1 -O 114 -p "$state/udhcpc.pid" 9>&-
+}
+
+defer_disconnect_cleanup() {
+	id=${WPA_ID:-}
+	token=$(cat /proc/sys/kernel/random/uuid)
+	printf '%s %s\n' "$token" "$id" > "$state/disconnect-pending"
+	(
+		exec 9>&-
+		sleep "$roam_grace"
+		exec 9>"$state/lock"
+		flock -x 9
+		[ -f "$state/disconnect-pending" ] || exit 0
+		set -- $(cat "$state/disconnect-pending")
+		[ "${1:-}" = "$token" ] || exit 0
+		rm -f "$state/disconnect-pending"
+		[ -f "$state/enabled" ] || exit 0
+		stop_dhcp
+	) >/dev/null 2>&1 &
+}
+
+radio_set() {
+	value=$1
+	for radio in "$rfkill_root"/rfkill*; do
+		[ -f "$radio/type" ] || continue
+		[ "$(cat "$radio/type")" = wlan ] || continue
+		printf '%s\n' "$value" > "$radio/state"
+		return
+	done
+}
+
+prepare_private_macs() {
+	# Supplicant is running behind rfkill at this point, so profiles can be
+	# updated through its parser without any network racing into association.
+	ids=$(wpa_cli -i wlan0 -p "$ctrl" list_networks |
+		sed -n '2,$s/[	 ].*//p')
+	for id in $ids; do
+		case $id in
+		''|*[!0-9]*) continue ;;
+		esac
+		[ "$(wpa_cli -i wlan0 -p "$ctrl" get_network "$id" disabled)" = 0 ] ||
+			continue
+		"$private_mac" prepare "$id" >/dev/null
+	done
+}
+
 case "${1:-}" in
-start)
+start|force-start)
 	[ -e /sys/class/net/wlan0 ] || exit 0
-	if start-stop-daemon -K -t -q -p "$state/supplicant.pid" -x /usr/sbin/wpa_supplicant &&
-	   start-stop-daemon -K -t -q -p "$state/events.pid" -x /usr/sbin/wpa_cli; then
+	if [ "$1" = start ] && [ -f "$enabled_policy" ] &&
+	   [ "$(cat "$enabled_policy")" != 1 ]; then
+		radio_set 0
 		exit 0
 	fi
+	if start-stop-daemon -K -t -q -p "$state/supplicant.pid" -x /usr/sbin/wpa_supplicant &&
+	   start-stop-daemon -K -t -q -p "$state/events.pid" -x /usr/sbin/wpa_cli; then
+		radio_set 1
+		exit 0
+	fi
+	# Keep association impossible until every enabled profile has its intended
+	# device/private address.  This closes the first-JOIN race on service start.
+	radio_set 0
 	# Recover a partial start before launching a fresh event monitor.
 	rm -f "$state/enabled"
 	stop_process "$state/events.pid" /usr/sbin/wpa_cli
@@ -40,47 +108,82 @@ start)
 	# SAVE_CONFIG atomically renames over this path; preserve a profile symlink.
 	config=$(readlink -f "$config")
 	export WIFI_CONFIG="$config"
-	# Wait for the monitor to attach so the first CONNECTED event is not lost.
-	wpa_supplicant -B -W -D nl80211 -i wlan0 -c "$config" -C "$ctrl" \
+	# RF remains blocked until the monitor is attached below, so no CONNECTED
+	# event can race this setup.  Do not use -W here: downstream supplicant then
+	# waits for ATTACH and cannot service this pre-monitor SET command.
+	wpa_supplicant -B -D nl80211 -i wlan0 -c "$config" -C "$ctrl" \
 		-P "$state/supplicant.pid" 9>&-
-	# A queued action may outlive its monitor across a service restart.
-	WIFI_GENERATION=$(cat /proc/sys/kernel/random/uuid)
-	export WIFI_GENERATION
-	printf '%s\n' "$WIFI_GENERATION" > "$state/enabled"
-	if ! wpa_cli -B -i wlan0 -p "$ctrl" -a /etc/init.d/S45wifi \
-		-P "$state/events.pid" 9>&-; then
-		rm -f "$state/enabled"
+	# XR829 can return scan-cache entries older than the requested scan. Reject
+	# those results before they can resurrect a BSSID removed on disconnect.
+	if [ "$(wpa_cli -i wlan0 -p "$ctrl" set ignore_old_scan_res 1)" != OK ]; then
 		stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
 		exit 1
 	fi
+	# A queued action may outlive its monitor across a service restart.
+	WIFI_GENERATION=$(cat /proc/sys/kernel/random/uuid)
+	export WIFI_GENERATION
+	if ! wpa_cli -B -i wlan0 -p "$ctrl" -a "$action_script" \
+		-P "$state/events.pid" 9>&-; then
+		stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
+		exit 1
+	fi
+	# Finish any Forget transaction while association is still blocked.  The
+	# intent was made durable before credentials or browser state were changed.
+	if { [ -x "$forget" ] && ! "$forget" recover; } ||
+	   ! prepare_private_macs; then
+		stop_process "$state/events.pid" /usr/sbin/wpa_cli
+		stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
+		exit 1
+	fi
+	printf '%s\n' "$WIFI_GENERATION" > "$state/enabled"
+	radio_set 1
 	;;
 stop)
 	rm -f "$state/enabled"
 	stop_process "$state/events.pid" /usr/sbin/wpa_cli
 	stop_process "$state/supplicant.pid" /usr/sbin/wpa_supplicant
 	stop_dhcp
+	radio_set 0
 	;;
 restart)
 	flock -u 9
 	"$0" stop
 	exec "$0" start
 	;;
+dhcp-renew)
+	[ -f "$state/enabled" ] || exit 0
+	dhcp_running && stop_dhcp
+	start_dhcp
+	;;
 wlan0)
 	[ -f "$state/enabled" ] || exit 0
 	[ "${WIFI_GENERATION:-}" = "$(cat "$state/enabled")" ] || exit 0
 	case "${2:-}" in
 	CONNECTED)
-		# Keep DHCP alive for renewal; retry in the background when no server answers.
-		start-stop-daemon -S -q -o -p "$state/udhcpc.pid" -x /sbin/udhcpc -- \
-			-i wlan0 -b -R -t 1 -T 1 -p "$state/udhcpc.pid" 9>&-
+		if [ -f "$state/disconnect-pending" ]; then
+			rm -f "$state/disconnect-pending"
+		fi
+		# Supplicant can complete a direct BSSID roam without first reporting
+		# DISCONNECTED.  A matching profile/SSID still does not prove the new
+		# BSSID shares an L2 domain, so replace any live lease on every CONNECTED
+		# event.  Until a BSSID pair has explicit gateway-MAC qualification this
+		# trades zero-outage aspirations for reliability on independent APs.
+		dhcp_running && stop_dhcp
+		start_dhcp
 		;;
 	DISCONNECTED)
-		stop_dhcp
+		case ${WPA_ID:-} in
+		''|*[!0-9]*) ;;
+		*) "$private_mac" disconnected "$WPA_ID" ;;
+		esac
+		# wpa_supplicant emits DISCONNECTED during a BSSID roam.  Preserve the
+		# lease briefly; CONNECTED cancels this cleanup for the same profile.
+		defer_disconnect_cleanup
 		;;
 	esac
 	;;
 *)
-	echo "Usage: $0 {start|stop|restart}" >&2
+	echo "Usage: $0 {start|force-start|stop|restart|dhcp-renew}" >&2
 	exit 1
 	;;
 esac

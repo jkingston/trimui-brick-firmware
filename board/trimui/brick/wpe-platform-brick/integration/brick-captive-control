@@ -1,0 +1,187 @@
+#!/bin/sh
+# Trusted shell/Wi-Fi entrypoint. Requests are validated and atomically queued.
+set -eu
+umask 077
+
+runtime=${BRICK_CAPTIVE_RUNTIME_ROOT:-/run/brick-captive-browser}
+wifi_state=${WIFI_STATE_DIR:-/run/brick-wifi}
+private_mac=${WIFI_PRIVATE_MAC:-/usr/libexec/brick-wifi-private-mac}
+connectivity=${WIFI_CONNECTIVITY:-/usr/libexec/brick-wifi-connectivity}
+wpa_cli=${WIFI_WPA_CLI:-wpa_cli}
+command_timeout=${WIFI_COMMAND_TIMEOUT:-3}
+ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
+input_sys=${BRICK_INPUT_SYSFS:-/sys/class/input}
+input_dev=${BRICK_INPUT_DEV:-/dev/input}
+
+die() { echo "brick-captive-control: $*" >&2; exit 1; }
+field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | sed -n '1p'; }
+valid_url() {
+	[ ${#1} -le 2048 ] || return 1
+	case $1 in http://*|https://*) ;; *) return 1 ;; esac
+	case $1 in *[![:print:]]*|*' '*) return 1 ;; esac
+}
+write_request() {
+	tmp="$runtime/request.tmp.$$"
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	printf '%s\n' "$@" > "$tmp"
+	mv "$tmp" "$runtime/request"
+	trap - EXIT HUP INT TERM
+}
+numeric() { case ${1:-} in ''|*[!0-9]*) return 1 ;; esac; }
+run_timed() { timeout -s KILL "$command_timeout" "$@"; }
+current_generation() {
+	value=$(cat "$runtime/generation" 2>/dev/null || :)
+	[ -n "$value" ] || value=$(field generation "$runtime/request")
+	[ -n "$value" ] || value=$(field generation "$runtime/status")
+	numeric "$value" || value=0
+	printf '%s\n' "$value"
+}
+require_generation() {
+	numeric "${1:-}" || die 'generation must be numeric'
+	[ "$1" = "$(current_generation)" ] || {
+		echo 'brick-captive-control: stale generation; refresh status' >&2
+		exit 3
+	}
+}
+next_generation() {
+	value=$(cat "$runtime/generation" 2>/dev/null || printf 0)
+	numeric "$value" || value=0
+	[ "$value" -lt 4294967295 ] || value=0
+	value=$((value + 1))
+	printf '%s\n' "$value" > "$runtime/generation.tmp.$$"
+	mv "$runtime/generation.tmp.$$" "$runtime/generation"
+	printf '%s\n' "$value"
+}
+current_network_id() {
+	status=$(run_timed "$wpa_cli" -i wlan0 -p "$ctrl" status) ||
+		die 'cannot read supplicant status'
+	[ "$(printf '%s\n' "$status" | sed -n 's/^wpa_state=//p' | sed -n '1p')" = COMPLETED ] ||
+		die 'Wi-Fi is not connected'
+	id=$(printf '%s\n' "$status" | sed -n 's/^id=//p' | sed -n '1p')
+	numeric "$id" || die 'current network id is unavailable'
+	printf '%s\n' "$id"
+}
+queue_open() {
+	id=$1
+	url=$2
+	case $id in ''|*[!0-9]*) die 'network id must be numeric' ;; esac
+	case $(field state "$runtime/status") in
+	starting|running) die 'a captive session is already active' ;;
+	esac
+	status=$(run_timed "$wpa_cli" -i wlan0 -p "$ctrl" status) ||
+		die 'cannot read supplicant status'
+	[ "$(printf '%s\n' "$status" | sed -n 's/^id=//p' | sed -n '1p')" = "$id" ] ||
+		die 'requested network is not current'
+	[ "$(printf '%s\n' "$status" | sed -n 's/^wpa_state=//p' | sed -n '1p')" = COMPLETED ] ||
+		die 'Wi-Fi is not connected'
+	[ "$(field state "$wifi_state/connectivity")" = captive ] ||
+		die 'connectivity authority does not report captive'
+	valid_url "$url" || die 'portal URL is not valid HTTP(S)'
+	key=$(run_timed "$private_mac" key "$id") || die 'cannot derive network identity'
+	case $key in
+	????????????????????????????????????????????????????????????????) ;;
+	*) die 'network identity has wrong length' ;;
+	esac
+	case $key in *[!0-9a-f]*) die 'network identity is not lowercase SHA-256' ;; esac
+	input=
+	for event in "$input_sys"/event*; do
+		[ -r "$event/device/name" ] || continue
+		[ "$(cat "$event/device/name")" = 'TrimUI Brick Gamepad' ] || continue
+		input="$input_dev/${event##*/}"
+		break
+	done
+	[ -n "$input" ] || die 'Brick gamepad is unavailable'
+	if [ -e "$runtime/request" ]; then
+		[ "$(field action "$runtime/request")" = open ] &&
+		[ "$(field network_id "$runtime/request")" = "$id" ] &&
+		[ "$(field url "$runtime/request")" = "$url" ] && return 0
+		die 'another command is pending'
+	fi
+	generation=$(next_generation)
+	write_request action=open "generation=$generation" "network_id=$id" \
+		"network_key=$key" "url=$url" "input=$input"
+}
+print_status() {
+	state=$(field state "$runtime/status")
+	result=$(field result "$runtime/status")
+	generation=$(current_generation)
+	[ -n "$state" ] || state=unavailable
+	if [ "$(field action "$runtime/request")" = open ]; then
+		state=starting
+	fi
+	printf 'generation=%s\nstate=%s\n' "$generation" "$state"
+	[ -z "$result" ] || printf 'result=%s\n' "$result"
+	case $state in
+	starting|running)
+		printf 'ux_state=signing-in\nprimary=cancel\n'
+		url=$(field portal_url "$runtime/status")
+		[ -n "$url" ] || url=$(field url "$runtime/request")
+		;;
+	*)
+		connectivity=$(field state "$wifi_state/connectivity")
+		url=$(field portal_url "$wifi_state/connectivity")
+		case $connectivity in
+		captive)
+			if [ -n "$result" ] && [ "$result" != success ]; then
+				printf 'ux_state=sign-in-failed\nprimary=retry\n'
+			else
+				printf 'ux_state=sign-in-required\nprimary=sign-in\n'
+			fi
+			;;
+		online) printf 'ux_state=connected\nprimary=none\n' ;;
+		*) printf 'ux_state=no-internet\nprimary=retry\n' ;;
+		esac
+		;;
+	esac
+	if valid_url "${url:-}"; then
+		printf 'portal_url=%s\nqr_payload=%s\n' "$url" "$url"
+	fi
+}
+
+[ ! -L "$runtime" ] || die 'runtime root is a symlink'
+mkdir -p "$runtime"
+chmod 0700 "$runtime"
+exec 9>"$runtime/control.lock"
+flock -n 9 || die 'control is busy; try again'
+
+case ${1:-} in
+open)
+	id=${2:-}
+	url=${3:-$(field portal_url "$wifi_state/connectivity")}
+	queue_open "$id" "$url"
+	;;
+sign-in)
+	require_generation "${2:-}"
+	queue_open "$(current_network_id)" "$(field portal_url "$wifi_state/connectivity")"
+	;;
+retry)
+	require_generation "${2:-}"
+	if [ "$(field state "$wifi_state/connectivity")" = captive ]; then
+		queue_open "$(current_network_id)" "$(field portal_url "$wifi_state/connectivity")"
+	else
+		# Connectivity checks are already network-bounded. Run one outside the
+		# control lock so status and cancel remain responsive while it probes.
+		(run_timed "$connectivity" check >/dev/null 2>&1 9>&- || :) &
+	fi
+	;;
+cancel)
+	require_generation "${2:-$(current_generation)}"
+	case $(field state "$runtime/status") in
+	starting|running) write_request action=cancel "generation=$(current_generation)" ;;
+	*) rm -f "$runtime/request" ;;
+	esac
+	;;
+status)
+	print_status
+	;;
+fallback)
+	require_generation "${2:-}"
+	url=$(field portal_url "$wifi_state/connectivity")
+	valid_url "$url" || die 'portal URL is not valid HTTP(S)'
+	printf 'portal_url=%s\nqr_payload=%s\n' "$url" "$url"
+	;;
+*)
+	echo 'Usage: brick-captive-control {open NETWORK_ID [URL]|sign-in GENERATION|retry GENERATION|cancel [GENERATION]|status|fallback GENERATION}' >&2
+	exit 2
+	;;
+esac

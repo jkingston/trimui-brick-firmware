@@ -1,0 +1,238 @@
+#!/bin/sh
+# Manage connection-boundary private MAC policy outside wpa_supplicant.
+set -eu
+umask 077
+
+state_root=${WIFI_MAC_STATE_DIR:-/data/wifi/private-mac}
+ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
+save_config=${WIFI_SAVE_CONFIG:-1}
+interface=${WIFI_INTERFACE:-wlan0}
+
+die() {
+	echo "brick-wifi-private-mac: $*" >&2
+	exit 1
+}
+
+wpa() {
+	wpa_cli -i "$interface" -p "$ctrl" "$@"
+}
+
+network_id() {
+	case ${1:-} in
+	''|*[!0-9]*) die 'network id must be numeric' ;;
+	esac
+	printf '%s\n' "$1"
+}
+
+profile_value() {
+	value=$(wpa get_network "$id" "$1")
+	[ "$value" != FAIL ] || die "cannot read network $id $1"
+	printf '%s\n' "$value"
+}
+
+profile_key() {
+	printf 'ssid=%s\nkey_mgmt=%s\n' "$ssid" "$key_mgmt" |
+		sha256sum | cut -d' ' -f1
+}
+
+field() {
+	[ -f "$state_file" ] || return 0
+	sed -n "s/^$1=//p" "$state_file" | sed -n '1p'
+}
+
+number_or_zero() {
+	case ${1:-} in
+	''|*[!0-9]*) printf '0\n' ;;
+	*) printf '%s\n' "$1" ;;
+	esac
+}
+
+new_mac() {
+	if [ -n "${WIFI_RANDOM_HEX:-}" ]; then
+		random=$WIFI_RANDOM_HEX
+	else
+		random=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
+	fi
+	case $random in
+	*[!0-9a-fA-F]*|'') die 'random source was not hexadecimal' ;;
+	esac
+	[ "${#random}" -eq 12 ] || die 'random source must contain six bytes'
+	first=$(printf '%s' "$random" | cut -c1-2)
+	first=$(((0x$first | 2) & 254))
+	printf '%02x:%s:%s:%s:%s:%s\n' "$first" \
+		"$(printf '%s' "$random" | cut -c3-4)" \
+		"$(printf '%s' "$random" | cut -c5-6)" \
+		"$(printf '%s' "$random" | cut -c7-8)" \
+		"$(printf '%s' "$random" | cut -c9-10)" \
+		"$(printf '%s' "$random" | cut -c11-12)"
+}
+
+write_state() {
+	tmp=$(mktemp "$state_root/.private-mac.XXXXXX")
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	{
+		printf 'mac=%s\n' "$mac"
+		printf 'created=%s\n' "$created"
+		printf 'last_disconnected=%s\n' "$last_disconnected"
+		printf 'lease_expires=%s\n' "$lease_expires"
+		printf 'mode=%s\n' "$mode"
+		printf 'captive=%s\n' "$captive"
+	} > "$tmp"
+	# The metadata controls the address used on the next association.  Make the
+	# new inode durable before publishing it, then make the rename durable.  The
+	# target BusyBox has plain sync(1), but not its per-file extension.
+	sync
+	[ -z "${WIFI_FAULT_HOOK:-}" ] || "$WIFI_FAULT_HOOK" private-after-temp
+	mv "$tmp" "$state_file"
+	sync
+	[ -z "${WIFI_FAULT_HOOK:-}" ] || "$WIFI_FAULT_HOOK" private-after-rename
+	trap - EXIT HUP INT TERM
+}
+
+valid_key() {
+	case ${1:-} in
+	????????????????????????????????????????????????????????????????) ;;
+	*) return 1 ;;
+	esac
+	case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+
+forget_key() {
+	valid_key "$1" || die 'network key must be a lowercase SHA-256 value'
+	rm -f "$state_root/$1"
+	sync
+}
+
+load_state() {
+	mac=$(field mac)
+	created=$(number_or_zero "$(field created)")
+	last_disconnected=$(number_or_zero "$(field last_disconnected)")
+	lease_expires=$(number_or_zero "$(field lease_expires)")
+	mode=$(field mode)
+	captive=$(field captive)
+	case $mode in
+	device|private|enhanced) ;;
+	*) mode=private ;;
+	esac
+	case $captive in
+	0|1) ;;
+	*) captive=0 ;;
+	esac
+	if [ -z "$mac" ]; then
+		mac=$(new_mac)
+		created=$now
+	fi
+}
+
+save_wpa() {
+	[ "$save_config" = 0 ] || [ "$(wpa save_config)" = OK ] ||
+		die 'SAVE_CONFIG failed'
+}
+
+apply_mac() {
+	style=$1
+	if [ "$style" = device ]; then
+		[ "$(wpa set_network "$id" mac_addr 0)" = OK ] ||
+			die 'cannot select device MAC'
+	else
+		[ "$(wpa set_network "$id" mac_value "$mac")" = OK ] ||
+			die 'cannot set private MAC'
+		[ "$(wpa set_network "$id" mac_addr 3)" = OK ] ||
+			die 'cannot select per-network MAC'
+	fi
+	save_wpa
+}
+
+now=${WIFI_NOW:-$(date +%s)}
+case $now in
+''|*[!0-9]*) die 'current time must be numeric' ;;
+esac
+mkdir -p "$state_root"
+chmod 700 "$state_root"
+exec 9> "$state_root/lock"
+flock -x 9
+# A killed writer can leave only an unpublished private temporary inode.
+rm -f "$state_root"/.private-mac.*
+
+action=${1:-}
+[ "$action" = help ] || [ "$action" = forget-key ] ||
+	id=$(network_id "${2:-}")
+if [ "$action" != help ] && [ "$action" != forget-key ]; then
+	ssid=$(profile_value ssid)
+	key_mgmt=$(profile_value key_mgmt)
+	key=$(profile_key)
+	state_file=$state_root/$key
+	load_state
+fi
+
+case $action in
+set-mode)
+	case ${3:-} in
+	device|private|enhanced) mode=$3 ;;
+	*) die 'mode must be device, private, or enhanced' ;;
+	esac
+	write_state
+	;;
+prepare)
+	status=$(wpa status)
+	status_id=$(printf '%s\n' "$status" | sed -n 's/^id=//p')
+	status_state=$(printf '%s\n' "$status" | sed -n 's/^wpa_state=//p')
+	if [ "$status_id" = "$id" ] && [ "$status_state" = COMPLETED ]; then
+		die 'refusing to change MAC while this network is connected'
+	fi
+	effective=$mode
+	if [ "$mode" = enhanced ] &&
+	   { [ "$key_mgmt" != NONE ] || [ "$captive" = 1 ]; }; then
+		effective=private
+	fi
+	if [ "$effective" = enhanced ]; then
+		age=$((now - created))
+		unused=$((now - last_disconnected))
+		if [ "$age" -ge 86400 ] ||
+		   { [ "$lease_expires" -gt 0 ] &&
+		     [ "$lease_expires" -le "$now" ] &&
+		     [ "$last_disconnected" -gt 0 ] &&
+		     [ "$unused" -ge 14400 ]; }; then
+			mac=$(new_mac)
+			created=$now
+		fi
+	fi
+	write_state
+	apply_mac "$effective"
+	printf '%s %s\n' "$effective" "$mac"
+	;;
+lease)
+	case ${3:-} in
+	''|*[!0-9]*) die 'lease duration must be numeric' ;;
+	esac
+	lease_expires=$((now + $3))
+	write_state
+	;;
+disconnected)
+	last_disconnected=$now
+	write_state
+	;;
+mark-captive)
+	captive=1
+	write_state
+	;;
+show)
+	cat "$state_file"
+	;;
+key)
+	printf '%s\n' "$key"
+	;;
+forget)
+	forget_key "$key"
+	;;
+forget-key)
+	forget_key "${2:-}"
+	;;
+help)
+	echo 'Usage: brick-wifi-private-mac {set-mode|prepare|lease|disconnected|mark-captive|show|key|forget} NETWORK_ID [VALUE]'
+	echo '       brick-wifi-private-mac forget-key NETWORK_KEY'
+	;;
+*)
+	die 'unknown action'
+	;;
+esac

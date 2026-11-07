@@ -1,0 +1,200 @@
+#!/bin/sh
+# Init-respawned owner of captive sessions and crash recovery.
+set -eu
+umask 077
+
+runtime=${BRICK_CAPTIVE_RUNTIME_ROOT:-/run/brick-captive-browser}
+supervisor=${BRICK_CAPTIVE_SUPERVISOR:-/usr/libexec/brick-captive-supervisor}
+authority=${BRICK_CAPTIVE_AUTHORITY:-/usr/libexec/brick-captive-authority}
+browser=${BRICK_CAPTIVE_BROWSER:-/usr/bin/brick-captive-wpe}
+watchdog=${BRICK_CAPTIVE_WATCHDOG:-/usr/libexec/brick-captive-watchdog}
+pause_hook=${BRICK_DISPLAY_PAUSE_HOOK:-/usr/libexec/brick-captive-display-pause}
+resume_hook=${BRICK_DISPLAY_RESUME_HOOK:-/usr/libexec/brick-captive-display-resume}
+sleep_command=${BRICK_CAPTIVE_SLEEP:-sleep}
+input_root=${BRICK_INPUT_DEV:-/dev/input}
+child=
+generation=0
+network_id=
+portal_url=
+
+field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | sed -n '1p'; }
+numeric() { case ${1:-} in ''|*[!0-9]*) return 1 ;; esac; }
+write_status() {
+	tmp="$runtime/status.tmp.$$"
+	{
+		printf 'state=%s\n' "$1"
+		[ -z "${2:-}" ] || printf 'result=%s\n' "$2"
+		printf 'generation=%s\n' "$generation"
+		[ -z "$network_id" ] || printf 'network_id=%s\n' "$network_id"
+		[ -z "$portal_url" ] || printf 'portal_url=%s\n' "$portal_url"
+	} > "$tmp"
+	mv "$tmp" "$runtime/status"
+}
+resume_display() {
+	"$resume_hook" recovery >/dev/null 2>&1 || {
+		write_status failed display-recovery
+		return 1
+	}
+}
+recover_session() {
+	[ -f "$runtime/session" ] || return 0
+	cgroup=$(field cgroup "$runtime/session")
+	case $cgroup in /sys/fs/cgroup/brick-captive/session-[0-9]*) ;; *) cgroup= ;; esac
+	if [ -n "$cgroup" ] && [ -e "$cgroup/cgroup.kill" ]; then
+		echo 1 > "$cgroup/cgroup.kill" 2>/dev/null || :
+		for tick in $(seq 1 20); do
+			[ -z "$(cat "$cgroup/cgroup.procs" 2>/dev/null)" ] && break
+			"$sleep_command" 0.1 9>&-
+		done
+		[ -z "$(cat "$cgroup/cgroup.procs" 2>/dev/null)" ] || return 1
+	fi
+	rm -f "$runtime/session"
+	# The supervisor's lock is inherited by its external KMS watchdog. Waiting
+	# for it proves that exact CRTC recovery and all surviving DRM ownership have
+	# finished before an init-restarted broker may start the shell.
+	exec 8>"$runtime/display.lock"
+	flock -x 8
+	# A surviving supervisor removes its own domain before releasing this
+	# lease. If it was SIGKILLed, recovery owns the now-empty orphan instead.
+	[ -z "$cgroup" ] || [ ! -d "$cgroup" ] ||
+		rmdir "$cgroup" 2>/dev/null || return 1
+	# Keep the recovery lease in this broker while the hook runs, without
+	# leaking it into the long-lived shell that the hook starts.
+	resume_display 8>&-
+	flock -u 8
+}
+cleanup() {
+	trap - EXIT HUP INT TERM
+	if [ -n "$child" ]; then
+		kill -TERM "$child" 2>/dev/null || :
+		wait "$child" 2>/dev/null || :
+	fi
+	recover_session || :
+}
+trap cleanup EXIT
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+[ "${1:-}" = daemon ] || { echo 'Usage: brick-captive-broker daemon' >&2; exit 2; }
+[ ! -L "$runtime" ] || { echo 'brick-captive-broker: runtime root is a symlink' >&2; exit 1; }
+mkdir -p "$runtime"
+chmod 0700 "$runtime"
+exec 9>"$runtime/broker.lock"
+flock -n 9 || exit 0
+printf '%s\n' "$$" > "$runtime/broker.pid"
+generation=$(cat "$runtime/generation" 2>/dev/null || printf 0)
+numeric "$generation" || generation=0
+recover_session || exit 1
+write_status idle
+
+while :; do
+	if [ -z "$child" ] && [ -f "$runtime/request" ]; then
+		request="$runtime/request.processing.$$"
+		mv "$runtime/request" "$request" 2>/dev/null || continue
+		action=$(field action "$request")
+		if [ "$action" = open ]; then
+			request_generation=$(field generation "$request")
+			request_network_id=$(field network_id "$request")
+			key=$(field network_key "$request")
+			url=$(field url "$request")
+			input=$(field input "$request")
+			if ! numeric "$request_generation"; then
+				write_status failed invalid-request
+				rm -f "$request"
+				continue
+			fi
+			if [ "$request_generation" != "$(cat "$runtime/generation" 2>/dev/null || printf invalid)" ]; then
+				write_status failed stale-generation
+				rm -f "$request"
+				continue
+			fi
+			case $request_network_id in ''|*[!0-9]*) write_status failed invalid-request; rm -f "$request"; continue ;; esac
+			case $key in
+			????????????????????????????????????????????????????????????????) ;;
+			*) write_status failed invalid-request; rm -f "$request"; continue ;;
+			esac
+			case $key in *[!0-9a-f]*) write_status failed invalid-request; rm -f "$request"; continue ;; esac
+			case $url in http://*|https://*) ;; *) write_status failed invalid-request; rm -f "$request"; continue ;; esac
+			case $url in *[![:print:]]*|*' '*) write_status failed invalid-request; rm -f "$request"; continue ;; esac
+			case $input in "$input_root"/event[0-9]*) ;; *) write_status failed invalid-request; rm -f "$request"; continue ;; esac
+			generation=$request_generation
+			network_id=$request_network_id
+			portal_url=$url
+			rm -f "$request"
+			write_status starting
+			rm -f "$runtime/outcome"
+			(
+				set +e
+				# A broker SIGKILL must release the singleton lock immediately so
+				# init can respawn a recovery owner while this session unwinds.
+				exec 9>&-
+				session=
+				publish_outcome() {
+					printf '%s\n' "$1" > "$runtime/outcome.tmp.$$"
+					mv "$runtime/outcome.tmp.$$" "$runtime/outcome"
+				}
+				forward_stop() {
+					trap - HUP INT TERM
+					[ -z "$session" ] || kill -TERM "$session" 2>/dev/null
+					[ -z "$session" ] || wait "$session" 2>/dev/null
+					session=
+					# Cancellation terminates this wrapper before its normal wait
+					# path. Publish the terminal outcome atomically so the daemon
+					# cannot remain permanently in state=running.
+					publish_outcome 143
+					exit 143
+				}
+				trap forward_stop HUP INT TERM
+				BRICK_DISPLAY_PAUSE_HOOK="$pause_hook" \
+				BRICK_DISPLAY_RESUME_HOOK="$resume_hook" \
+				BRICK_CAPTIVE_WPA_NETWORK_ID="$network_id" \
+				BRICK_CAPTIVE_WATCHDOG="$watchdog" \
+				"$supervisor" "$key" "$url" -- \
+					"$authority" "$browser" --input-device "$input" &
+				session=$!
+				wait "$session"
+				result=$?
+				session=
+				publish_outcome "$result"
+				exit "$result"
+			) &
+			child=$!
+			write_status running
+		else
+			rm -f "$request"
+		fi
+	fi
+	if [ -n "$child" ]; then
+		if [ -f "$runtime/request" ]; then
+			if [ "$(field action "$runtime/request")" = cancel ]; then
+				if [ "$(field generation "$runtime/request")" = "$generation" ]; then
+					rm -f "$runtime/request"
+					kill -TERM "$child" 2>/dev/null || :
+				else
+					rm -f "$runtime/request"
+				fi
+			else
+				# Never defer an open command into a later, surprising session.
+				rm -f "$runtime/request"
+			fi
+		fi
+		if [ -f "$runtime/outcome" ]; then
+			status=$(cat "$runtime/outcome")
+			case $status in ''|*[!0-9]*) status=125 ;; esac
+			set +e
+			wait "$child"
+			set -e
+			rm -f "$runtime/outcome"
+			child=
+			if ! recover_session; then
+				write_status failed display-recovery
+			elif [ "$status" -eq 0 ]; then
+				write_status idle success
+			else
+				write_status idle "exit-$status"
+			fi
+		fi
+	fi
+	"$sleep_command" 0.1 9>&-
+done

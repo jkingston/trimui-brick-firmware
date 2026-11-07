@@ -1,0 +1,141 @@
+#!/bin/sh
+# Durable, restartable Forget Network transaction.
+set -eu
+umask 077
+
+state_root=${WIFI_FORGET_STATE_DIR:-/data/wifi/forget-pending}
+profile_root=${WIFI_CAPTIVE_PROFILE_ROOT:-/data/wifi/captive-browser}
+private_mac=${WIFI_PRIVATE_MAC:-/usr/libexec/brick-wifi-private-mac}
+ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
+interface=${WIFI_INTERFACE:-wlan0}
+
+die() {
+	echo "brick-wifi-forget: $*" >&2
+	exit 1
+}
+
+wpa() {
+	wpa_cli -i "$interface" -p "$ctrl" "$@"
+}
+
+checkpoint() {
+	[ -z "${WIFI_FAULT_HOOK:-}" ] || "$WIFI_FAULT_HOOK" "$1"
+}
+
+valid_id() {
+	case ${1:-} in ''|*[!0-9]*) return 1 ;; esac
+}
+
+valid_key() {
+	case ${1:-} in
+	????????????????????????????????????????????????????????????????) ;;
+	*) return 1 ;;
+	esac
+	case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+
+profile_key_for_id() {
+	ssid=$(wpa get_network "$1" ssid)
+	key_mgmt=$(wpa get_network "$1" key_mgmt)
+	[ "$ssid" != FAIL ] && [ "$key_mgmt" != FAIL ] || return 1
+	printf 'ssid=%s\nkey_mgmt=%s\n' "$ssid" "$key_mgmt" |
+		sha256sum | cut -d' ' -f1
+}
+
+write_intent() {
+	id=$1
+	key=$2
+	tmp=$(mktemp "$state_root/.forget.XXXXXX")
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	printf 'id=%s\nkey=%s\n' "$id" "$key" > "$tmp"
+	sync
+	checkpoint forget-after-intent-temp
+	mv "$tmp" "$state_root/$key"
+	sync
+	checkpoint forget-after-intent-rename
+	trap - EXIT HUP INT TERM
+}
+
+intent_field() {
+	sed -n "s/^$1=//p" "$2" | sed -n '1p'
+}
+
+remove_tree() {
+	path=$1
+	[ ! -L "$path" ] || die "refusing symlink profile $path"
+	tombstone=$profile_root/.forget-$(basename "$path")
+	# A power loss after the atomic rename leaves only the tombstone.  Recovery
+	# must finish that deletion even though the published profile is absent.
+	if [ -e "$tombstone" ] || [ -L "$tombstone" ]; then
+		rm -rf "$tombstone"
+		sync
+	fi
+	[ ! -e "$path" ] || {
+		mv "$path" "$tombstone"
+		sync
+		checkpoint forget-after-profile-rename
+		rm -rf "$tombstone"
+		sync
+	}
+}
+
+finish_intent() {
+	intent=$1
+	id=$(intent_field id "$intent")
+	key=$(intent_field key "$intent")
+	valid_id "$id" || die "invalid network id in $intent"
+	valid_key "$key" || die "invalid network key in $intent"
+
+	# A number may be reused after a crash.  Only remove it when it still names
+	# the profile recorded by the durable intent.  FAIL means the earlier
+	# remove already happened; SAVE_CONFIG still needs to persist that removal.
+	current=$(profile_key_for_id "$id" 2>/dev/null || :)
+	if [ "$current" = "$key" ]; then
+		[ "$(wpa disable_network "$id")" = OK ] || die 'DISABLE_NETWORK failed'
+		[ "$(wpa remove_network "$id")" = OK ] || die 'REMOVE_NETWORK failed'
+	elif [ -n "$current" ]; then
+		die "network id $id was reused before forget recovery"
+	fi
+	checkpoint forget-after-remove-network
+	[ "$(wpa save_config)" = OK ] || die 'SAVE_CONFIG failed'
+	checkpoint forget-after-save-config
+
+	"$private_mac" forget-key "$key"
+	checkpoint forget-after-private-mac
+	# The WPE launcher hashes the canonical network identity exactly once.
+	captive_id=$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)
+	remove_tree "$profile_root/$captive_id"
+	checkpoint forget-after-captive-profile
+	rm -f "$intent"
+	sync
+}
+
+[ ! -L "$state_root" ] || die 'forget state root must not be a symlink'
+[ ! -L "$profile_root" ] || die 'captive profile root must not be a symlink'
+mkdir -p "$state_root" "$profile_root"
+chmod 700 "$state_root" "$profile_root"
+exec 9> "$state_root/lock"
+flock -x 9
+# No published intent ever uses the dot-prefixed temporary name.
+rm -f "$state_root"/.forget.*
+
+case ${1:-} in
+network)
+	valid_id "${2:-}" || die 'network id must be numeric'
+	key=$(profile_key_for_id "$2") || die "cannot read network $2"
+	valid_key "$key" || die 'computed network key is invalid'
+	intent=$state_root/$key
+	[ -f "$intent" ] || write_intent "$2" "$key"
+	finish_intent "$intent"
+	;;
+recover)
+	for intent in "$state_root"/*; do
+		[ -f "$intent" ] || continue
+		[ "$(basename "$intent")" = lock ] && continue
+		finish_intent "$intent"
+	done
+	;;
+*)
+	die 'usage: brick-wifi-forget {network NETWORK_ID|recover}'
+	;;
+esac

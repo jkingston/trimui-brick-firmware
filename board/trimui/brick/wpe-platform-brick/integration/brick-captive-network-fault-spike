@@ -1,0 +1,287 @@
+#!/bin/sh
+# Bounded on-device packaged-chain qualification for stale captive sessions.
+# This never selects, removes, edits or saves a supplicant network. The loss
+# case uses only DISCONNECT/RECONNECT; the generation case changes only this
+# harness's read-only wpa_cli proxy response.
+set -eu
+umask 077
+
+self=$0
+root=${BRICK_FAULT_ROOT:-/tmp/brick-captive-network-fault}
+runtime=$root/runtime
+state=$root/wifi-state
+profile=$root/profile
+mode=$root/mode
+proxy_mode=$root/proxy-mode
+expected_id_file=$root/expected-id
+log=$root/chain.log
+results=$root/results
+stage=${BRICK_WPE_STAGE:-/data/wpe-single-spike}
+broker=${BRICK_TEST_BROKER:-/tmp/brick-captive-broker}
+control=${BRICK_TEST_CONTROL:-/tmp/brick-captive-control}
+supervisor=${BRICK_TEST_SUPERVISOR:-/tmp/brick-captive-supervisor}
+authority=${BRICK_TEST_AUTHORITY:-/tmp/brick-captive-authority}
+browser=${BRICK_TEST_BROWSER:-/tmp/brick-captive-browser}
+watchdog=${BRICK_TEST_WATCHDOG:-/tmp/brick-captive-watchdog}
+pause=${BRICK_TEST_PAUSE:-/tmp/brick-captive-display-pause}
+resume=${BRICK_TEST_RESUME:-/tmp/brick-captive-display-resume}
+real_wpa=${BRICK_REAL_WPA_CLI:-wpa_cli}
+broker_pid=
+disconnected=0
+
+field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | sed -n '1p'; }
+status_text() { "$real_wpa" -i wlan0 -p /run/wpa_supplicant status; }
+
+if [ "${1:-}" = -i ]; then
+	last=
+	for argument in "$@"; do last=$argument; done
+	if [ "$last" = status ] && [ "$(cat "$proxy_mode")" = mismatch ]; then
+		status_text | sed "s/^id=.*/id=$(($(cat "$expected_id_file") + 1))/"
+		exit 0
+	else
+		exec "$real_wpa" "$@"
+	fi
+fi
+
+if [ "${1:-}" = check ]; then
+	fixture_url=${BRICK_FAULT_FIXTURE_URL:?}
+	result=$(cat "$mode")
+	case $result in online|captive) ;; *) result=captive ;; esac
+	tmp=$state/connectivity.tmp.$$
+	{
+		printf 'state=%s\n' "$result"
+		printf 'portal_url=%s\n' "$fixture_url"
+	} > "$tmp"
+	mv "$tmp" "$state/connectivity"
+	exit 0
+fi
+
+if [ "${1:-}" = key ]; then
+	# Isolated qualification profile; never reads or writes private-MAC state.
+	printf 'c1a4f6c55fd8e2737b1ec11b64bb94a25a33aab6fd61a80db21dc9a4d332e331\n'
+	exit 0
+fi
+
+[ "$(id -u)" -eq 0 ] || { echo 'must run as root' >&2; exit 2; }
+[ "$#" -eq 1 ] || { echo "Usage: $0 FIXTURE_URL" >&2; exit 2; }
+fixture_url=$1
+case $fixture_url in http://192.168.7.1:*/*) ;; *)
+	echo 'fixture must use the isolated USB host address' >&2; exit 2 ;;
+esac
+
+wait_field() {
+	wait_file=$1 wait_name=$2 wait_expected=$3 wait_ticks=$4
+	count=0
+	while [ "$count" -lt "$wait_ticks" ]; do
+		[ "$(field "$wait_name" "$wait_file")" = "$wait_expected" ] && return 0
+		sleep 0.1
+		count=$((count + 1))
+	done
+	return 1
+}
+
+wait_wifi() {
+	id=$1 count=0
+	while [ "$count" -lt 200 ]; do
+		wifi_status=$(status_text 2>/dev/null || :)
+		current=$(printf '%s\n' "$wifi_status" | sed -n 's/^id=//p' | sed -n '1p')
+		connection=$(printf '%s\n' "$wifi_status" |
+			sed -n 's/^wpa_state=//p' | sed -n '1p')
+		[ "$current" = "$id" ] && [ "$connection" = COMPLETED ] && return 0
+		sleep 0.1
+		count=$((count + 1))
+	done
+	return 1
+}
+
+hash_drm() {
+	output=$1
+	: > "$output"
+	for name in clients gem_names framebuffer state; do
+		sha256sum "/sys/kernel/debug/dri/0/$name" >> "$output"
+	done
+}
+
+browser_count() {
+	ps -eo comm | awk '$1 ~ /^brick-captive-w/ || /^(bwrap|WPEWebProcess|WPENetworkProcess|WPEGPUProcess)$/ { count++ } END { print count+0 }'
+}
+
+verify_recovery() {
+	label=$1
+	# The broker publishes idle after the child outcome is known; the supervisor
+	# may still be completing its final wait/reap and cgroup removal.  Observe
+	# that bounded teardown instead of sampling the transient edge.
+	settle_count=0
+	while [ "$settle_count" -lt 100 ]; do
+		if [ "$(browser_count)" -eq 0 ] && [ ! -e "$runtime/session" ] &&
+			[ -z "$(find /sys/fs/cgroup/brick-captive -mindepth 1 -maxdepth 1 -type d -name 'session-*' -print -quit 2>/dev/null)" ]; then
+			break
+		fi
+		sleep 0.1
+		settle_count=$((settle_count + 1))
+	done
+	[ "$(browser_count)" -eq 0 ] || { echo "$label: leaked browser process" >&2; return 1; }
+	[ ! -e "$runtime/session" ] || { echo "$label: session marker leaked" >&2; return 1; }
+	[ -z "$(find /sys/fs/cgroup/brick-captive -mindepth 1 -maxdepth 1 -type d -name 'session-*' -print -quit 2>/dev/null)" ] || {
+		echo "$label: captive cgroup leaked" >&2; return 1; }
+	pidof brick-shell >/dev/null || { echo "$label: shell is not running" >&2; return 1; }
+	drm_count=0
+	while [ "$drm_count" -lt 100 ]; do
+		hash_drm "$root/drm.after"
+		cmp -s "$root/drm.before" "$root/drm.after" && break
+		sleep 0.1
+		drm_count=$((drm_count + 1))
+	done
+	cmp "$root/drm.before" "$root/drm.after" || {
+		echo "$label: DRM objects differ from baseline" >&2; return 1; }
+	printf '%s cleanup=PASS drm=identical shell=running\n' "$label" >> "$results"
+}
+
+write_captive_state() {
+	tmp=$state/connectivity.tmp.$$
+	{
+		printf 'state=captive\n'
+		printf 'portal_url=%s\n' "$fixture_url"
+	} > "$tmp"
+	mv "$tmp" "$state/connectivity"
+}
+
+open_session() {
+	write_captive_state
+	WIFI_STATE_DIR=$state WIFI_WPA_CLI=$self \
+		WIFI_PRIVATE_MAC=$self BRICK_CAPTIVE_RUNTIME_ROOT=$runtime \
+		BRICK_FAULT_ROOT=$root BRICK_REAL_WPA_CLI=$real_wpa \
+		"$control" open "$network_id" "$fixture_url"
+	wait_field "$runtime/status" state running 100
+	count=0
+	while [ "$count" -lt 150 ]; do
+		[ "$(browser_count)" -ge 4 ] && [ -f "$runtime/session" ] && break
+		sleep 0.1
+		count=$((count + 1))
+	done
+	[ "$count" -lt 150 ] || return 1
+	# Keep connectivity captive long enough for the controlled stale page to
+	# render. The authority cannot send SUCCESS while mode remains captive.
+	sleep 2
+}
+
+wait_outcome() {
+	outcome_expected=$1
+	if ! wait_field "$runtime/status" state idle 250; then
+		echo "timed out waiting for idle outcome; status follows" >&2
+		cat "$runtime/status" >&2 2>/dev/null || :
+		return 1
+	fi
+	actual=$(field result "$runtime/status")
+	if [ "$actual" != "$outcome_expected" ]; then
+		echo "outcome mismatch: expected=$outcome_expected actual=$actual" >&2
+		return 1
+	fi
+}
+
+run_stale_case() {
+	case_name=$1
+	printf 'normal\n' > "$proxy_mode"
+	printf 'captive\n' > "$mode"
+	open_session
+	case $case_name in
+	loss)
+		[ "$("$real_wpa" -i wlan0 -p /run/wpa_supplicant disconnect)" = OK ]
+		disconnected=1
+		printf '%s injected=wpa-disconnect\n' "$case_name" >> "$results"
+		;;
+	network-change)
+		printf 'mismatch\n' > "$proxy_mode"
+		printf '%s injected=id-mismatch expected=%s observed=%s\n' \
+			"$case_name" "$network_id" "$((network_id + 1))" >> "$results"
+		;;
+	*) return 2 ;;
+	esac
+	# The checker now claims online, but the authority's network checks must
+	# reject the stale page on both sides of that probe.
+	printf 'online\n' > "$mode"
+	wait_outcome exit-1
+	printf '%s stale_outcome=exit-1 authorized=0\n' "$case_name" >> "$results"
+	verify_recovery "$case_name"
+	if [ "$case_name" = loss ]; then
+		[ "$("$real_wpa" -i wlan0 -p /run/wpa_supplicant reconnect)" = OK ]
+		wait_wifi "$network_id"
+		disconnected=0
+		printf '%s reconnect=PASS network_id=%s\n' \
+			"$case_name" "$network_id" >> "$results"
+	fi
+}
+
+run_retry() {
+	label=$1
+	printf 'normal\n' > "$proxy_mode"
+	printf 'online\n' > "$mode"
+	open_session
+	wait_outcome success
+	printf '%s retry_outcome=success authorized=1\n' "$label" >> "$results"
+	verify_recovery "$label-retry"
+}
+
+cleanup() {
+	exit_status=$?
+	trap - EXIT HUP INT TERM
+	if [ "$disconnected" -eq 1 ]; then
+		"$real_wpa" -i wlan0 -p /run/wpa_supplicant reconnect >/dev/null 2>&1 || :
+		wait_wifi "$network_id" || :
+	fi
+	if [ -n "$broker_pid" ] && kill -0 "$broker_pid" 2>/dev/null; then
+		kill -TERM "$broker_pid" 2>/dev/null || :
+		wait "$broker_pid" 2>/dev/null || :
+	fi
+	pidof brick-shell >/dev/null || /etc/init.d/S20brick-shell start >/dev/null 2>&1 || :
+	exit "$exit_status"
+}
+trap cleanup EXIT HUP INT TERM
+
+for executable in "$broker" "$control" "$supervisor" "$authority" \
+	"$browser" "$watchdog" "$pause" "$resume"; do
+	[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 2; }
+done
+[ -d "$stage" ] || { echo "missing WPE stage: $stage" >&2; exit 2; }
+[ ! -e "$root" ] || { echo "refusing stale qualification root: $root" >&2; exit 2; }
+mkdir -p "$runtime" "$state" "$profile" "$stage$profile"
+chmod 0700 "$root" "$runtime" "$state" "$profile"
+# The browser runs after pivot_root into the stage.  Its mirrored qualification
+# root must therefore be traversable by the dedicated browser UID; the host
+# qualification root above remains private to root.
+chmod 0711 "$stage$root"
+chown -R 997:997 "$stage$profile"
+chmod 0700 "$stage$profile"
+
+initial=$(status_text)
+network_id=$(printf '%s\n' "$initial" | sed -n 's/^id=//p' | sed -n '1p')
+network_state=$(printf '%s\n' "$initial" | sed -n 's/^wpa_state=//p' | sed -n '1p')
+case $network_id in ''|*[!0-9]*) echo 'current network id is invalid' >&2; exit 2 ;; esac
+[ "$network_state" = COMPLETED ] || { echo 'Wi-Fi must initially be connected' >&2; exit 2; }
+printf '%s\n' "$network_id" > "$expected_id_file"
+printf 'normal\n' > "$proxy_mode"
+printf 'captive\n' > "$mode"
+hash_drm "$root/drm.before"
+: > "$results"
+[ "$(browser_count)" -eq 0 ] || { echo 'browser already active' >&2; exit 2; }
+
+BRICK_CAPTIVE_RUNTIME_ROOT=$runtime WIFI_STATE_DIR=$state \
+WIFI_WPA_CLI=$self BRICK_REAL_WPA_CLI=$real_wpa BRICK_FAULT_ROOT=$root \
+BRICK_FAULT_FIXTURE_URL=$fixture_url \
+BRICK_CAPTIVE_SUPERVISOR=$supervisor BRICK_CAPTIVE_AUTHORITY=$authority \
+BRICK_CAPTIVE_BROWSER=$browser BRICK_CAPTIVE_WATCHDOG=$watchdog \
+BRICK_DISPLAY_PAUSE_HOOK=$pause BRICK_DISPLAY_RESUME_HOOK=$resume \
+BRICK_CAPTIVE_PROFILE_ROOT=$profile \
+BRICK_CAPTIVE_PROFILE_OWNER=997:997 BRICK_CONNECTIVITY_CHECKER=$self \
+BRICK_AUTHORITY_CHECK_INTERVAL_MS=100 \
+BRICK_AUTHORITY_SESSION_TIMEOUT_MS=8000 \
+"$broker" daemon >> "$log" 2>&1 &
+broker_pid=$!
+wait_field "$runtime/status" state idle 50
+
+run_stale_case loss
+run_retry loss
+run_stale_case network-change
+run_retry network-change
+
+printf 'PASS network_id=%s loss_cancel=1 loss_retry=1 network_change_cancel=1 network_change_retry=1\n' "$network_id"
