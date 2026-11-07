@@ -3,7 +3,7 @@
 ################################################################################
 
 BRICK_WPEWEBKIT_VERSION = 2.54.1-r1
-BRICK_WPEWEBKIT_SITE = https://github.com/jkingston/trimui-brick-firmware/releases/download/wpewebkit-brick-2.54.1-r1
+BRICK_WPEWEBKIT_SITE = https://github.com/jkingston/WebKit/releases/download/wpewebkit-brick-2.54.1-r1
 BRICK_WPEWEBKIT_SOURCE = brick-wpewebkit-2.54.1-r1-aarch64-buildroot-62474ed54affdd6d.tar.gz
 BRICK_WPEWEBKIT_INSTALL_STAGING = YES
 BRICK_WPEWEBKIT_LICENSE = LGPL-2.1+, BSD-2-Clause
