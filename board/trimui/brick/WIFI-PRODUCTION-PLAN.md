@@ -19,13 +19,13 @@ There is no NetSurf fallback, custom WPEPlatform backend, no-EGL WebKit fork,
 or driver-format workaround. A mandatory failure blocks the feature or
 disables the affected optional policy.
 
-The local kernel repository's forced-background-scan and TX-flush work remains
-a separate kernel experiment on a newer kernel base. It is not part of this
-MVP: the clean product image pins the published `brick-7.3.0-1` archive. A
-future driver optimisation must pass kernel review and device qualification,
-be published as its own checksum-pinned kernel release, and only then update
-the base firmware. This preserves the kernel/base/product repository boundary
-and avoids silently mixing an experimental driver into a userspace release.
+The XR829 qualification work is integrated on Linux 7.3 and published as the
+checksum-pinned `brick-7.3.0-2` kernel archive. It adds TX departure fencing and
+telemetry, correct dynamic power-save encoding, and bounded hooks for
+background scan and JOIN-stall recovery. The two policy-changing hooks remain
+disabled by default; the MVP continues to use the measured userspace stale-BSS
+and service-recovery policy. This keeps driver capability in the kernel,
+hardware policy in base firmware and user experience in product firmware.
 
 Product policy is fixed as follows:
 
@@ -97,6 +97,26 @@ zero-outage roaming promises, automatic interruption of gameplay for network
 intent and aggressive background scanning remain excluded. The Phase 5 cycle,
 multi-device, long-soak, power and clean-image fault gates below are release
 qualification, not a second implementation decision.
+
+### Kernel and base integration closure (2026-11-07)
+
+The kernel/base repository dependency is resolved. Kernel commit
+`f8139bd420df136741b47a33768f6f51421fe912` is a single change on Linux 7.3.0,
+tagged and published as `brick-7.3.0-2`; base firmware consumes only its public
+release archive and verifies SHA-256
+`3451cd1a35e375c69ddffb5e7e71f6e9bb089c552ca459b98f969107701c1f50`.
+No local kernel override or driver patch is carried by base or product
+firmware.
+
+Qualification of that exact kernel commit covers the Brick ARM64 defconfig,
+compilation and linking of the complete XR829 driver, source-policy contracts,
+PM command encoding and indication state. Existing attached-device evidence
+covers PM on/off firmware indications, associated scan stress, bounded service
+recovery and Wi-Fi/Bluetooth separation. Power save remains disabled because
+the measured latency/traffic result did not justify enabling it. Background
+scan and JOIN watchdog parameters remain opt-in until the corresponding lab
+matrices below justify a production policy; publishing their bounded mechanism
+does not claim those optional policies are qualified.
 
 ### Attached-device MVP deployment evidence (2026-11-07)
 
