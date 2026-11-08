@@ -4,6 +4,7 @@ set -eu
 umask 077
 
 runtime=${BRICK_CAPTIVE_RUNTIME_ROOT:-/run/brick-captive-browser}
+profile_root=${BRICK_CAPTIVE_PROFILE_ROOT:-/data/captive-browser}
 supervisor=${BRICK_CAPTIVE_SUPERVISOR:-/usr/libexec/brick-captive-supervisor}
 authority=${BRICK_CAPTIVE_AUTHORITY:-/usr/libexec/brick-captive-authority}
 browser=${BRICK_CAPTIVE_BROWSER:-/usr/bin/brick-captive-wpe}
@@ -77,8 +78,13 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 [ "${1:-}" = daemon ] || { echo 'Usage: brick-captive-broker daemon' >&2; exit 2; }
+[ ! -L "$profile_root" ] || { echo 'brick-captive-broker: profile root is a symlink' >&2; exit 1; }
 [ ! -L "$runtime" ] || { echo 'brick-captive-broker: runtime root is a symlink' >&2; exit 1; }
-mkdir -p "$runtime"
+mkdir -p "$profile_root" "$runtime"
+# BusyBox init starts the broker only after rcS.  Reassert the final idle-state
+# invariant here so no later boot-time home setup can leave the unprivileged
+# browser unable to traverse to its own 0700 hashed profile.
+chmod 0711 "$profile_root"
 chmod 0700 "$runtime"
 exec 9>"$runtime/broker.lock"
 flock -n 9 || exit 0

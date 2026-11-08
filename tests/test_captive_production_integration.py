@@ -88,6 +88,7 @@ class ControlAndBrokerTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.runtime = self.root / 'runtime'
+        self.profiles = self.root / 'profiles'
         self.wifi = self.root / 'wifi'
         self.wifi.mkdir()
         (self.wifi / 'connectivity').write_text(
@@ -115,6 +116,7 @@ class ControlAndBrokerTest(unittest.TestCase):
         self.connectivity_checked = self.root / 'connectivity-checked'
         self.env = dict(
             os.environ, BRICK_CAPTIVE_RUNTIME_ROOT=str(self.runtime),
+            BRICK_CAPTIVE_PROFILE_ROOT=str(self.profiles),
             WIFI_STATE_DIR=str(self.wifi), WIFI_WPA_CLI=str(self.wpa),
             WIFI_PRIVATE_MAC=str(self.identity),
             WIFI_CONNECTIVITY=str(self.connectivity),
@@ -245,6 +247,7 @@ class ControlAndBrokerTest(unittest.TestCase):
         self.env['TEST_INVOCATION'] = str(invocation)
         broker = self.start_broker(supervisor)
         try:
+            self.assertEqual(self.profiles.stat().st_mode & 0o777, 0o711)
             result = self.run_control('open', '7')
             self.assertEqual(result.returncode, 0, result.stderr)
             status = wait_for(
