@@ -56,7 +56,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((self.stage / 'update.tar.gz').exists())
 
     def test_missing_rootfs_is_rejected_before_upload(self):
-        (self.images / 'rootfs.cpio.zst').unlink()
+        (self.images / 'rootfs.ext4').unlink()
         with self.assertRaises(FileNotFoundError):
             deploy.package(self.images, self.stage)
         self.assertFalse((self.stage / 'update.tar.gz').exists())
@@ -103,7 +103,7 @@ class InstallTests(unittest.TestCase):
         self.tmp.mkdir()
         (self.root / 'type').write_text('SD\n')
         (self.root / 'compatible').write_bytes(b'trimui,brick\0allwinner,sun50i-a133\0')
-        (self.root / 'cmdline').write_text('console=tty0 brick.bootdir=brick-diag quiet\n')
+        (self.root / 'cmdline').write_text('console=tty0 brick.bootdir=brick-previous quiet\n')
         (self.root / 'mounts').write_text('')
         (self.root / 'device').write_text('179:1\n')
         self.current = self.sd / 'brick-diag'
@@ -113,11 +113,16 @@ class InstallTests(unittest.TestCase):
         payload = self.root / 'payload'
         self.payload = payload
         self.write_payload(payload, b'new')
+        (payload / 'rootfs.ext4').write_bytes(b'R' * (1024 * 1024))
         bootloader = b'test bootloader'
         (payload / deploy.BOOTLOADER).write_bytes(bootloader)
         self.pack_source_payload(payload)
         self.raw = self.root / 'mmcblk0'
         self.raw.write_bytes(bytes(128 * 1024) + bootloader)
+        self.product_root = self.root / 'mmcblk0p2'
+        self.product_root.write_bytes(b'O' * (1024 * 1024))
+        (self.root / 'root-size').write_text('2048\n')
+        (self.root / 'root-device').write_text('179:2\n')
         self.env.update(TEST_SD=str(self.sd), REAL_BB=self.busybox)
         shim = self.root / 'busybox'
         shim.write_text('''#!/bin/sh
@@ -150,6 +155,9 @@ exec "$REAL_BB" "$command" "$@"
                         '/proc/cmdline': str(self.root / 'cmdline'),
                         '/proc/self/mountinfo': str(self.root / 'mounts'),
                         '/sys/class/block/mmcblk0p1/dev': str(self.root / 'device'),
+                        '/sys/class/block/mmcblk0p2/dev': str(self.root / 'root-device'),
+                        '/sys/class/block/mmcblk0p2/size': str(self.root / 'root-size'),
+                        '/dev/mmcblk0p2': str(self.product_root),
                         '/dev/mmcblk0': str(self.raw)}
         for old, new in replacements.items():
             script = script.replace(old, new)
@@ -188,35 +196,24 @@ exec "$REAL_BB" "$command" "$@"
         self.assertFalse((self.tmp / '.brick-update-lock').exists())
         self.assertFalse((self.sd / 'brick-next').exists())
 
-    def test_success_retains_current_as_previous(self):
+    def test_success_replaces_product_and_retains_recovery(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('UPDATE_VERIFIED', result.stdout)
         self.assertEqual((self.current / 'Image').read_bytes(), b'new')
-        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual(self.product_root.read_bytes(), b'R' * (1024 * 1024))
         self.assertEqual((self.sd / 'brick-bootcount').read_bytes(),
                          bytes((0xbd, 1, 0, 1)))
         self.assertFalse((self.current / deploy.BOOTLOADER).exists())
         self.assert_clean()
 
-    def test_zstd_update_preserves_gzip_current_as_previous(self):
-        zstd = self.current / 'initramfs.cpio.zst'
-        gzip = self.current / 'initramfs.cpio.gz'
-        zstd.rename(gzip)
-        lines = []
-        for file in self.current.iterdir():
-            if file.name in ('SHA256SUMS', 'manifest.json'):
-                continue
-            lines.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.name}\n')
-        (self.current / 'SHA256SUMS').write_text(''.join(lines))
-
+    def test_product_root_checksum_is_not_copied_into_fat_slot(self):
         result = self.run_installer()
-
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.previous / 'initramfs.cpio.gz').is_file())
-        self.assertTrue((self.current / 'initramfs.cpio.zst').is_file())
-        self.assertFalse((self.current / deploy.BOOTLOADER).exists())
-        self.assert_clean()
+        sums = (self.current / 'SHA256SUMS').read_text()
+        self.assertNotIn('rootfs.ext4', sums)
+        self.assertFalse((self.current / 'rootfs.ext4').exists())
 
     def test_fallback_update_preserves_running_recovery(self):
         (self.root / 'cmdline').write_text('brick.bootdir=brick-previous console=tty0\n')
@@ -234,7 +231,7 @@ exec "$REAL_BB" "$command" "$@"
         (self.sd / 'brick-bootcount').write_bytes(old_bootcount)
         result = self.run_installer('copy')
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.current.exists())
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
         self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
         self.assertEqual((self.sd / 'brick-bootcount').read_bytes(), old_bootcount)
         self.assert_clean()
@@ -301,7 +298,7 @@ exec "$REAL_BB" "$command" "$@"
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.current / 'Image').read_bytes(), b'new')
-        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
         self.assert_clean()
 
     def test_missing_previous_manifest_does_not_delete_rollback(self):
@@ -352,10 +349,10 @@ exec "$REAL_BB" "$command" "$@"
         self.assertNotIn('$bb cp "$work/payload/', script)
         self.assertNotIn('remount', script)
 
-    def test_large_unaligned_payload_roundtrips_exactly(self):
+    def test_product_root_must_exactly_match_partition(self):
         payload = self.root / 'payload'
-        content = b'large-payload-block-' * 140000 + b'tail'
-        (payload / 'initramfs.cpio.zst').write_bytes(content)
+        content = b'R' * (2 * 1024 * 1024)
+        (payload / 'rootfs.ext4').write_bytes(content)
         lines = []
         for name in deploy.PAYLOAD.values():
             checksum = hashlib.sha256((payload / name).read_bytes()).hexdigest()
@@ -363,23 +360,28 @@ exec "$REAL_BB" "$command" "$@"
         (payload / 'SHA256SUMS').write_text(''.join(lines))
         self.pack_source_payload(payload)
         result = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.current / 'initramfs.cpio.zst').read_bytes(), content)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('exactly match p2', result.stderr)
+        self.assertEqual(self.product_root.read_bytes(), b'O' * (1024 * 1024))
 
-    def test_publish_failure_restores_current(self):
+    def test_publish_failure_keeps_recovery_selected(self):
+        old_bootcount = bytes((0xbd, 1, 2, 1))
+        (self.sd / 'brick-bootcount').write_bytes(old_bootcount)
         result = self.run_installer('publish')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('INJECTED-rename', result.stderr)
-        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual((self.previous / 'Image').read_bytes(), b'previous')
+        self.assertEqual((self.sd / 'brick-bootcount').read_bytes(), old_bootcount)
         self.assert_clean()
 
-    def test_restore_failure_keeps_both_complete_payloads(self):
-        result = self.run_installer('publish-and-restore')
+    def test_running_product_is_refused_before_mutation(self):
+        (self.root / 'cmdline').write_text(
+            'brick.bootdir=brick-diag root=/dev/mmcblk0p2\n')
+        result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Restore failed', result.stderr)
-        self.assertEqual((self.previous / 'Image').read_bytes(), b'current')
-        self.assertEqual((self.sd / 'brick-next' / 'Image').read_bytes(), b'new')
-        self.assertFalse((self.tmp / '.brick-update-lock').exists())
+        self.assertIn('requires brick-previous recovery', result.stderr)
+        self.assertEqual((self.current / 'Image').read_bytes(), b'current')
+        self.assertEqual(self.product_root.read_bytes(), b'O' * (1024 * 1024))
 
     def test_already_mounted_card_is_refused(self):
         (self.root / 'mounts').write_text('36 25 179:1 / /other rw - vfat /dev/disk/by-label/BOOT rw\n')

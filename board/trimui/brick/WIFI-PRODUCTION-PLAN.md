@@ -118,14 +118,43 @@ scan and JOIN watchdog parameters remain opt-in until the corresponding lab
 matrices below justify a production policy; publishing their bounded mechanism
 does not claim those optional policies are qualified.
 
-### Attached-device MVP deployment evidence (2026-11-07)
+### Durable image and captive-browser closure (2026-11-08)
 
-The packaged MVP was staged into the attached Brick's volatile root filesystem
-and exercised against the normal `quietnet_Guest` AP and a temporary host AP
-using the same SSID/security on a different channel and L2/DHCP domain. This is
-runtime qualification, not durable image installation: rebooting the stock
-RAM root restores its prior contents; the composed product image remains the
-durable delivery mechanism.
+The composed product no longer attempts to preload a 298 MiB WPE root into
+RAM. It uses the stock-compatible storage-root model: a 252 MiB FAT boot
+partition, a fixed 448 MiB ext4 product root on p2, and an ext4 persistent-data
+partition on p3 which grows to the card. The retained `brick-previous`
+initramfs remains an independent rollback and update environment. Product boot
+is marked successful only after p2 is verified as the expected writable root.
+The updater runs only from that recovery, refuses mounted p2, verifies the
+exact partition extent and written root hash, publishes kernel/DT after p2,
+and arms product boot last.
+
+The final TLS path is one implementation: GnuTLS supplies both curl and GLib
+network TLS, with the installed CA bundle selected explicitly for curl.
+Buildroot's fakeroot-generated ext4 is consumed directly, preserving the
+`dbus` and dedicated `brick-captive` accounts and ownership. Captive website
+state lives outside Wi-Fi credentials under `/data/captive-browser`: the
+root-owned profile root is traversal-only and non-enumerable, while each
+hashed per-network profile is `0700` and owned by `brick-captive`.
+
+On the attached Brick, the storage root booted and marked good, p3 expanded to
+the 64 GB card, saved WPA2 reconnect and off/on persistence passed, and the
+per-network private MAC remained stable across radio cycles and reboot. Curl
+validated public HTTPS without an explicit CA argument and connectivity
+reported dual-probe online. The WPE captive chain dropped privilege, rendered
+the host portal, created cookies/storage/cache only in its network profile,
+and returned through the trusted connectivity authority. Its measured peak
+cgroup memory was 371,040,256 bytes under the 402,653,184-byte hard limit,
+with no OOM, OOM-kill or PID-limit event. The complete host suite passes 428
+tests with 38 hardware-tool-dependent skips.
+
+### Attached-device roaming evidence (2026-11-07)
+
+The Wi-Fi policy was additionally exercised against `quietnet_Guest` and a
+temporary host AP using the same SSID/security on a different channel and
+L2/DHCP domain. These measurements establish best-effort recovery behavior;
+they do not claim coordinated or zero-outage roaming.
 
 Measured results were:
 
@@ -158,11 +187,12 @@ answer from this network, so the authority correctly reported `limited` rather
 than falsely declaring Internet access. Captive launch remained fail-closed in
 that state and created no browser request.
 
-## Phase 0: remaining risk-closing spikes
+## Post-MVP compatibility qualification
 
-These are the only spikes still required. Each produces device logs, exact
-build/module hashes, test scripts and a written pass/fail decision. They do not
-introduce a second product path.
+The MVP above is complete without these optional expansions. The experiments
+below gate only broader roaming/security/coexistence claims and must not add a
+second product path. Each produces device logs, exact build/module hashes,
+test scripts and a written pass/fail decision.
 
 ### Experiment execution rules
 

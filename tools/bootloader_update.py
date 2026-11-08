@@ -29,6 +29,9 @@ BOOT_PARTITION_START = 4 * 1024 * 1024 // 512
 BOOT_PARTITION_SECTORS = 252 * 1024 * 1024 // 512
 DATA_PARTITION_START = 256 * 1024 * 1024 // 512
 DATA_PARTITION_SECTORS = 64 * 1024 * 1024 // 512
+ROOT_PARTITION_START = 256 * 1024 * 1024 // 512
+ROOT_PARTITION_SECTORS = 448 * 1024 * 1024 // 512
+PRODUCT_DATA_PARTITION_START = 704 * 1024 * 1024 // 512
 LEGACY_BOOT_PARTITION_SECTORS = 124 * 1024 * 1024 // 512
 LEGACY_DATA_PARTITION_START = 128 * 1024 * 1024 // 512
 SUNXI_CHECKSUM_STAMP = 0x5F0A6C39
@@ -230,17 +233,27 @@ def parse_genimage_mbr(sector):
             boot[3] not in {layout[0] for layout in layouts}):
         raise UpgradeError("card boot partition does not match the Brick genimage layout")
     entries = [boot]
-    second_raw, data = raw_entries[1]
-    if any(second_raw):
+    second_raw, second = raw_entries[1]
+    third_raw, third = raw_entries[2]
+    if any(third_raw):
+        if (not any(second_raw) or boot[3] != BOOT_PARTITION_SECTORS or
+                second != (0, 0x83, ROOT_PARTITION_START, ROOT_PARTITION_SECTORS) or
+                third[0] != 0 or third[1] != 0x83 or
+                third[2] != PRODUCT_DATA_PARTITION_START or
+                third[3] < DATA_PARTITION_SECTORS):
+            raise UpgradeError("card root/data partitions do not match the Brick product layout")
+        entries.extend((second, third))
+    elif any(second_raw):
+        data = second
         if (data[0] != 0 or data[1] != 0x83 or
                 (boot[3], data[2]) not in layouts or
                 data[3] < DATA_PARTITION_SECTORS):
-            raise UpgradeError("card data partition does not match the Brick genimage layout")
+            raise UpgradeError("card data partition does not match the Brick legacy layout")
         if boot[2] + boot[3] > data[2]:
             raise UpgradeError("card boot and data partitions overlap")
         entries.append(data)
-    if any(raw_entries[index][0] != b"\0" * 16 for index in (2, 3)):
-        raise UpgradeError("card has an unexpected partition outside the Brick genimage slots")
+    if raw_entries[3][0] != b"\0" * 16:
+        raise UpgradeError("card has an unexpected partition in the fourth slot")
     return entries
 
 

@@ -423,7 +423,7 @@ int main(int argc, char **argv)
     g_autoptr(WPEDisplay) display = NULL;
     const char *uri = NULL;
     const char *network_key = NULL;
-    const char *profile_root = "/data/wifi/captive-browser";
+    const char *profile_root = "/data/captive-browser";
     const char *input_device = NULL;
     int input_fd = -1;
     int authority_fd = -1;

@@ -68,7 +68,7 @@ if selected_scp_profile != 'disabled':
     manifest['scp_profile'] = selected_scp_profile
 names = ['Image', 'sun50i-a133-trimui-brick.dtb']
 if not a.rootfs:
-    names += ['rootfs.cpio.zst', 'u-boot-sunxi-with-spl.bin']
+    names += ['rootfs.ext4', 'u-boot-sunxi-with-spl.bin']
     if not a.payload:
         names.append('sdcard.img')
 for name in names:

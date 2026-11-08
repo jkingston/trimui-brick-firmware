@@ -42,6 +42,15 @@ class SingleBrowserImplementationTest(unittest.TestCase):
         self.assertIn('# BR2_PACKAGE_BRICK_GPU is not set', config)
         self.assertNotIn('BR2_PACKAGE_WPEWEBKIT=y', config)
         self.assertNotIn('BR2_PACKAGE_NETSURF=y', config)
+        self.assertIn('BR2_PACKAGE_GLIB_NETWORKING=y', config)
+        self.assertIn('BR2_PACKAGE_GNUTLS=y', config)
+        self.assertIn('BR2_PACKAGE_LIBCURL_GNUTLS=y', config)
+        self.assertNotIn('BR2_PACKAGE_LIBCURL_MBEDTLS=y', config)
+        external = (ROOT / 'external.mk').read_text()
+        self.assertIn('ifeq ($(BR2_PACKAGE_LIBCURL_GNUTLS),y)', external)
+        self.assertIn(
+            'LIBCURL_CONF_OPTS += --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt',
+            external)
 
         package = (ROOT / 'package/brick-wpewebkit/brick-wpewebkit.mk').read_text()
         source_options = (ROOT / 'package/brick-wpewebkit/'
@@ -179,6 +188,8 @@ class CaptiveSupervisorTest(unittest.TestCase):
                 self.assertEqual((profile / child).stat().st_mode & 0o777,
                                  0o700)
             self.assertFalse((self.profiles / key).exists())
+
+        self.assertEqual(self.profiles.stat().st_mode & 0o777, 0o711)
         lines = [line for line in self.events.read_text().splitlines()
                  if line.startswith('browser ')]
         profile_a = hashlib.sha256(NETWORK_A.encode()).hexdigest()
@@ -191,7 +202,7 @@ class CaptiveSupervisorTest(unittest.TestCase):
         forget = (ROOT / 'board/trimui/brick/rootfs-overlay/usr/libexec/'
                   'brick-wifi-forget').read_text()
         supervisor = SUPERVISOR.read_text()
-        production_root = '/data/wifi/captive-browser'
+        production_root = '/data/captive-browser'
         self.assertIn(f'"{production_root}"', launcher)
         self.assertIn(f':-{production_root}}}', forget)
         self.assertIn(f':-{production_root}}}', supervisor)

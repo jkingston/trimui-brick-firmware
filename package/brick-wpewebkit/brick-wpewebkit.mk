@@ -12,7 +12,7 @@ BRICK_WPEWEBKIT_LICENSE_FILES = \
 	licenses/LICENSE-LGPL-2.1
 
 define BRICK_WPEWEBKIT_USERS
-	brick-captive -1 brick-captive -1 * /data/wifi/captive-browser - - Captive browser
+	brick-captive -1 brick-captive -1 * /data/captive-browser - - Captive browser
 endef
 
 BRICK_WPEWEBKIT_DEPENDENCIES = \

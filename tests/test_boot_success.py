@@ -59,6 +59,12 @@ class BootSuccessTests(unittest.TestCase):
                                  ["/proc/cmdline",
                                   "/sys/class/block/mmcblk0/device/type"])
 
+    def test_product_slot_requires_expected_rw_storage_root(self):
+        service = SERVICE.read_text()
+        self.assertIn("cat /sys/class/block/mmcblk0p2/dev", service)
+        self.assertIn('$3 == root_dev && $4 == "/" && $5 == "/"', service)
+        self.assertIn('$6 ~ /(^|,)rw(,|$)/', service)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,21 @@ def mbr(include_data=True, data_sectors=boot.DATA_PARTITION_SECTORS, legacy=Fals
     return sector
 
 
+def product_mbr(data_sectors=boot.DATA_PARTITION_SECTORS):
+    sector = mbr(include_data=False)
+    root = bytearray(16)
+    root[4] = 0x83
+    struct.pack_into("<II", root, 8, boot.ROOT_PARTITION_START,
+                     boot.ROOT_PARTITION_SECTORS)
+    data = bytearray(16)
+    data[4] = 0x83
+    struct.pack_into("<II", data, 8, boot.PRODUCT_DATA_PARTITION_START,
+                     data_sectors)
+    sector[462:478] = root
+    sector[478:494] = data
+    return sector
+
+
 class CorruptAfterUpdateCard(boot.Card):
     def write(self, offset, data):
         super().write(offset, data)
@@ -333,6 +348,13 @@ class ImageValidationTests(unittest.TestCase):
 
 
 class StrictMbrTests(unittest.TestCase):
+    def test_product_root_and_grown_data_layout_is_accepted(self):
+        entries = boot.parse_genimage_mbr(product_mbr(boot.DATA_PARTITION_SECTORS * 4))
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[1][2:],
+                         (boot.ROOT_PARTITION_START, boot.ROOT_PARTITION_SECTORS))
+        self.assertEqual(entries[2][2], boot.PRODUCT_DATA_PARTITION_START)
+
     def test_partition_entries_must_use_exact_genimage_slots(self):
         shifted_boot = mbr()
         shifted_boot[478:494] = shifted_boot[446:462]

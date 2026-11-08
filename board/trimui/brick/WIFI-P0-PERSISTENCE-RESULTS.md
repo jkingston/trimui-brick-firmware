@@ -39,7 +39,7 @@ device. The wpa_supplicant change was also cross-compiled for AArch64.
   the canonical SHA-256 network identity is hashed once by the launcher. Raw
   SSIDs, credentials, URLs, cookies and MAC addresses are not logged.
 * The launcher, supervisor and forget transaction now share
-  `/data/wifi/captive-browser` and the same single additional SHA-256 directory
+  `/data/captive-browser` and the same single additional SHA-256 directory
   derivation. The NetworkProcess receives only that current directory as its
   writable sandbox bind. Persistent cookies use an explicit per-profile
   SQLite store; session cookies remain session-only by design.

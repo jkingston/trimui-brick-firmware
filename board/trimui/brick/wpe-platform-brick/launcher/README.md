@@ -68,7 +68,7 @@ exactly once. Profile expiry/cleanup must call the same
 `brick_captive_profile_id()` helper; passing its output back as a network key
 would double-hash it and orphan the original profile.
 
-The production root is `/data/wifi/captive-browser` in the launcher,
+The production root is `/data/captive-browser` in the launcher,
 supervisor and Forget Network transaction. The root authority supplies the
 canonical 64-character network identity; the supervisor and launcher both
 derive the same single additional SHA-256 profile-directory component. The

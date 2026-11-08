@@ -47,7 +47,7 @@ class PostImageTests(unittest.TestCase):
             for name in (
                 "Image",
                 "sun50i-a133-trimui-brick.dtb",
-                "rootfs.cpio.zst",
+                "rootfs.ext4",
                 "u-boot-sunxi-with-spl.bin",
             ):
                 (binaries / name).write_bytes(name.encode())
@@ -85,9 +85,16 @@ class PostImageTests(unittest.TestCase):
                 bytes((0xBD, 1, 0, 0)),
             )
             self.assertFalse((binaries / "brick-bootcount.pending").exists())
+            payload_sums = (binaries / "payload-SHA256SUMS").read_text()
+            self.assertIn("  Image\n", payload_sums)
+            self.assertIn("  brick-usb.dtb\n", payload_sums)
+            self.assertNotIn("rootfs.ext4", payload_sums)
             config = GENIMAGE.read_text()
             self.assertIn('file brick-bootcount { image = "brick-bootcount.good" }', config)
             self.assertNotIn("brick-bootcount.pending", config)
+            self.assertNotIn("image rootfs.ext4 {", config)
+            self.assertIn('partition root {', config)
+            self.assertIn('image = "rootfs.ext4"', config)
 
 
 if __name__ == "__main__":

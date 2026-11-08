@@ -10,7 +10,10 @@ if grep -q '^BR2_BRICK_COMBINED_ACCELERATOR_QUALIFICATION=y$' "$BR2_CONFIG"; the
 fi
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py" \
 	--payload "$BINARIES_DIR" "$BR2_CONFIG" "$revision" "$override"
-(cd "$BINARIES_DIR" && sha256sum Image sun50i-a133-trimui-brick.dtb rootfs.cpio.zst | sed -e "s/sun50i-a133-trimui-brick.dtb/brick-usb.dtb/" -e "s/rootfs.cpio.zst/initramfs.cpio.zst/" > payload-SHA256SUMS)
+# Only files copied into brick-diag belong in its on-device checksum list.
+# rootfs.ext4 is the separate p2 image and is covered by the release manifest
+# and top-level SHA256SUMS instead.
+(cd "$BINARIES_DIR" && sha256sum Image sun50i-a133-trimui-brick.dtb | sed -e "s/sun50i-a133-trimui-brick.dtb/brick-usb.dtb/" > payload-SHA256SUMS)
 # A full image has no retained previous payload, so it must start in the good
 # state. Payload-only updates arm rollback after preserving brick-previous.
 # U-Boot bootcount_fs: magic, version, count=0, upgrade_available=0.
@@ -18,6 +21,6 @@ printf '\275\001\000\000' > "$BINARIES_DIR/brick-bootcount.good"
 genimage --rootpath "$TARGET_DIR" --tmppath "$BUILD_DIR/genimage.tmp" \
 	--inputpath "$BINARIES_DIR" --outputpath "$BINARIES_DIR" \
 	--config "$board/genimage.cfg"
-(cd "$BINARIES_DIR" && sha256sum Image sun50i-a133-trimui-brick.dtb rootfs.cpio.zst u-boot-sunxi-with-spl.bin sdcard.img > SHA256SUMS)
+(cd "$BINARIES_DIR" && sha256sum Image sun50i-a133-trimui-brick.dtb rootfs.ext4 u-boot-sunxi-with-spl.bin sdcard.img > SHA256SUMS)
 "$python" "$BR2_EXTERNAL_BRICK_PATH/tools/manifest.py" \
 	"$BINARIES_DIR" "$BR2_CONFIG" "$revision" "$override"

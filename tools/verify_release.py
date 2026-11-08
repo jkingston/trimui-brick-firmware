@@ -9,7 +9,7 @@ from pathlib import Path
 REQUIRED = {
     'Image',
     'sun50i-a133-trimui-brick.dtb',
-    'rootfs.cpio.zst',
+    'rootfs.ext4',
     'u-boot-sunxi-with-spl.bin',
     'sdcard.img',
 }

@@ -67,6 +67,12 @@ require('for brick_bootdir in brick-diag brick-previous brick-baseline;' in
         config.get('CONFIG_BOOTCOMMAND', ''), 'Missing SD payload fallback')
 require('brick.bootdir=${brick_bootdir}' in config.get('CONFIG_BOOTCOMMAND', ''),
         'Booted payload is not identified to userspace')
+require('root=/dev/mmcblk0p2 rootfstype=ext4 rootwait rw' in
+        config.get('CONFIG_BOOTCOMMAND', ''),
+        'Primary product root is not the fixed SD ext4 partition')
+require('booti ${kernel_addr_r} - ${fdt_addr_r}' in
+        config.get('CONFIG_BOOTCOMMAND', ''),
+        'Primary product boot still requires a preloaded initramfs')
 ramdisk_address = 'setenv ramdisk_addr_r 0x50000000;'
 require(ramdisk_address in config.get('CONFIG_BOOTCOMMAND', ''),
         'Primary initramfs overlaps the A133 secure-memory window')
@@ -77,6 +83,8 @@ altbootcmd = config.get('CONFIG_BOOTCOUNT_ALTBOOTCMD', '')
 require('for brick_bootdir in brick-previous brick-baseline;' in altbootcmd,
         'Missing retained-payload rollback')
 require('brick-diag' not in altbootcmd, 'Rollback must not retry the pending payload')
+require('root=/dev/mmcblk0p2' not in altbootcmd,
+        'Rollback must retain its independent initramfs root')
 require(ramdisk_address in altbootcmd,
         'Rollback initramfs overlaps the A133 secure-memory window')
 require(boot_pulse in altbootcmd,

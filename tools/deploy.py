@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update the three boot payloads on an existing Brick development SD card."""
+"""Update a Brick product root from its retained recovery slot."""
 import argparse
 import hashlib
 import json
@@ -15,7 +15,7 @@ import uuid
 from serial_console import Console, DEFAULT_PORT, ProtocolError
 
 PAYLOAD = {'Image': 'Image', 'sun50i-a133-trimui-brick.dtb': 'brick-usb.dtb',
-           'rootfs.cpio.zst': 'initramfs.cpio.zst'}
+           'rootfs.ext4': 'rootfs.ext4'}
 BOOTLOADER = 'u-boot-sunxi-with-spl.bin'
 BOOTLOADER_OFFSET = 128 * 1024
 COMPATIBLE_BOOTLOADER = 'COMPATIBLE-BOOTLOADER-SHA256'
@@ -110,9 +110,8 @@ bootstate_tmp=$mountpoint/.brick-bootcount.pending.{token}
 [ "$($bb cat /sys/class/block/mmcblk0/device/type)" = SD ]
 $bb grep -q 'trimui,brick' /sys/firmware/devicetree/base/compatible
 case " $($bb cat /proc/cmdline) " in
- *' brick.bootdir=brick-diag '*) running=brick-diag ;;
- *' brick.bootdir=brick-previous '*) running=brick-previous ;;
- *) echo "Updater requires brick-diag or brick-previous" >&2; exit 1 ;;
+ *' brick.bootdir=brick-previous '*) ;;
+ *) echo "Storage-root updater requires brick-previous recovery" >&2; exit 1 ;;
 esac
 $bb mkdir /tmp/.brick-update-lock
 mounted=0
@@ -152,21 +151,30 @@ if [ -n "$mounted_device" ]; then
  echo "SD partition is already mounted" >&2
  exit 1
 fi
+root_device=$($bb cat /sys/class/block/mmcblk0p2/dev)
+mounted_root=$($bb awk -v device="$root_device" '$3 == device {{ print $3 }}' /proc/self/mountinfo)
+if [ -n "$mounted_root" ]; then
+ echo "Product root partition is mounted" >&2
+ exit 1
+fi
 $bb mount /dev/mmcblk0p1 "$mountpoint"
 mounted=1
 [ -f "$current/Image" ]
 [ -f "$current/brick-usb.dtb" ]
-# Preserve rollback across the one-time gzip-to-zstd migration.
-[ -f "$current/initramfs.cpio.zst" ] || [ -f "$current/initramfs.cpio.gz" ]
 [ -f "$current/manifest.json" ]
 [ -f "$current/SHA256SUMS" ]
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
+[ -f "$previous/Image" ]
+[ -f "$previous/brick-usb.dtb" ]
+[ -f "$previous/manifest.json" ]
+[ -f "$previous/SHA256SUMS" ]
+(cd "$previous" && $bb sha256sum -c SHA256SUMS)
 [ ! -e "$stage" ]
 # Account for the verified retired directory before deleting it.  Leave a
 # bounded margin for FAT allocation and directory updates so ENOSPC is rejected
 # before any slot or boot state is changed.
 payload_bytes=0
-for name in Image brick-usb.dtb initramfs.cpio.zst SHA256SUMS manifest.json; do
+for name in Image brick-usb.dtb SHA256SUMS manifest.json; do
  size=$($bb wc -c < "$work/payload/$name")
  [ "$size" -gt 0 ]
  payload_bytes=$((payload_bytes + size))
@@ -174,30 +182,9 @@ done
 required_kib=$(( (payload_bytes + 1023) / 1024 + 1024 ))
 available_kib=$($bb df -Pk "$mountpoint" | $bb awk 'END {{ print $(NF - 2) }}')
 case "$available_kib" in *[!0-9]*|'') echo "Cannot determine SD free space" >&2; exit 1 ;; esac
-if [ "$running" = brick-previous ]; then
- [ -d "$previous" ]
- retire=$current
-else
- retire=$previous
-fi
-reclaimable_kib=0
-if [ -d "$previous" ]; then
- [ -f "$previous/manifest.json" ]
- [ -f "$previous/SHA256SUMS" ]
- (cd "$previous" && $bb sha256sum -c SHA256SUMS)
-fi
-if [ -d "$retire" ]; then
- reclaimable_kib=$($bb du -sk "$retire" | $bb awk '{{ print $1 }}')
- case "$reclaimable_kib" in *[!0-9]*|'') echo "Cannot determine retired slot size" >&2; exit 1 ;; esac
-fi
-if [ $((available_kib + reclaimable_kib)) -lt "$required_kib" ]; then
- echo "Insufficient SD space: need ${{required_kib}} KiB, have $((available_kib + reclaimable_kib)) KiB after retiring the non-running slot" >&2
+if [ "$available_kib" -lt "$required_kib" ]; then
+ echo "Insufficient SD space: need ${{required_kib}} KiB, have ${{available_kib}} KiB" >&2
  exit 1
-fi
-# Retire the verified non-running slot. A fallback boot replaces the rejected
-# candidate in place and leaves the boot-working recovery untouched.
-if [ -d "$retire" ]; then
- $bb rm -r "$retire"
 fi
 $bb mkdir "$stage"
 staged=1
@@ -212,38 +199,35 @@ copy_payload_file() {{
  $bb dd if="$source" of="$destination" bs=1048576 2>/dev/null
  [ "$($bb wc -c < "$destination")" = "$expected_size" ]
 }}
-for name in Image brick-usb.dtb initramfs.cpio.zst SHA256SUMS manifest.json; do
+for name in Image brick-usb.dtb manifest.json; do
  copy_payload_file "$work/payload/$name" "$stage/$name"
 done
+$bb grep -v '  rootfs.ext4$' "$work/payload/SHA256SUMS" > "$stage/SHA256SUMS"
 (cd "$stage" && $bb sha256sum -c SHA256SUMS)
-if [ "$running" = brick-diag ]; then
- # Arm rollback before rotating the running candidate. This makes a power loss
- # during either rename recoverable even when the new payload never starts.
- $bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
- $bb sync
- $bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
- $bb sync
- $bb mv "$current" "$previous"
- if ! $bb mv "$stage" "$current"; then
-  if ! $bb mv "$previous" "$current"; then
-   # Preserve both complete copies if restoring the directory also fails.
-   staged=0
-   echo "Restore failed; retained brick-previous and brick-next" >&2
-  fi
-  exit 1
- fi
-else
- # The old bootcount still selects brick-previous while the rejected candidate
- # is absent or replaced. Publish and verify the new candidate before arming it.
- $bb mv "$stage" "$current"
- staged=0
- (cd "$current" && $bb sha256sum -c SHA256SUMS)
- $bb sync
- $bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
- $bb sync
- $bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
- $bb sync
-fi
+# p2 is safe to replace only from the retained initramfs recovery. Recovery
+# remains selected until the root image and candidate boot files both verify.
+rootfs="$work/payload/rootfs.ext4"
+rootfs_bytes=$($bb wc -c < "$rootfs")
+case "$rootfs_bytes" in *[!0-9]*|'') exit 1 ;; esac
+[ $((rootfs_bytes % 1048576)) -eq 0 ]
+partition_sectors=$($bb cat /sys/class/block/mmcblk0p2/size)
+[ "$partition_sectors" = "$((rootfs_bytes / 512))" ] || {{
+ echo "Product root image does not exactly match p2" >&2; exit 1;
+}}
+$bb dd if="$rootfs" of=/dev/mmcblk0p2 bs=1048576 2>/dev/null
+$bb sync
+expected_root=$($bb sha256sum "$rootfs" | $bb awk '{{ print $1 }}')
+installed_root=$($bb dd if=/dev/mmcblk0p2 bs=1048576 count=$((rootfs_bytes / 1048576)) 2>/dev/null | $bb sha256sum | $bb awk '{{ print $1 }}')
+[ "$installed_root" = "$expected_root" ]
+$bb rm -r "$current"
+$bb mv "$stage" "$current"
+staged=0
+(cd "$current" && $bb sha256sum -c SHA256SUMS)
+$bb sync
+$bb printf '\\275\\001\\000\\001' > "$bootstate_tmp"
+$bb sync
+$bb mv "$bootstate_tmp" "$mountpoint/brick-bootcount"
+$bb sync
 staged=0
 (cd "$current" && $bb sha256sum -c SHA256SUMS)
 $bb sync

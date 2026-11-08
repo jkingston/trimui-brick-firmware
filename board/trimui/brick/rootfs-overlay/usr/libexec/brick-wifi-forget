@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 state_root=${WIFI_FORGET_STATE_DIR:-/data/wifi/forget-pending}
-profile_root=${WIFI_CAPTIVE_PROFILE_ROOT:-/data/wifi/captive-browser}
+profile_root=${WIFI_CAPTIVE_PROFILE_ROOT:-/data/captive-browser}
 private_mac=${WIFI_PRIVATE_MAC:-/usr/libexec/brick-wifi-private-mac}
 ctrl=${WIFI_CTRL_DIR:-/run/wpa_supplicant}
 interface=${WIFI_INTERFACE:-wlan0}

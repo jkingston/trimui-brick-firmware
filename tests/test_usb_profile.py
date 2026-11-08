@@ -117,7 +117,7 @@ class ProfileTests(unittest.TestCase):
         canonical.write_bytes(b'stale peripheral DTB')
         usb_profile.install(self.root, self.config, fdtget)
         self.assertEqual(canonical.read_bytes(), expected)
-        for name in ['Image', 'rootfs.cpio.zst', 'u-boot-sunxi-with-spl.bin']:
+        for name in ['Image', 'rootfs.ext4', 'u-boot-sunxi-with-spl.bin']:
             (self.root / name).write_bytes(name.encode())
         (self.root / 'kernel.release').write_text('test-kernel\n')
         subprocess.run([sys.executable, str(ROOT / 'tools/manifest.py'), '--payload',

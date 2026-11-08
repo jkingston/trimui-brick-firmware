@@ -27,7 +27,7 @@ http://*|https://*) ;;
 esac
 case $url in *[![:print:]]*|*' '*) die 'portal URL contains whitespace or controls' ;; esac
 
-profile_root=${BRICK_CAPTIVE_PROFILE_ROOT:-/data/wifi/captive-browser}
+profile_root=${BRICK_CAPTIVE_PROFILE_ROOT:-/data/captive-browser}
 profile_owner=${BRICK_CAPTIVE_PROFILE_OWNER:-brick-captive:brick-captive}
 runtime_root=${BRICK_CAPTIVE_RUNTIME_ROOT:-/run/brick-captive-browser}
 pause_hook=${BRICK_DISPLAY_PAUSE_HOOK:-}
@@ -50,7 +50,11 @@ case $kill_grace_ticks in ''|*[!0-9]*) die 'kill grace ticks must be numeric' ;;
 [ ! -L "$profile_root" ] || die 'profile root must not be a symlink'
 [ ! -L "$runtime_root" ] || die 'runtime root must not be a symlink'
 mkdir -p "$profile_root" "$runtime_root"
-chmod 700 "$profile_root" "$runtime_root"
+# The unprivileged browser must traverse the root to its own hashed profile,
+# but must not be able to enumerate other networks.  Per-network directories
+# below remain 0700 and owned by the dedicated captive account.
+chmod 711 "$profile_root"
+chmod 700 "$runtime_root"
 
 # The launcher hashes the canonical network identity once.  Construct and
 # permission the same directory here; using the unhashed key would create an

@@ -1,5 +1,12 @@
 include $(sort $(wildcard $(BR2_EXTERNAL_BRICK_PATH)/package/*/*.mk))
 
+# Buildroot only supplies curl's system CA bundle for its OpenSSL and wolfSSL
+# backends.  The product uses GnuTLS so curl and WebKit share one TLS stack;
+# give curl the same installed Debian CA bundle explicitly.
+ifeq ($(BR2_PACKAGE_LIBCURL_GNUTLS),y)
+LIBCURL_CONF_OPTS += --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+endif
+
 # Record the selected source even when Buildroot uses a local checkout.
 BRICK_KERNEL_REVISION = $(LINUX_VERSION)
 ifeq ($(BR2_LINUX_KERNEL_CUSTOM_TARBALL),y)

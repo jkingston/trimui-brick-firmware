@@ -2,7 +2,7 @@
 # Mount board-owned persistent state before services which consume it.
 set -eu
 umask 077
-device=/dev/mmcblk0p2
+device=/dev/mmcblk0p3
 state=/run/brick-data
 mkdir -p "$state"
 exec 9>"$state/lock"
@@ -21,7 +21,7 @@ mounted_here() {
 	awk '$5 == "/data" { found=1 } END { exit !found }' /proc/self/mountinfo
 }
 verify_mount() {
-	devnum=$(cat /sys/class/block/mmcblk0p2/dev) || return 1
+	devnum=$(cat /sys/class/block/mmcblk0p3/dev) || return 1
 	awk -v devnum="$devnum" '
 	$5 == "/data" {
 		if ($3 != devnum || $4 != "/" || $6 !~ /(^|,)rw(,|$)/) exit 1
@@ -82,10 +82,10 @@ start)
 		set -- $(od -An -tu1 -j"$offset" -N1 "$state/mbr")
 		[ "$1" -ne 238 ] || fail 'GPT data layout is unsupported'
 	done
-	set -- $(od -An -tu1 -j462 -N16 "$state/mbr")
+	set -- $(od -An -tu1 -j478 -N16 "$state/mbr")
 	[ "$#" -eq 16 ] || fail 'cannot decode data partition'
 	if [ "$*" = '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0' ]; then
-		[ ! -e /sys/class/block/mmcblk0p2 ] || fail 'partition table changed during discovery'
+		[ ! -e /sys/class/block/mmcblk0p3 ] || fail 'partition table changed during discovery'
 		mounted_here && fail 'unexpected mount at /data'
 		status volatile
 		echo 'No data partition; settings are temporary'
@@ -96,20 +96,20 @@ start)
 	size=$((${13} + (${14} << 8) + (${15} << 16) + (${16} << 24)))
 	[ "$start" -gt 0 ] && [ "$size" -gt 0 ] || fail 'empty data partition extent'
 	attempt=0
-	while [ ! -b "$device" ] || [ ! -r /sys/class/block/mmcblk0p2/size ]; do
+	while [ ! -b "$device" ] || [ ! -r /sys/class/block/mmcblk0p3/size ]; do
 		[ "$attempt" -lt 50 ] || fail 'data partition did not appear'
 		sleep 0.1
 		attempt=$((attempt + 1))
 	done
-	[ "$(cat /sys/class/block/mmcblk0p2/start)" = "$start" ] &&
-		[ "$(cat /sys/class/block/mmcblk0p2/size)" = "$size" ] || fail 'kernel partition does not match MBR'
+	[ "$(cat /sys/class/block/mmcblk0p3/start)" = "$start" ] &&
+		[ "$(cat /sys/class/block/mmcblk0p3/size)" = "$size" ] || fail 'kernel partition does not match MBR'
 	disk_size=$(cat /sys/class/block/mmcblk0/size) || fail 'cannot read SD capacity'
 	target_size=$((disk_size - start))
 	[ "$target_size" -ge "$size" ] || fail 'data partition exceeds SD capacity'
 	if [ "$target_size" -gt "$size" ]; then
 		brick-grow-data /dev/mmcblk0 || fail 'cannot extend data partition'
 		attempt=0
-		while [ "$(cat /sys/class/block/mmcblk0p2/size 2>/dev/null || true)" != "$target_size" ]; do
+		while [ "$(cat /sys/class/block/mmcblk0p3/size 2>/dev/null || true)" != "$target_size" ]; do
 			[ "$attempt" -lt 50 ] || fail 'kernel did not reload extended data partition'
 			sleep 0.1
 			attempt=$((attempt + 1))
@@ -124,7 +124,7 @@ start)
 	if mounted_here; then
 		fail 'data was already mounted outside this service'
 	fi
-	mount -t ext4 -o nodev,nosuid,noexec /dev/mmcblk0p2 /data || fail 'mount failed'
+	mount -t ext4 -o nodev,nosuid,noexec /dev/mmcblk0p3 /data || fail 'mount failed'
 	: > "$state/mount-owned"
 	verify_mount || fail 'mount is not the expected writable filesystem'
 	[ ! -L /data/.partition-sectors ] || fail 'partition size marker is a symlink'
@@ -148,6 +148,12 @@ start)
 	for directory in wifi bluetooth bluealsa dropbear ssh dbus seedrng settings; do
 		private_dir "/data/$directory" || fail 'cannot prepare private directory'
 	done
+	# Captive-browser profiles are individually private, but the dedicated
+	# unprivileged account needs to traverse this root to reach its own hashed
+	# profile.  Execute-only access prevents enumeration and keeps Wi-Fi
+	# credentials in the separate 0700 /data/wifi directory.
+	private_dir /data/captive-browser || fail 'cannot prepare captive profile root'
+	chmod 711 /data/captive-browser || fail 'cannot expose captive profile traversal'
 	# D-Bus clients read the public machine ID after dropping privileges.
 	chmod 755 /data /data/dbus || fail 'cannot expose public machine identity'
 	# Seed from an immutable firmware default, never from live RAM credentials.

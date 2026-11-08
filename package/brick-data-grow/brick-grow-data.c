@@ -14,7 +14,8 @@
 #define SECTOR_SIZE 512U
 #define TABLE_OFFSET 446U
 #define ENTRY_SIZE 16U
-#define DATA_ENTRY 1U
+#define ROOT_ENTRY 1U
+#define DATA_ENTRY 2U
 
 static uint32_t read_le32(const uint8_t *value)
 {
@@ -49,9 +50,9 @@ static void die(const char *message)
 
 int main(int argc, char **argv)
 {
-	uint8_t mbr[SECTOR_SIZE], *boot, *data;
+	uint8_t mbr[SECTOR_SIZE], *boot, *root, *data;
 	uint64_t bytes, sectors, target;
-	uint32_t boot_start, boot_size, start, size;
+	uint32_t boot_start, boot_size, root_start, root_size, start, size;
 	struct stat status;
 	int fd, block;
 
@@ -82,17 +83,21 @@ int main(int argc, char **argv)
 	if (mbr[510] != 0x55 || mbr[511] != 0xaa)
 		die("invalid MBR signature");
 	boot = mbr + TABLE_OFFSET;
+	root = boot + ROOT_ENTRY * ENTRY_SIZE;
 	data = boot + DATA_ENTRY * ENTRY_SIZE;
-	if (boot[4] != 0x0c || data[4] != 0x83)
+	if (boot[4] != 0x0c || root[4] != 0x83 || data[4] != 0x83)
 		die("unexpected partition types");
-	if (!all_zero(data + ENTRY_SIZE, ENTRY_SIZE * 2))
+	if (!all_zero(data + ENTRY_SIZE, ENTRY_SIZE))
 		die("partitions after data are not empty");
 	boot_start = read_le32(boot + 8);
 	boot_size = read_le32(boot + 12);
+	root_start = read_le32(root + 8);
+	root_size = read_le32(root + 12);
 	start = read_le32(data + 8);
 	size = read_le32(data + 12);
-	if (!boot_start || !boot_size || !start || !size ||
-	    (uint64_t)boot_start + boot_size > start ||
+	if (!boot_start || !boot_size || !root_start || !root_size || !start || !size ||
+	    (uint64_t)boot_start + boot_size > root_start ||
+	    (uint64_t)root_start + root_size > start ||
 	    (uint64_t)start + size > sectors)
 		die("invalid partition extents");
 	target = sectors - start;
